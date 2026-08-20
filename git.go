@@ -127,8 +127,19 @@ func runPostCreate(w *Worktree) error {
 
 // diffAttributes enables git's builtin funcname drivers so hunk headers
 // carry the enclosing function. Blast radius reads those headers, so this
-// is what makes it work at all. Languages with no builtin driver simply
-// produce empty hunk headers and degrade to "no symbol detected".
+// is what makes it work at all.
+//
+// Without a driver git falls back to a generic heuristic that takes the last
+// preceding unindented line, which for an indented method reports the
+// enclosing class instead of the method — the wrong symbol, silently.
+//
+// This file is written inside .ctui and passed to git per-invocation via
+// -c core.attributesFile. We never write to the repository's own
+// .git/info/attributes: users legitimately keep custom diff, merge and
+// textconv rules there, and no amount of careful merging into a shared file
+// we do not own is worth the risk of eating them. core.attributesFile also
+// sits at the lowest precedence, so a rule the user set anywhere still wins
+// over ours, which is the correct relationship.
 const diffAttributes = `*.go diff=golang
 *.py diff=python
 *.rs diff=rust
@@ -155,87 +166,27 @@ const diffAttributes = `*.go diff=golang
 // `git diff` would silently omit every file they created. Staging is
 // harmless here because the worktree is disposable.
 func (w *Worktree) Diff() (string, error) {
-	if err := w.writeAttributes(); err != nil {
+	attrs, err := w.writeAttributes()
+	if err != nil {
 		return "", err
 	}
 	if _, err := git(w.Path, "add", "-A"); err != nil {
 		return "", err
 	}
-	return git(w.Path, "diff", "--cached", w.Base)
+	return git(w.Path, "-c", "core.attributesFile="+attrs,
+		"diff", "--cached", w.Base)
 }
 
-func (w *Worktree) writeAttributes() error {
-	// --git-common-dir, not --git-dir: info/ is shared across worktrees, and
-	// a per-worktree attributes file would simply not be read.
-	gitDir, err := git(w.Path, "rev-parse", "--git-common-dir")
-	if err != nil {
-		return err
-	}
-	if !filepath.IsAbs(gitDir) {
-		gitDir = filepath.Join(w.Path, gitDir)
-	}
-	path := filepath.Join(gitDir, "info", "attributes")
+// writeAttributes drops our driver mappings in .ctui and returns the path,
+// for the caller to pass to git as core.attributesFile. It owns this file
+// completely, so it can truncate without reading anything first.
+func (w *Worktree) writeAttributes() (string, error) {
+	path := filepath.Join(w.Repo, ".ctui", "attributes")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
+		return "", err
 	}
-
-	// Read existing content to preserve user's settings.
-	existing, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return err
+	if err := os.WriteFile(path, []byte(diffAttributes), 0o644); err != nil {
+		return "", err
 	}
-
-	// Remove well-formed ctui blocks, preserving user content and orphaned markers.
-	// Scan for blocks: if a close marker exists and no other open marker appears
-	// before it, the block is well-formed and removed. Otherwise, the open marker
-	// is orphaned and preserved as user content.
-	var result strings.Builder
-	content := string(existing)
-	pos := 0
-
-	for {
-		// Find next open marker from current position.
-		start := strings.Index(content[pos:], "# >>> ctui")
-		if start == -1 {
-			// No more markers; write the rest and done.
-			result.WriteString(content[pos:])
-			break
-		}
-		start += pos // convert to absolute index
-
-		// From just after the open marker, find the next close and next open.
-		searchStart := start + len("# >>> ctui")
-		closeIdx := strings.Index(content[searchStart:], "# <<< ctui")
-		nextOpenIdx := strings.Index(content[searchStart:], "# >>> ctui")
-
-		// Well-formed block: close exists and no other open marker before it.
-		if closeIdx != -1 && (nextOpenIdx == -1 || closeIdx < nextOpenIdx) {
-			// Convert relative index to absolute.
-			endIdx := searchStart + closeIdx + len("# <<< ctui")
-			// Include trailing newline if present.
-			if endIdx < len(content) && content[endIdx] == '\n' {
-				endIdx++
-			}
-			// Write content before this block, skip the block.
-			result.WriteString(content[pos:start])
-			pos = endIdx
-		} else {
-			// Orphaned marker: preserve it as user content, continue after the marker.
-			result.WriteString(content[pos : start+len("# >>> ctui")])
-			pos = start + len("# >>> ctui")
-		}
-	}
-
-	content = result.String()
-
-	// Ensure trailing newline before appending new block.
-	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
-		content += "\n"
-	}
-
-	// Append new ctui block with markers.
-	newBlock := "# >>> ctui\n" + diffAttributes + "# <<< ctui\n"
-	content += newBlock
-
-	return os.WriteFile(path, []byte(content), 0o644)
+	return path, nil
 }

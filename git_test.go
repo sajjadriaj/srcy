@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -189,27 +190,6 @@ func TestDiffIsEmptyWhenNothingChanged(t *testing.T) {
 	}
 }
 
-func TestDiffHunkHeadersCarryFunctionNames(t *testing.T) {
-	repo := newRepo(t)
-	write(t, repo, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 3\n\treturn nil\n}\n")
-	git(repo, "add", "-A")
-	git(repo, "commit", "-qm", "svc")
-
-	wt, err := CreateWorktree(repo, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	write(t, wt.Path, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 4\n\treturn nil\n}\n")
-
-	d, err := wt.Diff()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(d, "@@ ") || !strings.Contains(d, "func Get") {
-		t.Fatalf("hunk header lost its function name — the attributes file is not where git reads it:\n%s", d)
-	}
-}
-
 func TestCreateWorktreeRollsBackOnPostcreateFailure(t *testing.T) {
 	repo := newRepo(t)
 	// Create a failing postcreate script.
@@ -241,182 +221,83 @@ func TestCreateWorktreeRollsBackOnPostcreateFailure(t *testing.T) {
 	}
 }
 
-func TestDiffPreservesUserAttributesFile(t *testing.T) {
+func TestDiffHunkHeadersCarryFunctionNames(t *testing.T) {
 	repo := newRepo(t)
+	write(t, repo, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 3\n\treturn nil\n}\n")
+	git(repo, "add", "-A")
+	git(repo, "commit", "-qm", "svc")
+
 	wt, err := CreateWorktree(repo, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	write(t, wt.Path, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 4\n\treturn nil\n}\n")
 
-	// Pre-write a custom attributes file with user rules.
-	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	d, err := wt.Diff()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(repo, gitCommonDir)
-	}
-	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
-	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	userContent := "*.custom diff=mine\n"
-	if err := os.WriteFile(attrsPath, []byte(userContent), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Call Diff() twice.
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify custom rule is still there exactly once.
-	content, err := os.ReadFile(attrsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentStr := string(content)
-	if !strings.Contains(contentStr, "*.custom diff=mine") {
-		t.Fatal("user's custom attributes rule was lost")
-	}
-	if strings.Count(contentStr, "*.custom diff=mine") != 1 {
-		t.Fatalf("custom rule appears multiple times:\n%s", contentStr)
-	}
-
-	// Verify exactly one ctui block (markers should not accumulate).
-	if strings.Count(contentStr, "# >>> ctui") != 1 {
-		t.Fatalf("ctui marker appears %d times, want 1:\n%s", strings.Count(contentStr, "# >>> ctui"), contentStr)
+	if !strings.Contains(d, "@@ ") || !strings.Contains(d, "func Get") {
+		t.Fatalf("hunk header lost its function name — git is not reading our attributes file:\n%s", d)
 	}
 }
 
-func TestDiffHandlesOrphanedOpenMarker(t *testing.T) {
+// The driver must beat git's generic fallback, which reports the enclosing
+// class for an indented method — the wrong symbol, and silently wrong.
+func TestDiffFindsIndentedMethodNotEnclosingClass(t *testing.T) {
 	repo := newRepo(t)
+	body := "class Widget:\n    def retry_after(self, n):\n"
+	for i := 1; i <= 12; i++ {
+		body += fmt.Sprintf("        a%d = %d\n", i, i)
+	}
+	write(t, repo, "w.py", body)
+	git(repo, "add", "-A")
+	git(repo, "commit", "-qm", "w")
+
 	wt, err := CreateWorktree(repo, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	write(t, wt.Path, "w.py", strings.Replace(body, "a10 = 10", "a10 = 99", 1))
 
-	// Pre-write attributes with orphaned open marker and user content.
-	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	d, err := wt.Diff()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(repo, gitCommonDir)
-	}
-	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
-	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(attrsPath, []byte("# >>> ctui\nmy custom line\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Call Diff() twice.
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify custom line is still present.
-	content, err := os.ReadFile(attrsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(content), "my custom line") {
-		t.Fatalf("orphaned marker caused loss of user content:\n%s", content)
+	if !strings.Contains(d, "def retry_after") {
+		t.Fatalf("want the method in the hunk header, got:\n%s", d)
 	}
 }
 
-func TestDiffRemovesMultipleCtUIBlocks(t *testing.T) {
+// We must never read, write, or otherwise disturb the repository's own
+// attributes file. Users keep real configuration there.
+func TestDiffLeavesUserAttributesFileAlone(t *testing.T) {
 	repo := newRepo(t)
+	attrs := filepath.Join(repo, ".git", "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(attrs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const userContent = "*.custom diff=mine\n*.secret filter=crypt\n"
+	if err := os.WriteFile(attrs, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	wt, err := CreateWorktree(repo, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
+	write(t, wt.Path, "a.txt", "one\ntwo\n")
+	for i := 0; i < 3; i++ {
+		if _, err := wt.Diff(); err != nil {
+			t.Fatal(err)
+		}
+	}
 
-	// Pre-write attributes with two ctui blocks and a user line between them.
-	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	got, err := os.ReadFile(attrs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(repo, gitCommonDir)
-	}
-	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
-	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	doubleBlock := "# >>> ctui\n*.old diff=golang\n# <<< ctui\nmy user line\n# >>> ctui\n*.older diff=python\n# <<< ctui\n"
-	if err := os.WriteFile(attrsPath, []byte(doubleBlock), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Call Diff() to rewrite blocks.
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify both old blocks are gone, user line survives, exactly one ctui block remains.
-	content, err := os.ReadFile(attrsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentStr := string(content)
-	if strings.Contains(contentStr, "*.old") || strings.Contains(contentStr, "*.older") {
-		t.Fatalf("old ctui blocks not removed:\n%s", contentStr)
-	}
-	if !strings.Contains(contentStr, "my user line") {
-		t.Fatalf("user line between blocks was lost:\n%s", contentStr)
-	}
-	if strings.Count(contentStr, "# >>> ctui") != 1 {
-		t.Fatalf("expected 1 ctui block, got %d:\n%s", strings.Count(contentStr, "# >>> ctui"), contentStr)
-	}
-}
-
-func TestDiffPreservesOrphanedCloseMarker(t *testing.T) {
-	repo := newRepo(t)
-	wt, err := CreateWorktree(repo, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Pre-write attributes with orphaned close marker (user typed/copy-pasted).
-	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !filepath.IsAbs(gitCommonDir) {
-		gitCommonDir = filepath.Join(repo, gitCommonDir)
-	}
-	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
-	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(attrsPath, []byte("some custom config\n# <<< ctui\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Call Diff() to add ctui block.
-	if _, err := wt.Diff(); err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify orphaned close marker is still present.
-	content, err := os.ReadFile(attrsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	contentStr := string(content)
-	if !strings.Contains(contentStr, "# <<< ctui") {
-		t.Fatalf("orphaned close marker was removed:\n%s", contentStr)
-	}
-	if !strings.Contains(contentStr, "some custom config") {
-		t.Fatalf("custom config was lost:\n%s", contentStr)
+	if string(got) != userContent {
+		t.Fatalf("ctui modified the user's attributes file.\nwant %q\ngot  %q", userContent, got)
 	}
 }
