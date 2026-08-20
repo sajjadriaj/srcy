@@ -1,9 +1,9 @@
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createWorktree, git } from "../src/git.js";
-import { countOr1, hunkRe, splitDiff } from "../src/diff.js";
+import { applyPatch, commitAccepted, createWorktree, git, why } from "../src/git.js";
+import { buildPatch, countOr1, hunkRe, patchPaths, Review, splitDiff } from "../src/diff.js";
 import { newRepo, write } from "./helpers.js";
 
 test("git returns trimmed stdout", async (t) => {
@@ -292,4 +292,188 @@ test("diff path for tab in filename", async (t) => {
   assert.equal(files.length, 1);
   assert.equal(files[0].path, name);
   await git(wt.path, "ls-files", "--error-unmatch", "--", files[0].path);
+});
+
+test("applyPatch lands in the real repo", async (t) => {
+  const repo = await newRepo(t);
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "one\ntwo\n");
+
+  const raw = await wt.diff();
+  const patch = buildPatch(splitDiff(raw), () => true);
+  await applyPatch(repo, patch);
+
+  const got = await readFile(join(repo, "a.txt"), "utf8");
+  assert.equal(got, "one\ntwo\n");
+});
+
+// A failed apply must change nothing at all — not even a partial write. The
+// review gate's whole promise depends on this: a rejected patch never
+// leaves the repo half-changed.
+test("applyPatch leaves repo untouched on conflict", async (t) => {
+  const repo = await newRepo(t);
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "agent version\n");
+  const raw = await wt.diff();
+  const patch = buildPatch(splitDiff(raw), () => true);
+
+  // The user edited the same line in the meantime, without staging it.
+  await write(repo, "a.txt", "my version\n");
+  const before = await readFile(join(repo, "a.txt"));
+
+  await assert.rejects(applyPatch(repo, patch), "expected a conflict");
+
+  const after = await readFile(join(repo, "a.txt"));
+  assert.ok(before.equals(after), "a failed apply must leave the file byte-identical");
+});
+
+// Selecting one hunk of two must apply only that hunk. The two edits below
+// sit far enough apart (default diff context is 3 lines) to land in
+// separate hunks; if the selection logic degraded to "everything selected",
+// the second, unselected edit would show up in the repo too.
+test("selecting one hunk of two applies only that hunk", async (t) => {
+  const repo = await newRepo(t);
+  const lines: string[] = [];
+  for (let i = 1; i <= 20; i++) lines.push(`l${i}`);
+  const original = lines.join("\n") + "\n";
+  await write(repo, "a.txt", original);
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "seed a.txt");
+
+  const wt = await createWorktree(repo, "s1");
+  const changed = lines.slice();
+  changed[1] = "TWO-changed"; // line 2
+  changed[17] = "EIGHTEEN-changed"; // line 18
+  await write(wt.path, "a.txt", changed.join("\n") + "\n");
+
+  const raw = await wt.diff();
+  const r = new Review(raw);
+  assert.equal(r.files.length, 1);
+  assert.equal(r.files[0].hunks.length, 2, "the two edits should have landed in separate hunks");
+
+  r.toggle(); // select only hunk 0 (cursor starts at fi=0, hi=0)
+  await applyPatch(repo, r.patch());
+
+  const got = (await readFile(join(repo, "a.txt"), "utf8")).split("\n");
+  assert.equal(got[1], "TWO-changed", "the selected hunk should have applied");
+  assert.equal(got[17], "l18", "the unselected hunk must be absent from the repo");
+});
+
+test("commitAccepted writes trailers", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "changed\n");
+  await git(repo, "add", "-A");
+
+  await commitAccepted(
+    repo,
+    ["a.txt"],
+    "tts: fall back to silent audio",
+    "Falls back to ffmpeg silence when kokoro is missing.\nNot tested without kokoro.",
+    "claude-1",
+    "add tts, kokoro if available",
+  );
+
+  const msg = await git(repo, "log", "-1", "--format=%B");
+  for (const want of [
+    "tts: fall back to silent audio",
+    "Not tested without kokoro.",
+    "Ctui-Session: claude-1",
+    "Ctui-Prompt: add tts, kokoro if available",
+  ]) {
+    assert.ok(msg.includes(want), `commit message missing ${JSON.stringify(want)}:\n${msg}`);
+  }
+});
+
+// Trailers are single-line by definition. A multi-line prompt must be
+// folded, not allowed to break the trailer block. Checked against git's own
+// trailer parser, not just string-matching the raw message.
+test("commitAccepted flattens a multi-line prompt", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "changed\n");
+  await git(repo, "add", "-A");
+
+  await commitAccepted(repo, ["a.txt"], "s", "b", "claude-1", "line one\nline two\nline three");
+
+  const msg = await git(repo, "log", "-1", "--format=%B");
+  assert.ok(msg.includes("Ctui-Prompt: line one line two line three"), `prompt not flattened:\n${msg}`);
+
+  const out = await git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Prompt,valueonly)");
+  assert.notEqual(out.trim(), "", `git does not see the trailer: ${JSON.stringify(out)}`);
+  assert.equal(out.trim(), "line one line two line three");
+});
+
+// A bare `git commit` commits everything in the index. If the user had
+// unrelated work staged before launching ctui, it must never be swept into
+// a commit whose trailers claim the agent authored it.
+test("commitAccepted ignores unrelated staged work", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "changed\n");
+  await write(repo, "mine.txt", "my own staged work\n");
+  await git(repo, "add", "-A");
+
+  await commitAccepted(repo, ["a.txt"], "s", "b", "claude-1", "p");
+
+  const out = await git(repo, "show", "--name-only", "--format=", "HEAD");
+  assert.ok(!out.includes("mine.txt"), `the user's own staged file was swept into the agent's commit:\n${out}`);
+
+  const status = await git(repo, "status", "--porcelain");
+  assert.ok(status.includes("mine.txt"), "the unrelated file should still be staged, just not committed");
+});
+
+test("commitAccepted refuses to commit with no paths", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "changed\n");
+  await git(repo, "add", "-A");
+  await assert.rejects(commitAccepted(repo, [], "s", "b", "claude-1", "p"), "expected a refusal, not a fallback to committing everything");
+});
+
+// End-to-end: a rename accepted through the real accept path (diff -> review
+// selection -> applyPatch -> patchPaths -> commitAccepted) must leave
+// `git status` clean. `git apply --index` stages a rename as a delete of
+// the old path plus an add of the new one; if the commit were scoped to
+// only the new path, the delete would still be sitting in the index.
+test("a rename accepted end-to-end leaves git status clean", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "old.txt", "one\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "add old.txt");
+
+  const wt = await createWorktree(repo, "s1");
+  await rename(join(wt.path, "old.txt"), join(wt.path, "new.txt"));
+
+  const raw = await wt.diff();
+  const r = new Review(raw);
+  assert.equal(r.files.length, 1);
+  assert.equal(r.files[0].hunks.length, 0, "a pure rename has no hunks");
+  r.toggle(); // select the whole (hunkless) rename
+
+  await applyPatch(repo, r.patch());
+  const paths = patchPaths(r.files, (fi, hi) => r.selected(fi, hi));
+  await commitAccepted(repo, paths, "rename old to new", "", "claude-1", "rename old.txt to new.txt");
+
+  const status = await git(repo, "status", "--porcelain");
+  assert.equal(status, "", `git status not clean after accepting a rename:\n${status}`);
+});
+
+test("why resolves a line to its accepting commit", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "one\ntarget line\n");
+  await git(repo, "add", "-A");
+  await commitAccepted(repo, ["a.txt"], "add the target", "because the test needs it", "claude-1", "add a target line");
+
+  // Churn the file afterwards, the way a real repo does. `git log -L` must
+  // still trace the line back through this.
+  await write(repo, "a.txt", "zero\none\ntarget line\nthree\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "unrelated churn");
+
+  const got = await why(repo, "a.txt", 3); // "target line" is now line 3
+  assert.ok(got.length > 0, "no provenance found");
+  const found = got.some((p) => p.session === "claude-1" && p.prompt === "add a target line");
+  assert.ok(found, `accepting commit not in history: ${JSON.stringify(got)}`);
+});
+
+test("why on a path with no history errors clearly", async (t) => {
+  const repo = await newRepo(t);
+  await assert.rejects(why(repo, "nope.txt", 1), "expected an error for a file with no history");
 });

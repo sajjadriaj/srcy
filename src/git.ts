@@ -14,13 +14,20 @@ interface ExecResult {
   stderr: string;
 }
 
-async function run(dir: string, args: string[]): Promise<ExecResult> {
+// run executes git. When `stdin` is given it is written to the child's
+// stdin and the pipe closed — used for patches and commit messages, neither
+// of which fits on a command line.
+async function run(dir: string, args: string[], stdin?: string): Promise<ExecResult> {
   try {
-    const { stdout, stderr } = await execFileAsync("git", args, {
+    const child = execFileAsync("git", args, {
       cwd: dir,
       encoding: "utf8",
       maxBuffer: MAX_BUFFER,
     });
+    if (stdin !== undefined) {
+      child.child.stdin?.end(stdin, "utf8");
+    }
+    const { stdout, stderr } = await child;
     return { stdout, stderr };
   } catch (err) {
     const e = err as NodeJS.ErrnoException & { stderr?: string; code?: number | string };
@@ -45,6 +52,13 @@ export async function git(dir: string, ...args: string[]): Promise<string> {
 export async function gitRaw(dir: string, ...args: string[]): Promise<string> {
   const { stdout } = await run(dir, args);
   return stdout;
+}
+
+// gitStdin runs git with `input` written to its stdin — for a patch or a
+// commit message, neither of which belongs on a command line.
+async function gitStdin(dir: string, input: string, ...args: string[]): Promise<string> {
+  const { stdout } = await run(dir, args, input);
+  return stdout.trim();
 }
 
 // Worktree is one session's isolated checkout.
@@ -222,4 +236,99 @@ async function runPostCreate(w: Worktree): Promise<void> {
     const out = `${e.stdout ?? ""}${e.stderr ?? ""}`;
     throw new Error(`postcreate: ${e.message}: ${out}`);
   }
+}
+
+// applyPatch applies a patch to the user's repository.
+//
+// --3way lets git use blob context to place a hunk whose surroundings have
+// drifted; --index keeps the working tree and index in step so the commit
+// that follows sees exactly what was applied. On failure git applies
+// nothing, which is the behaviour the review gate depends on: a rejected
+// patch must never leave the repo half-changed. The thrown error carries
+// git's stderr verbatim (via gitStdin -> run).
+export async function applyPatch(repo: string, patch: string): Promise<void> {
+  await gitStdin(repo, patch, "apply", "--3way", "--index", "-");
+}
+
+// commitAccepted commits ONLY the given paths, carrying the agent's own
+// summary as the body and the provenance as trailers.
+//
+// This is what makes `why` free: `git log -L` already tracks a line through
+// renames, moves and reformatting, so storing provenance in the commit
+// means no sidecar file to keep in sync and nothing to lose.
+export async function commitAccepted(
+  repo: string,
+  paths: string[],
+  subject: string,
+  body: string,
+  session: string,
+  prompt: string,
+): Promise<void> {
+  if (paths.length === 0) {
+    throw new Error("refusing to commit: no paths");
+  }
+  let msg = subject;
+  if (body !== "") {
+    msg += "\n\n" + body;
+  }
+  msg += "\n\n" + `Ctui-Session: ${flattenTrailer(session)}\n` + `Ctui-Prompt: ${flattenTrailer(prompt)}\n`;
+
+  // Scope the commit to exactly the paths we applied. A bare `git commit`
+  // would sweep in whatever the user already had staged and stamp it with
+  // trailers claiming the agent wrote it — false provenance is worse than
+  // none, and this tool exists to make provenance trustworthy.
+  await gitStdin(repo, msg, "commit", "-q", "-F", "-", "--", ...paths);
+}
+
+// flattenTrailer folds a value onto one line. Git trailers are line-based,
+// so an embedded newline would silently end the trailer block and take the
+// provenance with it.
+function flattenTrailer(s: string): string {
+  return s.split(/\s+/).filter((w) => w !== "").join(" ");
+}
+
+// Provenance is one commit that touched the line in question.
+export interface Provenance {
+  sha: string;
+  date: string;
+  session: string;
+  prompt: string;
+  body: string;
+}
+
+// A marker prefix on our own --format output. -L forces patch output, and a
+// diff body can contain anything, including 40-hex strings, so a plain scan
+// for "looks like a commit line" is not safe — this makes commit lines
+// unambiguous.
+const whyMarker = "CTUI\x1f";
+
+// why answers "why does this line exist" by walking the line's own history.
+//
+// `git log -L` follows a line through renames, moves and reformatting,
+// which is the hard part of line-level provenance and the reason this is a
+// git query rather than a database.
+export async function why(repo: string, file: string, line: number): Promise<Provenance[]> {
+  const out = await git(
+    repo,
+    "log",
+    `-L${line},${line}:${file}`,
+    `--format=${whyMarker}%H\x1f%ad`,
+    "--date=short",
+  );
+
+  const res: Provenance[] = [];
+  for (const l of out.split("\n")) {
+    if (!l.startsWith(whyMarker)) continue;
+    const parts = l.split("\x1f");
+    if (parts.length < 3) continue;
+    const sha = parts[1];
+    const date = parts[2];
+    const [session, prompt, body] = await Promise.all([
+      git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Session,valueonly)", sha),
+      git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Prompt,valueonly)", sha),
+      git(repo, "log", "-1", "--format=%b", sha),
+    ]);
+    res.push({ sha, date, session, prompt, body });
+  }
+  return res;
 }

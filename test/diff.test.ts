@@ -2,8 +2,8 @@ import { chmod, readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPatch, splitDiff } from "../src/diff.js";
-import { createWorktree, git } from "../src/git.js";
+import { buildPatch, changedLines, patchPaths, Review, splitDiff } from "../src/diff.js";
+import { applyPatch, createWorktree, git } from "../src/git.js";
 import { newRepo, write } from "./helpers.js";
 
 const twoFileDiff = `diff --git a/a.txt b/a.txt
@@ -280,25 +280,98 @@ test("buildPatch keeps hunkless file sections", async (t) => {
 
 // The unit tests above use hand-written diffs. This one proves the splitter
 // survives git's real output and that the reassembled patch still applies.
-//
-// applyPatch is implemented in Task 8; until then this test is skipped, and
-// the call to it stays commented out below so the file still type-checks
-// (a skipped test's body is still type-checked — an undefined reference
-// would fail the build even though the test never runs).
-test(
-  "buildPatch round-trips through git apply",
-  { skip: "unskipped in Task 8, once applyPatch exists" },
-  async (t) => {
-    const repo = await newRepo(t);
-    const wt = await createWorktree(repo, "s1");
-    await write(wt.path, "a.txt", "one\ntwo\n");
-    await write(wt.path, "new.txt", "brand new\n");
+test("buildPatch round-trips through git apply", async (t) => {
+  const repo = await newRepo(t);
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "one\ntwo\n");
+  await write(wt.path, "new.txt", "brand new\n");
 
-    const raw = await wt.diff();
-    const patch = buildPatch(splitDiff(raw), () => true);
-    assert.equal(patch, raw, "selecting everything must reproduce the diff byte for byte");
-    // await applyPatch(repo, patch);
-    const got = await readFile(join(repo, "new.txt"), "utf8");
-    assert.equal(got, "brand new\n");
-  },
-);
+  const raw = await wt.diff();
+  const patch = buildPatch(splitDiff(raw), () => true);
+  assert.equal(patch, raw, "selecting everything must reproduce the diff byte for byte");
+  await applyPatch(repo, patch);
+  const got = await readFile(join(repo, "new.txt"), "utf8");
+  assert.equal(got, "brand new\n");
+});
+
+// changedLines marks the new-side line numbers a file's hunks touch, for
+// the file view's gutter.
+test("changedLines marks new-side ranges", () => {
+  const files = splitDiff(twoFileDiff);
+  const got = changedLines(files[0]);
+  // Hunk one covers new lines 1..3, hunk two covers new lines 11..12.
+  for (const n of [1, 2, 3, 11, 12]) {
+    assert.ok(got.has(n), `line ${n} should be marked changed`);
+  }
+  assert.ok(!got.has(7), "line 7 is outside every hunk");
+});
+
+test("patchPaths lists only selected files", () => {
+  const files = splitDiff(twoFileDiff);
+  const got = patchPaths(files, (fi) => fi === 0);
+  assert.deepEqual(got, ["a.txt"]);
+});
+
+// The bug this guards: `git apply --index` stages a rename as a delete of
+// the old path plus an add of the new one. If patchPaths returned only the
+// new path, a commit scoped to it would leave the delete staged but
+// uncommitted — a half-applied rename. Verified against real git apply
+// output in git.test.ts's end-to-end rename test; this one checks the pure
+// path-selection logic in isolation, against a real rename diff.
+test("patchPaths includes the old path for a renamed file", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "old.txt", "one\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "add old.txt");
+  const wt = await createWorktree(repo, "s1");
+  await rename(join(wt.path, "old.txt"), join(wt.path, "new.txt"));
+
+  const raw = await wt.diff();
+  const files = splitDiff(raw);
+  assert.equal(files.length, 1);
+  assert.equal(files[0].path, "new.txt");
+  assert.equal(files[0].renameFrom, "old.txt");
+
+  const got = patchPaths(files, () => true);
+  assert.ok(got.includes("new.txt"), `want new.txt in ${JSON.stringify(got)}`);
+  assert.ok(got.includes("old.txt"), `want old.txt (the rename source) in ${JSON.stringify(got)}`);
+});
+
+// A review pane that pre-selects everything is an accept button with extra
+// steps. Nothing is selected until the user actually toggles a hunk.
+test("Review starts with nothing selected", () => {
+  const r = new Review(twoFileDiff);
+  for (let fi = 0; fi < r.files.length; fi++) {
+    for (let hi = 0; hi < r.files[fi].hunks.length; hi++) {
+      assert.ok(!r.selected(fi, hi), `hunk ${fi}/${hi} selected before the user touched it`);
+    }
+  }
+  assert.ok(!r.anySelected());
+});
+
+test("Review navigation and toggle", () => {
+  const r = new Review(twoFileDiff);
+  r.toggle(); // select a.txt hunk 0
+  r.next();
+  r.toggle(); // select a.txt hunk 1
+  r.next(); // move into b.txt
+  assert.equal(r.fi, 1);
+  assert.equal(r.hi, 0);
+  assert.ok(r.selected(0, 0));
+  assert.ok(r.selected(0, 1));
+  assert.ok(!r.selected(1, 0));
+
+  r.prev();
+  assert.equal(r.fi, 0, "prev from a file boundary landed at the wrong file");
+  assert.equal(r.hi, 1, "prev from a file boundary landed at the wrong hunk");
+
+  r.toggle(); // deselect
+  assert.ok(!r.selected(0, 1), "toggle did not deselect");
+});
+
+test("Review next stops at the end", () => {
+  const r = new Review(twoFileDiff);
+  for (let i = 0; i < 20; i++) r.next();
+  assert.equal(r.fi, 1);
+  assert.equal(r.hi, 0);
+});

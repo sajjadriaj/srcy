@@ -15,6 +15,11 @@ export interface FileDiff {
   header: string; // "diff --git ..." through the last line before the first @@
   hunks: Hunk[];
   binary: boolean;
+  // Set only when this section renames a file. `git apply --index` stages a
+  // rename as a delete of renameFrom plus an add of path; a caller scoping a
+  // commit to `path` alone would commit the add and leave the delete staged
+  // but uncommitted — a half-applied rename. patchPaths reads this.
+  renameFrom?: string;
 }
 
 // Exported (not just module-internal) because git.test.ts reaches for it
@@ -48,6 +53,7 @@ export function splitDiff(raw: string): FileDiff[] {
     let plusLine = "";
     let minusLine = "";
     let renameToLine = "";
+    let renameFromLine = "";
     let binary = false;
     i++;
     // Header runs until the first hunk or the next file.
@@ -65,11 +71,14 @@ export function splitDiff(raw: string): FileDiff[] {
         minusLine = lines[i];
       } else if (lines[i].startsWith("rename to ")) {
         renameToLine = lines[i];
+      } else if (lines[i].startsWith("rename from ")) {
+        renameFromLine = lines[i];
       }
       header.push(lines[i]);
       i++;
     }
     const path = filePath(gitLine, renameToLine, plusLine, minusLine);
+    const renameFrom = renameFromLine !== "" ? unquotePath(renameFromLine.slice("rename from ".length)) : undefined;
     const headerText = header.join("\n") + "\n";
 
     const hunks: Hunk[] = [];
@@ -78,7 +87,9 @@ export function splitDiff(raw: string): FileDiff[] {
       hunks.push(h);
       i = next;
     }
-    files.push({ path, header: headerText, hunks, binary });
+    const f: FileDiff = { path, header: headerText, hunks, binary };
+    if (renameFrom !== undefined) f.renameFrom = renameFrom;
+    files.push(f);
   }
   return files;
 }
@@ -324,4 +335,102 @@ export function countOr1(s: string): number {
 function atoi(s: string): number {
   const n = parseInt(s, 10);
   return Number.isNaN(n) ? 0 : n;
+}
+
+// changedLines returns the new-side line numbers this file's hunks touch,
+// so the file view can mark them in the gutter.
+export function changedLines(f: FileDiff): Set<number> {
+  const out = new Set<number>();
+  for (const h of f.hunks) {
+    for (let n = h.newStart; n < h.newStart + h.newCount; n++) {
+      out.add(n);
+    }
+  }
+  return out;
+}
+
+// patchPaths lists the files a selection actually touches, so the commit
+// that follows can be scoped to exactly them.
+//
+// A renamed file contributes BOTH its old and new path: `git apply --index`
+// stages a rename as a delete of the old path plus an add of the new one,
+// and scoping the commit to the new path alone would commit the add while
+// leaving the delete staged but uncommitted — a half-applied rename sitting
+// in the user's repo.
+export function patchPaths(files: FileDiff[], selected: (fi: number, hi: number) => boolean): string[] {
+  const out: string[] = [];
+  for (let fi = 0; fi < files.length; fi++) {
+    const f = files[fi];
+    // A hunkless section (pure rename, mode-only change, or binary file) is
+    // still a change; buildPatch keeps it under the same condition.
+    const touched = f.hunks.length === 0 ? selected(fi, 0) : f.hunks.some((_, hi) => selected(fi, hi));
+    if (!touched) continue;
+    out.push(f.path);
+    if (f.renameFrom !== undefined) out.push(f.renameFrom);
+  }
+  return out;
+}
+
+// Review is the state of one review pass: what the diff is, where the
+// cursor sits, and which hunks the user has actually accepted.
+//
+// Nothing is selected initially, on purpose. Defaulting to
+// everything-accepted turns the review gate into an accept button with
+// extra steps, which is exactly what this whole design exists to prevent.
+export class Review {
+  readonly files: FileDiff[];
+  fi = 0;
+  hi = 0;
+  private readonly sel = new Set<string>();
+
+  constructor(raw: string) {
+    this.files = splitDiff(raw);
+  }
+
+  selected(fi: number, hi: number): boolean {
+    return this.sel.has(key(fi, hi));
+  }
+
+  toggle(): void {
+    if (this.files.length === 0) return;
+    const k = key(this.fi, this.hi);
+    if (this.sel.has(k)) this.sel.delete(k);
+    else this.sel.add(k);
+  }
+
+  next(): void {
+    if (this.files.length === 0) return;
+    if (this.hi + 1 < this.files[this.fi].hunks.length) {
+      this.hi++;
+      return;
+    }
+    if (this.fi + 1 < this.files.length) {
+      this.fi++;
+      this.hi = 0;
+    }
+  }
+
+  prev(): void {
+    if (this.files.length === 0) return;
+    if (this.hi > 0) {
+      this.hi--;
+      return;
+    }
+    if (this.fi > 0) {
+      this.fi--;
+      this.hi = Math.max(0, this.files[this.fi].hunks.length - 1);
+    }
+  }
+
+  anySelected(): boolean {
+    return this.sel.size > 0;
+  }
+
+  patch(): string {
+    return buildPatch(this.files, (fi, hi) => this.selected(fi, hi));
+  }
+}
+
+function key(fi: number, hi: number): string {
+  return `${fi}:${hi}`;
 }
