@@ -4,6 +4,8 @@
 // spawns it in place of the real claude-code-acp binary.
 //
 // Usage: tsx fake-agent.ts <scenario> [toolCallOverridesJSON] [optionsJSON]
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
@@ -27,6 +29,24 @@ const defaultOptions: PermissionOption[] = [
   { optionId: "allow", kind: "allow_once", name: "Allow" },
   { optionId: "reject", kind: "reject_once", name: "Reject" },
 ];
+
+// For acp.test.ts's process-tree-kill test. Ignoring SIGTERM ourselves too
+// (not just the grandchild) proves close() escalates to SIGKILL rather than
+// returning early just because *this* process happened to exit quickly —
+// the real bug was a wrapper (npx) exiting while what it spawned kept
+// running, so a real fix must not depend on the immediate child dying.
+if (scenario === "stubborn-child") {
+  process.on("SIGTERM", () => {});
+  const grandchild = spawn(
+    process.execPath,
+    ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30);"],
+    { stdio: "ignore" },
+  );
+  const pidFile = process.argv[3];
+  if (pidFile && grandchild.pid != null) {
+    writeFileSync(pidFile, String(grandchild.pid));
+  }
+}
 
 function makeAgent(conn: AgentSideConnection): Agent {
   let cwd = "";

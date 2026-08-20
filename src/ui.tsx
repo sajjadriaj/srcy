@@ -8,7 +8,33 @@ type TranscriptEntry =
   | { kind: "user"; text: string }
   | { kind: "agent"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "tool"; label: string };
+  | { kind: "tool"; id: string; verb?: string; path?: string };
+
+// "edit" -> "Edit", "switch_mode" -> "Switch Mode".
+function titleCase(kind: string): string {
+  return kind.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+// Titles from the live adapter can embed an absolute path with no separator
+// other than a space ("Write /long/abs/path/note.txt"), so the "leading
+// words" of a title are whatever comes before the first path-looking token.
+// A title with no such token (e.g. "Reading file") is returned whole.
+function leadingWords(title: string): string {
+  const words = title.split(/\s+/);
+  const pathIdx = words.findIndex((w) => w.includes("/"));
+  const lead = pathIdx === -1 ? words : words.slice(0, pathIdx);
+  return lead.join(" ") || title;
+}
+
+// The verb for a tool line: the tool call's `kind` (a short enum — never a
+// path) when present, else the leading words of its title. Undefined when
+// this particular update carries neither, so an in-place merge doesn't blank
+// out a verb a prior update already established.
+function toolVerb(toolKind: string | undefined, toolTitle: string | undefined): string | undefined {
+  if (toolKind) return titleCase(toolKind);
+  if (toolTitle) return leadingWords(toolTitle);
+  return undefined;
+}
 
 // The bridge is how index.ts (which owns the real AgentSession, created
 // before this component ever mounts) hands live events to this component.
@@ -52,6 +78,21 @@ export function App({ branch, session, bridge, initialMode, modeDegraded, onExit
     });
   }
 
+  // tool_call and a later tool_call_update sharing a toolCallId are one
+  // operation; update the existing line in place instead of adding another.
+  // ACP updates are patches — verb/path stay undefined here when this
+  // particular update didn't carry them, so a prior known value survives.
+  function upsertTool(id: string, patch: { verb?: string; path?: string }): void {
+    setTranscript((prev) => {
+      const idx = prev.findIndex((e) => e.kind === "tool" && e.id === id);
+      if (idx === -1) {
+        return [...prev, { kind: "tool", id, ...patch }];
+      }
+      const merged = { ...prev[idx], ...patch };
+      return [...prev.slice(0, idx), merged, ...prev.slice(idx + 1)];
+    });
+  }
+
   useEffect(() => {
     function onUpdate(u: AgentUpdate): void {
       switch (u.kind) {
@@ -63,11 +104,13 @@ export function App({ branch, session, bridge, initialMode, modeDegraded, onExit
           break;
         case "tool_call":
         case "tool_call_update": {
-          // Prefer the (already relativized) toolPath over the raw title:
-          // this adapter's titles embed absolute paths ("Write /long/abs/
-          // path/note.txt"), which wraps uselessly in a narrow terminal.
-          const label = u.toolPath ?? u.toolTitle;
-          if (label) append({ kind: "tool", label });
+          if (u.toolCallId) {
+            const verb = toolVerb(u.toolKind, u.toolTitle);
+            const patch: { verb?: string; path?: string } = {};
+            if (verb !== undefined) patch.verb = verb;
+            if (u.toolPath !== undefined) patch.path = u.toolPath;
+            upsertTool(u.toolCallId, patch);
+          }
           break;
         }
         case "current_mode_update":
@@ -150,9 +193,10 @@ export function App({ branch, session, bridge, initialMode, modeDegraded, onExit
         </Text>
         {transcript.map((entry, i) => {
           if (entry.kind === "tool") {
+            const line = [entry.verb, entry.path].filter(Boolean).join("  ");
             return (
               <Text key={i} dimColor>
-                {`▸ ${entry.label}`}
+                {`▸ ${line}`}
               </Text>
             );
           }

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { relative, sep } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ClientSideConnection,
   ndJsonStream,
@@ -20,7 +21,14 @@ import {
 export interface AgentUpdate {
   kind: SessionUpdate["sessionUpdate"];
   text?: string;
+  // Set on tool_call/tool_call_update. toolCallId identifies the tool call
+  // an update belongs to, so a client can merge updates into one entry
+  // instead of rendering each as a separate line. toolTitle/toolKind are
+  // only present when this particular update carries them (ACP updates are
+  // patches: a field's absence means "unchanged", not "cleared").
+  toolCallId?: string;
   toolTitle?: string;
+  toolKind?: string;
   toolPath?: string;
   // Set when kind is "current_mode_update": the agent switched modes on its
   // own. The UI must reflect this rather than keep showing a stale mode.
@@ -106,7 +114,9 @@ function toUpdate(cwd: string, n: SessionNotification): AgentUpdate {
       break;
     case "tool_call":
     case "tool_call_update":
+      out.toolCallId = u.toolCallId;
       if (u.title != null) out.toolTitle = u.title;
+      if (u.kind != null) out.toolKind = u.kind;
       if (u.locations && u.locations.length > 0) {
         out.toolPath = relativizePath(cwd, u.locations[0].path);
       }
@@ -130,7 +140,18 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
   delete env.CLAUDECODE;
   delete env.CLAUDE_CODE_SSE_PORT;
 
-  const child = spawn(argv[0], argv.slice(1), { cwd: opts.cwd, env });
+  const child = spawn(argv[0], argv.slice(1), {
+    cwd: opts.cwd,
+    env,
+    // Make child its own process group leader so close() can signal the
+    // whole tree, not just this immediate process. argv is commonly
+    // ["npx", "-y", pkg]; npx execs the real agent through a shell wrapper
+    // that does not forward signals to it, so killing only `child` leaves
+    // the actual agent process orphaned and running. POSIX-only — win32 has
+    // no process-group signal (negative pid), so it falls back to killing
+    // just this process there (see killTree).
+    detached: process.platform !== "win32",
+  });
 
   // Drain stderr unconditionally so a chatty child never blocks on a full
   // pipe; keep a short tail to enrich the error if it exits before replying.
@@ -186,12 +207,44 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
   const { sessionId, modes: initialModes } = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
   modes = initialModes ?? null;
 
+  // Signals `signal` to the whole process group `child` leads (see spawn's
+  // detached above), not just `child` itself — that is what actually reaches
+  // a grandchild like the real agent process npx execs into. ESRCH (nothing
+  // left to signal) is success, not an error.
+  function killTree(signal: NodeJS.Signals): void {
+    try {
+      if (process.platform !== "win32" && child.pid != null) {
+        process.kill(-child.pid, signal);
+      } else {
+        child.kill(signal);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ESRCH") throw err;
+    }
+  }
+
   let closed = false;
+  // Never hangs and never rejects: idempotent via `closed`, and bounded by
+  // the grace period below regardless of what the child (or a stubborn
+  // descendant that traps SIGTERM) does. conn.closed — not the child's own
+  // "exit" — is the only trustworthy signal that nothing is left holding its
+  // stdout open, since a wrapper process can exit while what it exec'd or
+  // spawned keeps running; that is exactly the orphaned-grandchild bug this
+  // replaces child.kill() + await conn.closed to fix.
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
-    child.kill();
-    await conn.closed;
+
+    killTree("SIGTERM");
+
+    const result = await Promise.race([conn.closed.then(() => "closed" as const), delay(1000, "timeout" as const)]);
+
+    if (result === "timeout") {
+      killTree("SIGKILL");
+      // SIGKILL cannot be ignored, so the group is coming down; give the OS
+      // a moment to finish reaping it, then return regardless.
+      await Promise.race([conn.closed, delay(1000)]);
+    }
   }
 
   return {

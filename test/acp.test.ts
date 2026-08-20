@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -147,6 +148,27 @@ test("agent exiting mid-turn rejects prompt without hanging; close() after is sa
   await session.close(); // idempotent
 });
 
+test("close() kills the whole process tree, not just its immediate child", async (t) => {
+  const cwd = await newRepo(t);
+  const pidFile = join(cwd, "grandchild.pid");
+  const session = await startSession({
+    cwd,
+    argv: argvFor("stubborn-child", pidFile),
+    onUpdate: () => {},
+    onPermission: async () => null,
+  });
+  // Written synchronously at the fake agent's module load, well before
+  // initialize()/newSession() (awaited inside startSession) could return.
+  const grandchildPid = Number((await readFile(pidFile, "utf8")).trim());
+  assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
+  assert.ok(isAlive(grandchildPid), "grandchild should be running before close()");
+
+  const start = Date.now();
+  await session.close();
+  assert.ok(Date.now() - start < 3000, "close() must not hang");
+  assert.ok(!isAlive(grandchildPid), "close() must kill the grandchild too, not just its immediate child");
+});
+
 test("close() twice does not throw", async (t) => {
   const cwd = await newRepo(t);
   const session = await startSession({
@@ -189,3 +211,12 @@ test("scrubs CLAUDECODE and CLAUDE_CODE_SSE_PORT from the child env", async (t) 
   assert.equal(seen.claudecode, null);
   assert.equal(seen.ssePort, null);
 });
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
