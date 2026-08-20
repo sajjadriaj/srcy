@@ -1,198 +1,277 @@
-# code-tui: an agent cockpit
+# code-tui: stay the one who understands the codebase
 
-Date: 2026-08-19
+Date: 2026-08-19 (thesis repointed 2026-08-20)
 Status: approved design, not yet implemented
 
-## What this is
+## The problem
 
-A terminal cockpit for running several coding agents at once. Not another
-chat client — every vendor ships a good one. The gap is what happens when you
-run three agents in parallel: three terminals, three permission prompts you
-babysit one at a time, three sets of edits landing in one working tree, and
-no single place to review the result.
+Agents generate faster than you can read. The codebase grows past your mental
+model of it, and then debugging is archaeology in a repo you nominally own.
 
-`ctui` is that single place. One screen: every session, every pending
-approval, the diff each session produced. Sessions live in git worktrees so
-they cannot collide. Work lands in your tree only when you accept it.
+Diff review as it exists today does not stop this. You see `+40 −12` in a file
+you have never opened, it looks plausible, you accept. That is approval
+theater, and it is how the unreadable codebase gets built one plausible patch
+at a time. Three weeks later `git blame` says `claude` and you learn nothing.
+
+`ctui` is the layer between the agent and your codebase whose job is keeping
+you the one who understands it. Not a faster way to accept code — a review
+gate you cannot pass without understanding, and a history that still answers
+questions months later.
+
+Running several agents at once is a side effect: it is how you keep throughput
+without losing the plot. It is not the thesis, and it is the last milestone,
+not the first.
 
 ## Non-goals
 
-Not a multiplexer (tmux exists). Not its own agent loop. No plugins, themes,
-web UI, or remote access.
+Not a multiplexer. Not its own agent loop. No plugins, themes, web UI, remote
+access. Not a faster accept button.
 
 ## Settled
 
 | Decision | Choice |
 |---|---|
-| Shape | Cockpit, chat is a subordinate pane |
+| Thesis | Comprehension first; parallelism is plumbing |
 | Language | Go + Bubble Tea |
 | Isolation | One git worktree + branch per session |
 | Backend | Claude Code over ACP (`@zed-industries/claude-code-acp`) |
 | Process model | Monolith — agents are child processes of the TUI |
+| v1 scope | One session, reviewed properly |
 
-Monolith cost is real: killing the TUI kills in-flight agents. Mitigated by
-ACP session resume, not by building a daemon.
+## The five mechanisms
 
-## Layout
+### 1. Explain before accept
+
+The accept key is disabled until the agent has answered, in its own words:
+
+- what changed
+- what could break
+- what you did **not** test
+
+Sent as a prompt when review opens; the answer renders above the diff. Costs
+one round trip and no code. Two things fall out of it: you read a summary
+before a patch, and a vague or evasive answer is itself the signal to reject.
+The placeholder that silently falls back to dummy output has to be said out
+loud, or it has to be lied about — both are louder than a green `+40`.
+
+The same answer becomes the commit body. One prompt, two jobs.
+
+### 2. File view, not patch view
+
+`tab` toggles the review pane between the patch and the resulting file with
+changed regions marked.
+
+Diffs hide architecture by construction — they show you edited lines, never
+the shape of the thing you are editing. You cannot judge whether a function
+belongs by reading three lines of it. Reading the file you are about to own is
+the entire point.
+
+Implementation: read the file from the worktree, mark line ranges from the
+hunk headers. No second rendering path.
+
+### 3. Blast radius
+
+On opening review, for each changed symbol: who calls it, and did the agent
+read those callers.
 
 ```
-┌ sessions ─────┐┌ diff: api/user.go ────────────┐
-│▸claude  ●run  ││  func Get(id) {   │ func Get(id){│
-│ codex   ⏸ask  ││-   return nil     │+  return u,  │
-│ cursor  ✓done ││                   │              │
-└───────────────┘└──[a]ccept [r]eject [n]ext hunk┘
-┌ approvals (2) ─────────────────────────────────┐
-│ codex  → rm -rf build/      [y][n]             │
-│ cursor → write .env         [y][n]             │
-└────────────────────────────────────────────────┘
+Get()          14 callers  · agent read 2
+retryAfter()    1 caller   · agent read 1
 ```
 
-Session list always visible. Main pane toggles transcript / diff. Approval
-queue visible when non-empty, gone when empty.
+Symbol names come from git's own hunk headers — `@@ -12,7 +12,9 @@ func Get(id`
+— because git already computes the enclosing function via `xfuncname`. Callers
+come from `git grep -n`. "Agent read" comes from the tool calls in the
+session's own transcript.
+
+```go
+// ponytail: symbol extraction is git's xfuncname + git grep. Crude, zero
+// deps, language-agnostic. Upgrade to tree-sitter or LSP if the noise
+// outweighs the signal on a real repo.
+```
+
+This is the 3am page, shown before you accept it.
+
+### 4. Provenance — `ctui why`
+
+```
+$ ctui why src/tts.ts:18
+2026-08-19  claude-1
+  you asked: "add tts, kokoro if available"
+  agent said: falls back to silent ffmpeg audio when kokoro is missing,
+              so the pipeline still runs. Not tested without kokoro.
+```
+
+**No provenance database.** Accept applies the patch *and commits it*, with the
+agent's summary as the body and trailers for the rest:
+
+```
+tts: fall back to silent audio when kokoro is missing
+
+<the explain-before-accept answer>
+
+Ctui-Session: claude-1
+Ctui-Prompt: add tts, kokoro if available
+```
+
+`ctui why <file>:<line>` is then `git log -L<line>,<line>:<file>` plus trailer
+parsing. Roughly forty lines.
+
+This matters more than it looks: line-level provenance that survives renames,
+moves, and reformatting is the genuinely hard part, and `git log -L` already
+does it. A JSONL file keyed by line numbers would be wrong the first time
+anyone reformats. Storing this in git also means the history is readable by
+`git log` alone, with no tool installed and no sidecar file to lose.
+
+Committing on accept is not a side effect to apologize for — it is what makes
+the history answer questions later. Squash before you push if you want.
+
+### 5. Read-only sessions
+
+A session whose job is understanding, not writing. "Walk me through how a
+request reaches the db." "Why is this slow." "What breaks if I delete this."
+
+Debugging is where you are actually stuck, and a cockpit built only around
+producing diffs has no answer for it.
+
+Mechanically: same worktree, same ACP session, but no review pane and no
+accept key. Anything it writes is discarded when the session closes.
+
+```go
+// ponytail: "read-only" is discard-on-close, not an enforced read-only FS.
+// Real enforcement means containers or mount tricks. Revisit if an explain
+// session ever needs to be trusted with a dirty tree.
+```
 
 ## Files
 
 ```
-main.go       flags, git preflight, tea.NewProgram
-ui.go         root model, layout, keymap, focus
+main.go       flags, subcommands (why), git preflight, tea.NewProgram
+ui.go         root model, layout, keymap, review pane
 acp.go        child process + JSON-RPC over stdio
-worktree.go   create / diff / apply / destroy  (shells out to git)
+git.go        worktree, diff, blast radius, apply, commit, why
 ```
 
-Four files, not eight packages. `acp.go` and `worktree.go` have no Bubble Tea
-import, so they test without a terminal.
+Four files. `acp.go` and `git.go` import no Bubble Tea, so they test without a
+terminal.
 
-No `Session` interface — there is one backend. Extract the interface when
-Codex lands and the second implementation shows what actually varies. An
-interface written against one implementation is a guess.
-
-No re-modelled event type. ACP `session/update` payloads are already
-structured; unmarshal into a struct that mirrors them and forward it to the
-UI. A translation layer between two representations of the same thing is
-where the bugs live.
-
-No state machine. A session is `running bool` and `blocked *PermissionReq`.
-Six named states describe four booleans nobody queries.
+No `Session` interface — one backend. Extract it when Codex lands and shows
+what actually varies. No re-modelled event type — ACP's `session/update`
+payloads are already structured; unmarshal and forward. No state machine — a
+session is `running bool` and `blocked *PermissionReq`.
 
 ## ACP transport
 
-JSON-RPC 2.0 over the child's stdin/stdout. `encoding/json` on `exec.Cmd`
-pipes — roughly 80 lines. No JSON-RPC framework: this speaks to exactly one
-peer over one pipe, and framework connection/codec/dispatch machinery is
-larger than the thing it replaces.
-
-Methods used:
+JSON-RPC 2.0 over the child's stdio, `encoding/json` on `exec.Cmd` pipes,
+roughly eighty lines. No JSON-RPC framework: one peer, one pipe, and the
+framework's connection/codec/dispatch machinery is larger than what it
+replaces.
 
 - out: `initialize`, `session/new`, `session/prompt`, `session/cancel`
 - in: `session/update` (`agent_message_chunk`, `agent_thought_chunk`,
   `tool_call`, `tool_call_update`, `plan`)
 - in, blocking: `session/request_permission`
 
-Unknown `session/update` kinds are ignored, not fatal. Client-side `fs/*` and
-`terminal/*` are not implemented — the agent uses its own file and shell
-access inside its worktree.
+Unknown update kinds are ignored, not fatal. Client-side `fs/*` and
+`terminal/*` are not implemented — the agent uses its own access inside its
+worktree. Tool calls are retained in memory for the session: blast radius
+needs to know which files the agent actually read.
 
-One goroutine per session reads the pipe and forwards into the Bubble Tea
-loop via `Program.Send`. `Update` never blocks and never does I/O.
+One goroutine reads the pipe and forwards into Bubble Tea via `Program.Send`.
+`Update` never blocks and never does I/O.
 
-## Worktrees
+## Git
+
+Shell out. `go-git` is a large dependency that re-implements a CLI which is
+already installed and is the thing users debug with.
 
 ```
 repo/                  your tree, your branch
 .ctui/wt/claude-1/     branch ctui/claude-1, based on repo HEAD at spawn
 ```
 
-Shell out to git. `go-git` is a large dependency to re-implement a CLI that
-is already installed and is the thing users debug with.
-
 - create: `git worktree add -b ctui/<n> .ctui/wt/<n> <base-sha>`
-- destroy: `git worktree remove --force` then `git branch -D`
+- diff: `git -C <wt> diff <base-sha>` — includes uncommitted work, because
+  agents routinely leave it uncommitted
+- filter: `github.com/bluekeyes/go-gitdiff`. Unified-diff parsing has edge
+  cases — renames, mode changes, binary, no-newline-at-EOF — that a
+  hand-rolled parser gets wrong quietly.
+- apply: `git -C <repo> apply --3way`, then `git commit` with trailers
+- destroy: `git worktree remove --force`, `git branch -D`
 - `.ctui/` goes in `.git/info/exclude`, not the user's `.gitignore`
 
-Fresh worktrees have no `node_modules` or build cache. If
-`.ctui/postcreate` exists and is executable, run it after create. A shell
-script that either exists or doesn't — no config file, no TOML parser, no
-schema.
+If `.ctui/postcreate` exists and is executable, run it after create — fresh
+worktrees have no `node_modules` or build cache. A script that exists or
+doesn't; no config file, no schema.
 
-## Review
-
-One mechanism for landing work: build a patch, apply it. "Accept all" is that
-path with every hunk selected, not a second codepath.
-
-- diff: `git -C <wt> diff <base-sha>` — includes uncommitted changes, because
-  agents routinely leave work uncommitted
-- parse and filter with `github.com/bluekeyes/go-gitdiff`. Unified-diff
-  parsing is a solved problem with edge cases (renames, mode changes, binary,
-  no-newline-at-EOF) that a hand-rolled parser gets wrong quietly.
-- apply: `git -C <repo> apply --3way` on the filtered patch
-- failed apply: report the conflicting hunk, change nothing, leave the
-  worktree intact
-
-Squash-merge was considered and dropped. Partial acceptance cannot be
-expressed as a merge, so keeping it means two landing paths, and the rare one
-is the one that rots.
+Accept-all is the same path with every hunk selected, not a second codepath.
+Squash-merge was considered and dropped: partial acceptance cannot be
+expressed as a merge, so keeping it means two landing paths and the rare one
+rots.
 
 ## Approvals
 
 ACP `session/request_permission` is a JSON-RPC *request* — the agent blocks
-until answered. Park the pending request, show it in one global queue sorted
-oldest-first, reply with the chosen option ID when the user resolves it. That
-is the entire mechanism.
+until answered. Park it, show it, reply with the chosen option ID. In v1 that
+is an inline prompt in the session pane; the cross-session queue arrives with
+multi-session.
 
-**No "always allow" in v1.** Persisted auto-approval rules are where all the
-security complexity lives — glob matching, scope, revocation, making silent
+**No "always allow" in v1.** Persisted auto-approval rules are where the
+security complexity lives — glob matching, scope, revocation, keeping silent
 approvals auditable after the fact — and none of it can be built carelessly.
-The queue exists precisely so answering prompts is cheap. Add rules when a
-measured session shows the queue is the bottleneck, and design them properly
-then: per-repo storage, no implicit matching, visible auto-approvals,
-one-key revocation.
+Add rules when a measured session shows prompts are the bottleneck, and design
+them properly then: per-repo storage, no implicit matching, visible
+auto-approvals, one-key revocation.
 
 ## Errors
 
 | Failure | Behavior |
 |---|---|
-| Agent process exits unexpectedly | Session marked crashed. Worktree kept — it holds the actual work. Other sessions unaffected. |
-| Malformed or unknown ACP message | Shown in the session pane as a warning. Not fatal. |
-| Worktree create fails (branch exists, dirty index) | Session not created, git's error shown verbatim. |
-| Patch apply conflicts | Nothing applied. Conflicting hunk shown. Worktree intact. |
-| Approval for a backgrounded session | Still queued — the queue is global, not per-pane. |
-| Exit with sessions running | Confirm, listing them. On confirm: `session/cancel`, terminate, leave worktrees on disk. |
+| Agent process exits unexpectedly | Session marked crashed. Worktree kept — it holds the work. |
+| Malformed or unknown ACP message | Warning in the session pane. Not fatal. |
+| Worktree create fails | Session not created, git's error shown verbatim. |
+| Patch apply conflicts | Nothing applied, nothing committed. Conflicting hunk shown. Worktree intact. |
+| Commit fails after a clean apply | Changes stay in the working tree; the error names them as uncommitted so provenance loss is visible, never silent. |
+| Explain prompt fails or times out | Accept stays disabled. Retry, or a keypress that accepts without a summary and records `Ctui-Prompt: <none>` — an unexplained change is allowed, but never invisible. |
+| Exit with a session running | Confirm. On confirm: `session/cancel`, terminate, leave the worktree on disk. |
 
 ## Tests
 
-Three, matching the three things that break:
-
 - **acp** — a fake agent: a shell script replaying canned JSON-RPC frames.
-  Asserts a prompt round-trips and a permission request reaches the queue.
-- **worktree** — real git in a temp dir. Create, diff, apply, destroy, plus
-  the branch-exists failure.
-- **review** — golden file: given a diff and a hunk selection, assert the
-  built patch byte-for-byte.
+  A prompt round-trips; a permission request blocks and then unblocks.
+- **git** — real git in a temp dir. Create, diff, filter, apply, commit. Then
+  the interesting one: edit the file further, and assert `ctui why` still
+  resolves the original line to the right commit.
+- **blast radius** — golden file: a diff in, symbols and callers out.
 
-No `teatest` golden frames. Layout churns every session while the UI is in
-flux; golden frames would fail on every intentional change and get
-regenerated without reading, which is a test that costs maintenance and
-catches nothing.
+No `teatest` golden frames. Layout churns while the UI is in flux, so they
+would fail on every intentional change and get regenerated unread — cost with
+no catch.
 
 ## Milestones
 
-1. **One session end to end.** Spawn `claude-code-acp` in a worktree, stream
-   output, prompt, interrupt.
-2. **Approvals.** Global queue, y/n, agent unblocks.
-3. **Review and land.** Diff pane, hunk selection, apply, teardown.
-4. **Many sessions.** List, focus, per-session state.
+1. **One session end to end.** Worktree, spawn `claude-code-acp`, stream,
+   prompt, interrupt, inline approvals.
+2. **Review that earns its name.** Patch/file toggle, explain-before-accept
+   gate, hunk selection, apply, commit with trailers.
+3. **Understanding tools.** Blast radius on review open. `ctui why`.
+4. **Read-only sessions.** Explain mode, no accept path.
+5. **Multi-session.** Session list, focus, global approval queue.
 
-Ship after 4. That is the product.
+Milestones 1–4 are the product. 5 is throughput, and it is deliberately last:
+shipping parallelism before the review gate would build the exact machine this
+spec exists to avoid.
 
-## Cut from v1, add when
+## Cut, add when
 
 | Cut | Add when |
 |---|---|
-| `Session` interface | Codex lands and shows what actually varies |
-| JSONL transcript / crash replay | Losing scrollback costs real work — the worktree already holds the code |
-| Persisted approval rules | A measured session shows the queue is the bottleneck |
+| `Session` interface | Codex lands and shows what varies |
+| Provenance database | Never — `git log -L` is the feature |
+| Persisted approval rules | A measured session shows prompts are the bottleneck |
 | Config file | A second thing needs configuring |
 | Detached daemon | A closed TUI kills a run that mattered |
+| Enforced read-only FS | An explain session must be trusted with a dirty tree |
+| tree-sitter / LSP symbols | `xfuncname` + `git grep` noise outweighs signal |
 | Context inspector, token budget | Several sessions make spend opaque |
 | Checkpoint scrub-and-fork | After review lands; shares its machinery |
-| Desktop notify on block | The queue is regularly unattended |
