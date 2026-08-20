@@ -209,3 +209,85 @@ func TestDiffHunkHeadersCarryFunctionNames(t *testing.T) {
 		t.Fatalf("hunk header lost its function name — the attributes file is not where git reads it:\n%s", d)
 	}
 }
+
+func TestCreateWorktreeRollsBackOnPostcreateFailure(t *testing.T) {
+	repo := newRepo(t)
+	// Create a failing postcreate script.
+	postcreateDir := filepath.Join(repo, ".ctui")
+	if err := os.MkdirAll(postcreateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	postcreate := filepath.Join(postcreateDir, "postcreate")
+	if err := os.WriteFile(postcreate, []byte("#!/bin/sh\nexit 1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt to create worktree — postcreate will fail.
+	_, err := CreateWorktree(repo, "s1")
+	if err == nil {
+		t.Fatal("expected postcreate to fail")
+	}
+
+	// Verify worktree was cleaned up: directory should be gone.
+	wtPath := filepath.Join(repo, ".ctui", "wt", "s1")
+	if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+		t.Fatal("worktree directory should be removed after postcreate failure")
+	}
+
+	// Verify branch was cleaned up.
+	_, err = git(repo, "rev-parse", "--verify", "ctui/s1")
+	if err == nil {
+		t.Fatal("branch ctui/s1 should be deleted after postcreate failure")
+	}
+}
+
+func TestDiffPreservesUserAttributesFile(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-write a custom attributes file with user rules.
+	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(repo, gitCommonDir)
+	}
+	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	userContent := "*.custom diff=mine\n"
+	if err := os.WriteFile(attrsPath, []byte(userContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call Diff() twice.
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify custom rule is still there exactly once.
+	content, err := os.ReadFile(attrsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "*.custom diff=mine") {
+		t.Fatal("user's custom attributes rule was lost")
+	}
+	if strings.Count(contentStr, "*.custom diff=mine") != 1 {
+		t.Fatalf("custom rule appears multiple times:\n%s", contentStr)
+	}
+
+	// Verify exactly one ctui block (markers should not accumulate).
+	if strings.Count(contentStr, "# >>> ctui") != 1 {
+		t.Fatalf("ctui marker appears %d times, want 1:\n%s", strings.Count(contentStr, "# >>> ctui"), contentStr)
+	}
+}

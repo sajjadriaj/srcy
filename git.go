@@ -51,6 +51,7 @@ func CreateWorktree(repo, name string) (*Worktree, error) {
 		return nil, err
 	}
 	if err := runPostCreate(w); err != nil {
+		w.Destroy() // best-effort rollback on postcreate failure
 		return nil, err
 	}
 	return w, nil
@@ -171,9 +172,40 @@ func (w *Worktree) writeAttributes() error {
 	if !filepath.IsAbs(gitDir) {
 		gitDir = filepath.Join(w.Path, gitDir)
 	}
-	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o755); err != nil {
+	path := filepath.Join(gitDir, "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(gitDir, "info", "attributes"),
-		[]byte(diffAttributes), 0o644)
+
+	// Read existing content to preserve user's settings.
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// Remove any existing ctui block (marked by # >>> ctui and # <<< ctui).
+	content := string(existing)
+	start := strings.Index(content, "# >>> ctui")
+	if start != -1 {
+		end := strings.Index(content[start:], "# <<< ctui")
+		if end != -1 {
+			end += start + len("# <<< ctui")
+			// Include trailing newline if present.
+			if end < len(content) && content[end] == '\n' {
+				end++
+			}
+			content = content[:start] + content[end:]
+		}
+	}
+
+	// Ensure trailing newline before appending new block.
+	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
+	// Append new ctui block with markers.
+	newBlock := "# >>> ctui\n" + diffAttributes + "# <<< ctui\n"
+	content += newBlock
+
+	return os.WriteFile(path, []byte(content), 0o644)
 }
