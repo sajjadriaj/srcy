@@ -7,16 +7,21 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "tsx --test test/*.test.ts",
+    "test": "tsx --test test/*.test.ts test/*.test.tsx",
     "build": "tsc",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "@types/react": "^19.2.18",
+    "ink-testing-library": "^4.0.0",
     "tsx": "^4.23.12",
     "typescript": "^7.0.2"
   },
   "dependencies": {
-    "@agentclientprotocol/sdk": "^0.14.1"
+    "@agentclientprotocol/sdk": "^0.14.1",
+    "ink": "^7.1.1",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.8"
   }
 }

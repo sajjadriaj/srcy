@@ -10,6 +10,7 @@ import {
   type PermissionOption,
   type RequestPermissionRequest,
   type RequestPermissionResponse,
+  type SessionModeState,
   type SessionNotification,
   type SessionUpdate,
   type ToolCallUpdate,
@@ -21,6 +22,9 @@ export interface AgentUpdate {
   text?: string;
   toolTitle?: string;
   toolPath?: string;
+  // Set when kind is "current_mode_update": the agent switched modes on its
+  // own. The UI must reflect this rather than keep showing a stale mode.
+  modeId?: string;
   raw: SessionUpdate;
 }
 
@@ -35,8 +39,15 @@ export interface PermissionRequest {
 
 export interface AgentSession {
   readonly sessionId: string;
+  // The session's mode state as of the last newSession/setMode/
+  // current_mode_update, or null if this adapter doesn't report modes at
+  // all. The caller (not this module) decides whether to pin a default.
+  readonly modes: SessionModeState | null;
   prompt(text: string): Promise<string>;
   cancel(): Promise<void>;
+  // Requests a mode change. Throws if the adapter rejects it (e.g. unknown
+  // modeId). On success, `modes.currentModeId` reflects the new mode.
+  setMode(modeId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -100,6 +111,9 @@ function toUpdate(cwd: string, n: SessionNotification): AgentUpdate {
         out.toolPath = relativizePath(cwd, u.locations[0].path);
       }
       break;
+    case "current_mode_update":
+      out.modeId = u.currentModeId;
+      break;
   }
   return out;
 }
@@ -135,9 +149,18 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
   });
   childClosed.catch(() => {}); // don't warn if nothing ever awaits this
 
+  // Tracks the session's mode state; kept live so `session.modes` is always
+  // current, whether it changed via our own setMode() or the agent's own
+  // current_mode_update notification.
+  let modes: SessionModeState | null = null;
+
   const client: Client = {
     async sessionUpdate(params) {
-      opts.onUpdate(toUpdate(opts.cwd, params));
+      const u = toUpdate(opts.cwd, params);
+      if (u.kind === "current_mode_update" && u.modeId != null && modes != null) {
+        modes = { ...modes, currentModeId: u.modeId };
+      }
+      opts.onUpdate(u);
     },
     async requestPermission(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
       const optionId = await opts.onPermission({
@@ -160,7 +183,8 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
     protocolVersion: PROTOCOL_VERSION,
     clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
   });
-  const { sessionId } = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
+  const { sessionId, modes: initialModes } = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
+  modes = initialModes ?? null;
 
   let closed = false;
   async function close(): Promise<void> {
@@ -172,6 +196,16 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
 
   return {
     sessionId,
+    get modes(): SessionModeState | null {
+      return modes;
+    },
+    async setMode(modeId: string): Promise<void> {
+      await conn.setSessionMode({ sessionId, modeId });
+      // The response carries no state; a successful call means the agent is
+      // now in this mode, so update optimistically rather than wait for a
+      // current_mode_update that may not come.
+      if (modes != null) modes = { ...modes, currentModeId: modeId };
+    },
     async prompt(text: string): Promise<string> {
       const { stopReason } = await Promise.race([
         conn.prompt({ sessionId, prompt: [{ type: "text", text }] }),

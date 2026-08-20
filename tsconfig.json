@@ -4,6 +4,7 @@
     "lib": ["ES2022"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
+    "jsx": "react-jsx",
     "strict": true,
     "outDir": "dist",
     "rootDir": ".",
