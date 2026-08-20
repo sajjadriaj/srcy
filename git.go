@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -20,4 +22,102 @@ func git(dir string, args ...string) (string, error) {
 			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(stdout.String()), nil
+}
+
+// Worktree is one session's isolated checkout.
+type Worktree struct {
+	Repo   string // the user's repository
+	Path   string // .ctui/wt/<name>
+	Branch string // ctui/<name>
+	Base   string // repo HEAD at creation; every diff is taken against this
+}
+
+// CreateWorktree branches from the repo's current HEAD into .ctui/wt/<name>.
+func CreateWorktree(repo, name string) (*Worktree, error) {
+	base, err := git(repo, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, err
+	}
+	w := &Worktree{
+		Repo:   repo,
+		Path:   filepath.Join(repo, ".ctui", "wt", name),
+		Branch: "ctui/" + name,
+		Base:   base,
+	}
+	if err := excludeCtui(repo); err != nil {
+		return nil, err
+	}
+	if _, err := git(repo, "worktree", "add", "-b", w.Branch, w.Path, w.Base); err != nil {
+		return nil, err
+	}
+	if err := runPostCreate(w); err != nil {
+		return nil, err
+	}
+	return w, nil
+}
+
+// Destroy removes the worktree and its branch. Force, because the agent
+// almost always leaves uncommitted work behind and we are discarding it
+// deliberately.
+func (w *Worktree) Destroy() error {
+	if _, err := git(w.Repo, "worktree", "remove", "--force", w.Path); err != nil {
+		return err
+	}
+	_, err := git(w.Repo, "branch", "-D", w.Branch)
+	return err
+}
+
+// excludeCtui hides .ctui/ via .git/info/exclude rather than .gitignore:
+// this is our bookkeeping, not a fact about the user's project, and it
+// should never show up in their diff.
+func excludeCtui(repo string) error {
+	gitDir, err := git(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(repo, gitDir)
+	}
+	path := filepath.Join(gitDir, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for _, line := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(line) == ".ctui/" {
+			return nil
+		}
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	prefix := ""
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		prefix = "\n"
+	}
+	_, err = f.WriteString(prefix + ".ctui/\n")
+	return err
+}
+
+// runPostCreate runs .ctui/postcreate if it exists and is executable.
+// Fresh worktrees have no node_modules and no build cache; what fixes that
+// varies per repo, so it is a script that either exists or doesn't rather
+// than a config file with a schema.
+func runPostCreate(w *Worktree) error {
+	script := filepath.Join(w.Repo, ".ctui", "postcreate")
+	info, err := os.Stat(script)
+	if err != nil || info.Mode()&0o111 == 0 {
+		return nil
+	}
+	cmd := exec.Command(script)
+	cmd.Dir = w.Path
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("postcreate: %w: %s", err, out)
+	}
+	return nil
 }
