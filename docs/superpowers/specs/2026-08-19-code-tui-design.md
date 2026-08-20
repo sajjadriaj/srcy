@@ -191,11 +191,18 @@ repo/                  your tree, your branch
 ```
 
 - create: `git worktree add -b ctui/<n> .ctui/wt/<n> <base-sha>`
-- diff: `git -C <wt> diff <base-sha>` — includes uncommitted work, because
-  agents routinely leave it uncommitted
-- filter: `github.com/bluekeyes/go-gitdiff`. Unified-diff parsing has edge
-  cases — renames, mode changes, binary, no-newline-at-EOF — that a
-  hand-rolled parser gets wrong quietly.
+- diff: `git -C <wt> add -A` then `git -C <wt> diff --cached <base-sha>`.
+  Agents routinely leave work uncommitted, and plain `git diff` would miss
+  every file they created. Staging first is harmless in a throwaway worktree
+  and is the only way untracked files reach the review pane.
+- filter: split the raw diff text on file and hunk boundaries, keeping hunk
+  bodies byte-identical, and reassemble the selected ones. No diff library.
+  Reserializing from a parsed model is what gets renames, mode changes,
+  binary files, and no-newline-at-EOF wrong; never parsing them keeps them
+  correct by construction. Hunk boundaries are found by consuming exactly the
+  line counts in `@@ -a,b +c,d @@`, so a context line that itself looks like
+  diff text cannot split a hunk. `git apply --3way` is the parser that
+  matters, and it validates the result.
 - apply: `git -C <repo> apply --3way`, then `git commit` with trailers
 - destroy: `git worktree remove --force`, `git branch -D`
 - `.ctui/` goes in `.git/info/exclude`, not the user's `.gitignore`
