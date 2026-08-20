@@ -121,3 +121,59 @@ func runPostCreate(w *Worktree) error {
 	}
 	return nil
 }
+
+// diffAttributes enables git's builtin funcname drivers so hunk headers
+// carry the enclosing function. Blast radius reads those headers, so this
+// is what makes it work at all. Languages with no builtin driver simply
+// produce empty hunk headers and degrade to "no symbol detected".
+const diffAttributes = `*.go diff=golang
+*.py diff=python
+*.rs diff=rust
+*.rb diff=ruby
+*.php diff=php
+*.java diff=java
+*.kt diff=kotlin
+*.cs diff=csharp
+*.c diff=cpp
+*.h diff=cpp
+*.cc diff=cpp
+*.cpp diff=cpp
+*.m diff=objc
+*.pl diff=perl
+*.ex diff=elixir
+*.exs diff=elixir
+*.css diff=css
+*.md diff=markdown
+`
+
+// Diff returns the worktree's changes against its base commit.
+//
+// It stages first: agents routinely leave work uncommitted, and a plain
+// `git diff` would silently omit every file they created. Staging is
+// harmless here because the worktree is disposable.
+func (w *Worktree) Diff() (string, error) {
+	if err := w.writeAttributes(); err != nil {
+		return "", err
+	}
+	if _, err := git(w.Path, "add", "-A"); err != nil {
+		return "", err
+	}
+	return git(w.Path, "diff", "--cached", w.Base)
+}
+
+func (w *Worktree) writeAttributes() error {
+	// --git-common-dir, not --git-dir: info/ is shared across worktrees, and
+	// a per-worktree attributes file would simply not be read.
+	gitDir, err := git(w.Path, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(w.Path, gitDir)
+	}
+	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(gitDir, "info", "attributes"),
+		[]byte(diffAttributes), 0o644)
+}

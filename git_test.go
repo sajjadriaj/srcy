@@ -148,3 +148,64 @@ func TestDestroyRemovesWorktreeWithUncommittedWork(t *testing.T) {
 		t.Fatalf("destroy must force-remove a dirty worktree: %v", err)
 	}
 }
+
+func TestDiffIncludesUntrackedFiles(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An agent edits one file and creates another, committing neither.
+	write(t, wt.Path, "a.txt", "one\ntwo\n")
+	write(t, wt.Path, "new.txt", "brand new\n")
+
+	d, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d, "a.txt") {
+		t.Error("modified file missing from diff")
+	}
+	if !strings.Contains(d, "new.txt") {
+		t.Error("untracked file missing from diff — plain `git diff` would miss it")
+	}
+	if !strings.Contains(d, "+brand new") {
+		t.Error("new file's contents missing from diff")
+	}
+}
+
+func TestDiffIsEmptyWhenNothingChanged(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d != "" {
+		t.Fatalf("want empty diff, got:\n%s", d)
+	}
+}
+
+func TestDiffHunkHeadersCarryFunctionNames(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 3\n\treturn nil\n}\n")
+	git(repo, "add", "-A")
+	git(repo, "commit", "-qm", "svc")
+
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, wt.Path, "svc.go", "package p\n\nfunc Get(id string) error {\n\tx := 1\n\ty := 2\n\tz := 4\n\treturn nil\n}\n")
+
+	d, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d, "@@ ") || !strings.Contains(d, "func Get") {
+		t.Fatalf("hunk header lost its function name — the attributes file is not where git reads it:\n%s", d)
+	}
+}
