@@ -291,3 +291,132 @@ func TestDiffPreservesUserAttributesFile(t *testing.T) {
 		t.Fatalf("ctui marker appears %d times, want 1:\n%s", strings.Count(contentStr, "# >>> ctui"), contentStr)
 	}
 }
+
+func TestDiffHandlesOrphanedOpenMarker(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-write attributes with orphaned open marker and user content.
+	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(repo, gitCommonDir)
+	}
+	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attrsPath, []byte("# >>> ctui\nmy custom line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call Diff() twice.
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify custom line is still present.
+	content, err := os.ReadFile(attrsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "my custom line") {
+		t.Fatalf("orphaned marker caused loss of user content:\n%s", content)
+	}
+}
+
+func TestDiffRemovesMultipleCtUIBlocks(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-write attributes with two ctui blocks and a user line between them.
+	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(repo, gitCommonDir)
+	}
+	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	doubleBlock := "# >>> ctui\n*.old diff=golang\n# <<< ctui\nmy user line\n# >>> ctui\n*.older diff=python\n# <<< ctui\n"
+	if err := os.WriteFile(attrsPath, []byte(doubleBlock), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call Diff() to rewrite blocks.
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify both old blocks are gone, user line survives, exactly one ctui block remains.
+	content, err := os.ReadFile(attrsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStr := string(content)
+	if strings.Contains(contentStr, "*.old") || strings.Contains(contentStr, "*.older") {
+		t.Fatalf("old ctui blocks not removed:\n%s", contentStr)
+	}
+	if !strings.Contains(contentStr, "my user line") {
+		t.Fatalf("user line between blocks was lost:\n%s", contentStr)
+	}
+	if strings.Count(contentStr, "# >>> ctui") != 1 {
+		t.Fatalf("expected 1 ctui block, got %d:\n%s", strings.Count(contentStr, "# >>> ctui"), contentStr)
+	}
+}
+
+func TestDiffPreservesOrphanedCloseMarker(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Pre-write attributes with orphaned close marker (user typed/copy-pasted).
+	gitCommonDir, err := git(repo, "rev-parse", "--git-common-dir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(gitCommonDir) {
+		gitCommonDir = filepath.Join(repo, gitCommonDir)
+	}
+	attrsPath := filepath.Join(gitCommonDir, "info", "attributes")
+	if err := os.MkdirAll(filepath.Dir(attrsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(attrsPath, []byte("some custom config\n# <<< ctui\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Call Diff() to add ctui block.
+	if _, err := wt.Diff(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify orphaned close marker is still present.
+	content, err := os.ReadFile(attrsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contentStr := string(content)
+	if !strings.Contains(contentStr, "# <<< ctui") {
+		t.Fatalf("orphaned close marker was removed:\n%s", contentStr)
+	}
+	if !strings.Contains(contentStr, "some custom config") {
+		t.Fatalf("custom config was lost:\n%s", contentStr)
+	}
+}

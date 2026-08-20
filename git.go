@@ -51,7 +51,9 @@ func CreateWorktree(repo, name string) (*Worktree, error) {
 		return nil, err
 	}
 	if err := runPostCreate(w); err != nil {
-		w.Destroy() // best-effort rollback on postcreate failure
+		if destroyErr := w.Destroy(); destroyErr != nil {
+			return nil, fmt.Errorf("postcreate failed: %w (also failed to rollback: %v)", err, destroyErr)
+		}
 		return nil, err
 	}
 	return w, nil
@@ -183,20 +185,48 @@ func (w *Worktree) writeAttributes() error {
 		return err
 	}
 
-	// Remove any existing ctui block (marked by # >>> ctui and # <<< ctui).
+	// Remove well-formed ctui blocks, preserving user content and orphaned markers.
+	// Scan for blocks: if a close marker exists and no other open marker appears
+	// before it, the block is well-formed and removed. Otherwise, the open marker
+	// is orphaned and preserved as user content.
+	var result strings.Builder
 	content := string(existing)
-	start := strings.Index(content, "# >>> ctui")
-	if start != -1 {
-		end := strings.Index(content[start:], "# <<< ctui")
-		if end != -1 {
-			end += start + len("# <<< ctui")
+	pos := 0
+
+	for {
+		// Find next open marker from current position.
+		start := strings.Index(content[pos:], "# >>> ctui")
+		if start == -1 {
+			// No more markers; write the rest and done.
+			result.WriteString(content[pos:])
+			break
+		}
+		start += pos // convert to absolute index
+
+		// From just after the open marker, find the next close and next open.
+		searchStart := start + len("# >>> ctui")
+		closeIdx := strings.Index(content[searchStart:], "# <<< ctui")
+		nextOpenIdx := strings.Index(content[searchStart:], "# >>> ctui")
+
+		// Well-formed block: close exists and no other open marker before it.
+		if closeIdx != -1 && (nextOpenIdx == -1 || closeIdx < nextOpenIdx) {
+			// Convert relative index to absolute.
+			endIdx := searchStart + closeIdx + len("# <<< ctui")
 			// Include trailing newline if present.
-			if end < len(content) && content[end] == '\n' {
-				end++
+			if endIdx < len(content) && content[endIdx] == '\n' {
+				endIdx++
 			}
-			content = content[:start] + content[end:]
+			// Write content before this block, skip the block.
+			result.WriteString(content[pos:start])
+			pos = endIdx
+		} else {
+			// Orphaned marker: preserve it as user content, continue after the marker.
+			result.WriteString(content[pos : start+len("# >>> ctui")])
+			pos = start + len("# >>> ctui")
 		}
 	}
+
+	content = result.String()
 
 	// Ensure trailing newline before appending new block.
 	if len(content) > 0 && !strings.HasSuffix(content, "\n") {
