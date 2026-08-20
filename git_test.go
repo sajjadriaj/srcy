@@ -394,3 +394,114 @@ func TestDiffIgnoresUserDiffConfig(t *testing.T) {
 		t.Fatalf("got %+v, want a single file with Path \"a.txt\"", files)
 	}
 }
+
+// A mode-only change carries no "+++"/"--- " line and no "rename to " line —
+// the "diff --git" line is the only path source left. Without
+// core.quotePath=false, git C-quotes the non-ASCII name there and the
+// fallback (which only handles the unquoted "P b/P" form) returns "".
+func TestDiffPathForNonASCIIModeOnlyFile(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "café.sh", "one\n")
+	if _, err := git(repo, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(repo, "commit", "-qm", "add café.sh"); err != nil {
+		t.Fatal(err)
+	}
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(filepath.Join(wt.Path, "café.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "old mode 100644") {
+		t.Fatalf("test setup did not produce a mode-only change; got:\n%s", raw)
+	}
+	if strings.Contains(raw, `\303`) {
+		t.Fatalf("core.quotePath=false did not take effect, path still quoted:\n%s", raw)
+	}
+
+	files := SplitDiff(raw)
+	if len(files) != 1 || files[0].Path != "café.sh" {
+		t.Fatalf("got %+v, want a single file with Path \"café.sh\"", files)
+	}
+	if _, err := git(wt.Path, "ls-files", "--error-unmatch", "--", files[0].Path); err != nil {
+		t.Fatalf("Path %q rejected as a pathspec Task 9's commit scoping would use: %v", files[0].Path, err)
+	}
+}
+
+// Same gap, on a binary file: no "+++" line either, only "Binary files ..."
+// and the "diff --git" line.
+func TestDiffPathForNonASCIIBinaryFile(t *testing.T) {
+	repo := newRepo(t)
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(wt.Path, "café.bin"), []byte{0x00, 0x01, 0x02, 0x03}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "Binary files") {
+		t.Fatalf("test setup did not produce a binary file; got:\n%s", raw)
+	}
+	if strings.Contains(raw, `\303`) {
+		t.Fatalf("core.quotePath=false did not take effect, path still quoted:\n%s", raw)
+	}
+
+	files := SplitDiff(raw)
+	if len(files) != 1 || files[0].Path != "café.bin" || !files[0].Binary {
+		t.Fatalf("got %+v, want a single binary file with Path \"café.bin\"", files)
+	}
+	if _, err := git(wt.Path, "ls-files", "--error-unmatch", "--", files[0].Path); err != nil {
+		t.Fatalf("Path %q rejected as a pathspec Task 9's commit scoping would use: %v", files[0].Path, err)
+	}
+}
+
+// core.quotePath=false only stops git from quoting non-ASCII bytes; a path
+// containing an actual control character (a literal tab here) still gets
+// C-quoted regardless, and must still come out right through the existing
+// unquote branch in pathFromDiffLine — this section has a real "+++" line,
+// unlike the two cases above.
+func TestDiffPathForTabInFilename(t *testing.T) {
+	repo := newRepo(t)
+	const name = "tab\tname.txt"
+	write(t, repo, name, "one\n")
+	if _, err := git(repo, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(repo, "commit", "-qm", "add tab file"); err != nil {
+		t.Fatal(err)
+	}
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, wt.Path, name, "two\n")
+
+	raw, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, `\t`) {
+		t.Fatalf("test setup did not produce a quoted, tab-containing path; got:\n%s", raw)
+	}
+
+	files := SplitDiff(raw)
+	if len(files) != 1 || files[0].Path != name {
+		t.Fatalf("got %+v, want a single file with Path %q", files, name)
+	}
+	if _, err := git(wt.Path, "ls-files", "--error-unmatch", "--", files[0].Path); err != nil {
+		t.Fatalf("Path %q rejected as a pathspec: %v", files[0].Path, err)
+	}
+}

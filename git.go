@@ -191,13 +191,20 @@ func (w *Worktree) Diff() (string, error) {
 	}
 	// We are producing bytes for `git apply`, so the diff must be literal
 	// regardless of how the user has configured *reading* diffs: neutralize
-	// diff.mnemonicPrefix (c/i instead of a/b) and diff.noprefix (no prefix
-	// at all), and disable any external diff driver or textconv filter that
-	// would make the output something other than a real patch.
+	// diff.mnemonicPrefix (c/i instead of a/b), diff.noprefix (no prefix at
+	// all), and core.quotePath (which C-quotes any non-ASCII path — the only
+	// path source left for a mode-only or binary section, which carries no
+	// "+++"/"rename to" line for the unquote fallback to read instead); and
+	// disable any external diff driver or textconv filter that would make
+	// the output something other than a real patch. core.quotePath=false
+	// still quotes a path containing an actual control character (e.g. a
+	// literal tab), so that case stays quoted and goes through the existing
+	// unquote branch rather than silently mis-parsing.
 	return gitRaw(w.Path,
 		"-c", "core.attributesFile="+attrs,
 		"-c", "diff.mnemonicPrefix=false",
 		"-c", "diff.noprefix=false",
+		"-c", "core.quotePath=false",
 		"diff", "--cached", "--no-ext-diff", "--no-textconv", w.Base)
 }
 
