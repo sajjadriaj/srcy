@@ -36,6 +36,12 @@ func dumpACP(prompt string) error {
 	go func() {
 		for p := range c.Perms {
 			fmt.Printf("PERM  %s %+v\n", p.Title, p.Options)
+			if len(p.Options) == 0 {
+				// Nothing to pick from. Closing Reply cancels the request
+				// rather than panicking on p.Options[0].
+				close(p.Reply)
+				continue
+			}
 			p.Reply <- p.Options[0].ID
 		}
 	}()
