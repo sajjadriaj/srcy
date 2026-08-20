@@ -78,6 +78,7 @@ async function main(): Promise<void> {
       branch: worktree.branch,
       session,
       bridge,
+      worktree,
       initialMode,
       modeDegraded,
       onExit: (result: { agentDied: boolean }) => {
