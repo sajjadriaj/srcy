@@ -6,213 +6,32 @@ Status: approved design, not yet implemented
 ## What this is
 
 A terminal cockpit for running several coding agents at once. Not another
-chat client — every vendor already ships a good one. The gap is what happens
-when you run three agents in parallel: three terminals, three permission
-prompts you babysit one at a time, three sets of edits landing in one working
-tree, and no single place to review the result.
+chat client — every vendor ships a good one. The gap is what happens when you
+run three agents in parallel: three terminals, three permission prompts you
+babysit one at a time, three sets of edits landing in one working tree, and
+no single place to review the result.
 
-code-tui (`ctui`) is that single place. One screen shows every running
-session, every pending approval, and the diff each session has produced.
-Sessions are isolated in git worktrees so they cannot collide, and work lands
-in your real tree only when you accept it, hunk by hunk.
+`ctui` is that single place. One screen: every session, every pending
+approval, the diff each session produced. Sessions live in git worktrees so
+they cannot collide. Work lands in your tree only when you accept it.
 
 ## Non-goals
 
-- Not a general terminal multiplexer. tmux exists.
-- Not its own agent loop. It drives existing agents; it does not plan or call models.
-- No plugin system, theme engine, web UI, or remote access in v1.
-- No multi-user or shared-session support.
+Not a multiplexer (tmux exists). Not its own agent loop. No plugins, themes,
+web UI, or remote access.
 
-## Product decisions (settled)
+## Settled
 
 | Decision | Choice |
 |---|---|
-| Shape | Cockpit / orchestrator, chat is a subordinate pane |
-| Language | Go + Bubble Tea (bubbles, lipgloss, glamour) |
+| Shape | Cockpit, chat is a subordinate pane |
+| Language | Go + Bubble Tea |
 | Isolation | One git worktree + branch per session |
-| First backend | Claude Code over ACP (`@zed-industries/claude-code-acp`) |
+| Backend | Claude Code over ACP (`@zed-industries/claude-code-acp`) |
 | Process model | Monolith — agents are child processes of the TUI |
 
-Rationale for the monolith: one binary, one process tree, no IPC to debug.
-The cost is real — killing the TUI kills in-flight agents — and is mitigated
-by ACP session resume rather than by building a daemon now. Process spawning
-sits behind a `Supervisor` interface so a detached daemon is a later swap, not
-a rewrite.
-
-## Architecture
-
-```
-ctui/
-  main.go
-  app/          bubbletea root model, layout, keymap, focus
-  agent/        Adapter interface + acp/ implementation
-  supervisor/   spawn, health, resume, kill
-  worktree/     create / list / apply / destroy
-  review/       diff model, hunk selection, patch build
-  approval/     cross-session permission queue + rules
-  store/        session log (JSONL), config, rules
-```
-
-Each package has one job and a narrow surface. `app` is the only package that
-imports Bubble Tea; everything below it is plain Go and testable without a
-terminal.
-
-### Data flow
-
-```
-claude-code-acp (child proc)
-        │ JSON-RPC 2.0 over stdio
-        ▼
-   agent/acp  ──── translates ACP notifications ───┐
-        │                                          │
-        ├─ Events()      chan Event  ──────────────┤
-        └─ Permissions() chan PermissionReq ───┐   │
-                                               │   │
-   supervisor (one goroutine per session) ─────┴───┤
-                                                   ▼
-                                         tea.Program.Send()
-                                                   │
-                                                   ▼
-                                        app root model.Update
-                                          ├─ session panes
-                                          ├─ approval queue
-                                          └─ review pane
-```
-
-One goroutine per session drains both channels and forwards into the Bubble
-Tea event loop via `Program.Send`. `Update` never blocks and never performs
-I/O; all work happens in commands or in the supervisor goroutines.
-
-## Components
-
-### agent — the adapter boundary
-
-The only interface that must be right, because backends two through four
-depend on it being backend-shaped rather than Claude-shaped.
-
-```go
-type Session interface {
-    Prompt(ctx context.Context, text string) error // steer while running
-    Interrupt(ctx context.Context) error
-    Events() <-chan Event
-    Permissions() <-chan PermissionReq
-    Close() error
-}
-
-type Event struct {
-    Kind    EventKind // Text, Thought, ToolCall, ToolResult, Plan, Done, Error
-    Text    string
-    Tool    *ToolCall
-    Plan    []PlanItem
-    Stop    StopReason
-}
-
-type PermissionReq struct {
-    Tool    ToolCall
-    Options []PermOption // from the agent: allow-once, allow-always, reject...
-    Reply   chan<- string // option ID; closed without a send == cancelled
-}
-```
-
-`PermissionReq.Reply` is the whole mechanism of the approval queue. ACP's
-`session/request_permission` is a JSON-RPC *request*: the agent blocks until
-answered. The adapter parks the pending request, hands the queue a reply
-channel, and answers when the queue resolves it.
-
-ACP surface consumed in v1:
-
-- `initialize`, `session/new`, `session/load`, `session/prompt`, `session/cancel`
-- `session/update` notifications: `agent_message_chunk`, `agent_thought_chunk`,
-  `tool_call`, `tool_call_update`, `plan`
-- `session/request_permission`
-
-Client-side `fs/*` and `terminal/*` methods are not implemented in v1; the
-agent uses its own filesystem and shell access inside its worktree.
-
-### supervisor — process lifecycle
-
-Spawns `npx @zed-industries/claude-code-acp` with the session worktree as
-cwd, performs the ACP handshake, and owns the process for its lifetime.
-Tracks a state machine per session:
-
-```
-starting → idle → running → idle
-              ↘ blocked (awaiting approval) ↗
-   any → crashed → (resume) → idle
-   any → closed
-```
-
-A crashed agent leaves its worktree and session log intact. Resume respawns
-the process and calls `session/load` when the agent advertises the
-`loadSession` capability; when it does not, the session restarts with its
-transcript replayed into the pane as history only.
-
-### worktree — isolation
-
-```
-repo/                  your tree, your branch
-.ctui/wt/claude-1/     branch ctui/claude-1, based on repo HEAD at spawn
-.ctui/wt/codex-2/      branch ctui/codex-2
-```
-
-- create: `git worktree add -b ctui/<name> .ctui/wt/<name> <base-sha>`
-- base-sha is recorded at spawn; every diff is computed against it
-- destroy: `git worktree remove --force` then `git branch -D`
-- `.ctui/` is added to `.git/info/exclude`, not to the user's `.gitignore`
-
-Fresh worktrees lack build artifacts and installed dependencies. A
-per-repo `postCreate` command in `.ctui/config.toml` runs after creation
-(`pnpm install`, or a symlink into the main tree's `node_modules`). This is
-the one config value that genuinely varies per repository, so it earns its
-existence; there is no other configurable behavior in v1.
-
-### review — one path to accepting work
-
-There is a single mechanism for landing a session's work: build a patch,
-apply it to the main tree. "Accept all" is that path with every hunk
-selected, not a separate merge codepath.
-
-- diff source: `git -C <wt> diff <base-sha>` — includes uncommitted changes,
-  because agents routinely leave work uncommitted
-- the pane renders per-file, per-hunk, with keys to accept, reject, or skip
-- accepting builds a filtered patch from the selected hunks and applies it
-  with `git -C <repo> apply --3way`
-- a failed apply is reported with the conflicting hunk and leaves both the
-  worktree and the main tree untouched
-
-Squash-merging the branch was considered and dropped: partial acceptance
-cannot be expressed as a merge, and maintaining two landing paths means the
-rare one is the broken one.
-
-### approval — the cross-session queue
-
-Every pending `PermissionReq` from every session lands in one list, sorted
-oldest first, visible regardless of which session pane has focus. Resolving
-an entry sends the chosen option ID on its reply channel, unblocking that
-agent.
-
-"Always allow" writes a rule to `.ctui/rules.json`, matched on tool name plus
-a glob over the tool's primary argument.
-
-Rules are a trust boundary and are treated as one:
-
-- Rules are stored per repository. There is no global rule file, so a rule
-  granted in one project never applies in another.
-- A rule may only be created from a request the user is actively approving.
-  Rules cannot be authored ahead of time through the UI.
-- Rules never match implicitly. A rule for `git commit` does not cover
-  `git commit && rm -rf .`; matching is against the parsed tool call the
-  agent sent, not a substring of a rendered command line.
-- The queue shows the matching rule for every auto-approved call in a muted
-  style, so silent approvals remain visible after the fact.
-- Rules are revocable from the queue pane, and revocation is immediate.
-
-### store — persistence
-
-`.ctui/sessions/<id>.jsonl` holds one JSON object per event, appended as it
-arrives. This is the transcript, the crash-recovery record, and the input to
-the session list on startup. Session metadata (backend, worktree path,
-base-sha, branch, created-at) lives in the first line of the file.
+Monolith cost is real: killing the TUI kills in-flight agents. Mitigated by
+ACP session resume, not by building a daemon.
 
 ## Layout
 
@@ -223,64 +42,157 @@ base-sha, branch, created-at) lives in the first line of the file.
 │ cursor  ✓done ││                   │              │
 └───────────────┘└──[a]ccept [r]eject [n]ext hunk┘
 ┌ approvals (2) ─────────────────────────────────┐
-│ codex  → rm -rf build/      [y][n][always]     │
-│ cursor → write .env         [y][n][always]     │
+│ codex  → rm -rf build/      [y][n]             │
+│ cursor → write .env         [y][n]             │
 └────────────────────────────────────────────────┘
 ```
 
-Session list is always visible. The main pane toggles between the session
-transcript and its diff. The approval queue is always visible when non-empty
-and collapses to nothing when empty. Mouse and OSC-8 hyperlinks are on;
-file references in transcripts are clickable.
+Session list always visible. Main pane toggles transcript / diff. Approval
+queue visible when non-empty, gone when empty.
 
-## Error handling
+## Files
+
+```
+main.go       flags, git preflight, tea.NewProgram
+ui.go         root model, layout, keymap, focus
+acp.go        child process + JSON-RPC over stdio
+worktree.go   create / diff / apply / destroy  (shells out to git)
+```
+
+Four files, not eight packages. `acp.go` and `worktree.go` have no Bubble Tea
+import, so they test without a terminal.
+
+No `Session` interface — there is one backend. Extract the interface when
+Codex lands and the second implementation shows what actually varies. An
+interface written against one implementation is a guess.
+
+No re-modelled event type. ACP `session/update` payloads are already
+structured; unmarshal into a struct that mirrors them and forward it to the
+UI. A translation layer between two representations of the same thing is
+where the bugs live.
+
+No state machine. A session is `running bool` and `blocked *PermissionReq`.
+Six named states describe four booleans nobody queries.
+
+## ACP transport
+
+JSON-RPC 2.0 over the child's stdin/stdout. `encoding/json` on `exec.Cmd`
+pipes — roughly 80 lines. No JSON-RPC framework: this speaks to exactly one
+peer over one pipe, and framework connection/codec/dispatch machinery is
+larger than the thing it replaces.
+
+Methods used:
+
+- out: `initialize`, `session/new`, `session/prompt`, `session/cancel`
+- in: `session/update` (`agent_message_chunk`, `agent_thought_chunk`,
+  `tool_call`, `tool_call_update`, `plan`)
+- in, blocking: `session/request_permission`
+
+Unknown `session/update` kinds are ignored, not fatal. Client-side `fs/*` and
+`terminal/*` are not implemented — the agent uses its own file and shell
+access inside its worktree.
+
+One goroutine per session reads the pipe and forwards into the Bubble Tea
+loop via `Program.Send`. `Update` never blocks and never does I/O.
+
+## Worktrees
+
+```
+repo/                  your tree, your branch
+.ctui/wt/claude-1/     branch ctui/claude-1, based on repo HEAD at spawn
+```
+
+Shell out to git. `go-git` is a large dependency to re-implement a CLI that
+is already installed and is the thing users debug with.
+
+- create: `git worktree add -b ctui/<n> .ctui/wt/<n> <base-sha>`
+- destroy: `git worktree remove --force` then `git branch -D`
+- `.ctui/` goes in `.git/info/exclude`, not the user's `.gitignore`
+
+Fresh worktrees have no `node_modules` or build cache. If
+`.ctui/postcreate` exists and is executable, run it after create. A shell
+script that either exists or doesn't — no config file, no TOML parser, no
+schema.
+
+## Review
+
+One mechanism for landing work: build a patch, apply it. "Accept all" is that
+path with every hunk selected, not a second codepath.
+
+- diff: `git -C <wt> diff <base-sha>` — includes uncommitted changes, because
+  agents routinely leave work uncommitted
+- parse and filter with `github.com/bluekeyes/go-gitdiff`. Unified-diff
+  parsing is a solved problem with edge cases (renames, mode changes, binary,
+  no-newline-at-EOF) that a hand-rolled parser gets wrong quietly.
+- apply: `git -C <repo> apply --3way` on the filtered patch
+- failed apply: report the conflicting hunk, change nothing, leave the
+  worktree intact
+
+Squash-merge was considered and dropped. Partial acceptance cannot be
+expressed as a merge, so keeping it means two landing paths, and the rare one
+is the one that rots.
+
+## Approvals
+
+ACP `session/request_permission` is a JSON-RPC *request* — the agent blocks
+until answered. Park the pending request, show it in one global queue sorted
+oldest-first, reply with the chosen option ID when the user resolves it. That
+is the entire mechanism.
+
+**No "always allow" in v1.** Persisted auto-approval rules are where all the
+security complexity lives — glob matching, scope, revocation, making silent
+approvals auditable after the fact — and none of it can be built carelessly.
+The queue exists precisely so answering prompts is cheap. Add rules when a
+measured session shows the queue is the bottleneck, and design them properly
+then: per-repo storage, no implicit matching, visible auto-approvals,
+one-key revocation.
+
+## Errors
 
 | Failure | Behavior |
 |---|---|
-| Agent process exits unexpectedly | Session → `crashed`. Worktree and log kept. Resume offered in the session list. Other sessions unaffected. |
-| Malformed or unknown ACP message | Logged to the session pane as a protocol warning. Unknown `session/update` kinds are ignored, not fatal. |
-| Worktree creation fails (branch exists, detached HEAD, dirty index) | Session is not created; the git error is shown verbatim. |
-| Patch apply conflicts | Nothing is applied. Conflicting hunk shown. Worktree left intact for retry. |
-| Approval arrives for a session whose pane is closed | Still queued — the queue is global, not per-pane. |
-| TUI exits with sessions running | Confirmation prompt listing running sessions; on confirm, agents are sent `session/cancel`, then terminated, and worktrees are left on disk for the next launch. |
+| Agent process exits unexpectedly | Session marked crashed. Worktree kept — it holds the actual work. Other sessions unaffected. |
+| Malformed or unknown ACP message | Shown in the session pane as a warning. Not fatal. |
+| Worktree create fails (branch exists, dirty index) | Session not created, git's error shown verbatim. |
+| Patch apply conflicts | Nothing applied. Conflicting hunk shown. Worktree intact. |
+| Approval for a backgrounded session | Still queued — the queue is global, not per-pane. |
+| Exit with sessions running | Confirm, listing them. On confirm: `session/cancel`, terminate, leave worktrees on disk. |
 
-## Testing
+## Tests
 
-- **agent/acp** — a fake ACP agent: a stdio fixture replaying canned JSON-RPC
-  frames. Table tests over ACP message → `Event` mapping, including unknown
-  message kinds and mid-stream errors.
-- **worktree** — real `git` against temp-directory fixtures. Create, list,
-  destroy, and the dirty-repo and branch-exists failure paths.
-- **review** — golden files: given a diff and a hunk selection, assert the
-  built patch byte-for-byte. Round-trip test that applying the full patch
-  reproduces the worktree state.
-- **approval** — table tests for rule matching, with explicit negative cases
-  for the near-miss patterns named in the security notes above.
-- **app** — `teatest` golden-frame tests for layout at a few terminal sizes,
-  and for focus movement between panes.
+Three, matching the three things that break:
 
-Every package below `app` is testable without a terminal, which is the point
-of keeping Bubble Tea confined to `app`.
+- **acp** — a fake agent: a shell script replaying canned JSON-RPC frames.
+  Asserts a prompt round-trips and a permission request reaches the queue.
+- **worktree** — real git in a temp dir. Create, diff, apply, destroy, plus
+  the branch-exists failure.
+- **review** — golden file: given a diff and a hunk selection, assert the
+  built patch byte-for-byte.
+
+No `teatest` golden frames. Layout churns every session while the UI is in
+flux; golden frames would fail on every intentional change and get
+regenerated without reading, which is a test that costs maintenance and
+catches nothing.
 
 ## Milestones
 
-1. **One session end to end.** Spawn claude-code-acp in a worktree, stream
-   its output into a pane, send prompts, interrupt. No review, no queue.
-2. **Approvals.** Permission requests reach a global queue and unblock the
-   agent when resolved. Rules and revocation.
-3. **Review and land.** Diff pane, hunk selection, patch apply, worktree
-   teardown.
-4. **Many sessions.** Session list, focus switching, per-session state, crash
-   recovery and resume.
-5. **Second backend.** Codex, to prove the adapter interface. Anything that
-   needed changing in `agent.Session` to make it fit is a v1 design bug.
+1. **One session end to end.** Spawn `claude-code-acp` in a worktree, stream
+   output, prompt, interrupt.
+2. **Approvals.** Global queue, y/n, agent unblocks.
+3. **Review and land.** Diff pane, hunk selection, apply, teardown.
+4. **Many sessions.** List, focus, per-session state.
 
-## Deferred, with triggers
+Ship after 4. That is the product.
 
-| Deferred | Add when |
+## Cut from v1, add when
+
+| Cut | Add when |
 |---|---|
-| Detached daemon (`ctuid`) | Losing a long run to a closed TUI actually costs a real task |
-| Context inspector, token budget | After milestone 4, when several sessions make spend opaque |
-| Checkpoint timeline / scrub-and-fork | After review lands; it depends on the same snapshot machinery |
-| Cursor-agent and Pi backends | After Codex proves the adapter |
-| Desktop notifications on block | When the approval queue is regularly unattended |
+| `Session` interface | Codex lands and shows what actually varies |
+| JSONL transcript / crash replay | Losing scrollback costs real work — the worktree already holds the code |
+| Persisted approval rules | A measured session shows the queue is the bottleneck |
+| Config file | A second thing needs configuring |
+| Detached daemon | A closed TUI kills a run that mattered |
+| Context inspector, token budget | Several sessions make spend opaque |
+| Checkpoint scrub-and-fork | After review lands; shares its machinery |
+| Desktop notify on block | The queue is regularly unattended |
