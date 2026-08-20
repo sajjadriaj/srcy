@@ -484,6 +484,17 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
         return;
       }
 
+      // Only now — apply and commit both succeeded — move base forward so
+      // these hunks stop showing up the next time review opens. A failure
+      // here doesn't undo the accept; it only means the next diff may
+      // resurface what was just accepted, so it's surfaced, not silent.
+      try {
+        await worktree.advanceAfterAccept(patch);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        append({ kind: "agent", text: `[warning: accepted, but could not advance the review base: ${message}]` });
+      }
+
       append({ kind: "agent", text: `[accepted: ${subject}]` });
       closeReview();
     } finally {

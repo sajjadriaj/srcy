@@ -477,3 +477,76 @@ test("why on a path with no history errors clearly", async (t) => {
   const repo = await newRepo(t);
   await assert.rejects(why(repo, "nope.txt", 1), "expected an error for a file with no history");
 });
+
+// The accept -> keep-working -> accept-again loop: after accepting one hunk
+// of two, the next diff() must show only the remaining hunk. Without
+// advanceAfterAccept, base never moves and the accepted hunk keeps
+// reappearing (and re-applying it would fail as an already-applied patch).
+test("advanceAfterAccept makes an accepted hunk disappear from the next diff", async (t) => {
+  const repo = await newRepo(t);
+  const lines: string[] = [];
+  for (let i = 1; i <= 20; i++) lines.push(`l${i}`);
+  const original = lines.join("\n") + "\n";
+  await write(repo, "a.txt", original);
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "seed a.txt");
+
+  const wt = await createWorktree(repo, "s1");
+  const changed = lines.slice();
+  changed[1] = "TWO-changed"; // line 2
+  changed[17] = "EIGHTEEN-changed"; // line 18
+  await write(wt.path, "a.txt", changed.join("\n") + "\n");
+
+  const raw = await wt.diff();
+  const r = new Review(raw);
+  assert.equal(r.files[0].hunks.length, 2, "the two edits should have landed in separate hunks");
+  r.toggle(); // select only hunk 0 (cursor starts at fi=0, hi=0)
+
+  const patch = r.patch();
+  const oldBase = wt.base;
+  await applyPatch(repo, patch);
+  await wt.advanceAfterAccept(patch);
+
+  assert.notEqual(wt.base, oldBase, "base did not advance after a successful accept");
+
+  const d2 = await wt.diff();
+  assert.ok(!d2.includes("TWO-changed"), `accepted hunk still present in the next diff:\n${d2}`);
+  assert.ok(d2.includes("EIGHTEEN-changed"), `remaining hunk missing from the next diff:\n${d2}`);
+});
+
+// advanceAfterAccept is built entirely against a scratch index; it must
+// never touch the worktree's real files or its real index.
+test("advanceAfterAccept leaves the worktree byte-identical", async (t) => {
+  const repo = await newRepo(t); // already has a.txt = "one\n" committed as "init"
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "one\nchanged\n");
+
+  const raw = await wt.diff(); // stages via `git add -A` as a side effect
+  const r = new Review(raw);
+  r.toggle();
+  const patch = r.patch();
+  await applyPatch(repo, patch);
+
+  const beforeContent = await readFile(join(wt.path, "a.txt"));
+  const beforeStatus = await git(wt.path, "status", "--porcelain");
+
+  await wt.advanceAfterAccept(patch);
+
+  const afterContent = await readFile(join(wt.path, "a.txt"));
+  const afterStatus = await git(wt.path, "status", "--porcelain");
+
+  assert.ok(beforeContent.equals(afterContent), "advanceAfterAccept modified the worktree's files");
+  assert.equal(beforeStatus, afterStatus, "advanceAfterAccept modified the worktree's real index");
+});
+
+// A rejected apply must leave base exactly where it was — nothing to
+// advance to, and no half-applied state to advance into.
+test("advanceAfterAccept leaves base unchanged when apply fails", async (t) => {
+  const repo = await newRepo(t); // already has a.txt = "one\n" committed as "init"
+  const wt = await createWorktree(repo, "s1");
+  const originalBase = wt.base;
+
+  const badPatch = "not a valid patch at all\n";
+  await assert.rejects(wt.advanceAfterAccept(badPatch), "expected apply --cached to fail on garbage input");
+  assert.equal(wt.base, originalBase, "base must not change when the apply fails");
+});

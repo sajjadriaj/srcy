@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 
 const execFileAsync = promisify(execFile);
@@ -16,13 +17,15 @@ interface ExecResult {
 
 // run executes git. When `stdin` is given it is written to the child's
 // stdin and the pipe closed — used for patches and commit messages, neither
-// of which fits on a command line.
-async function run(dir: string, args: string[], stdin?: string): Promise<ExecResult> {
+// of which fits on a command line. `extraEnv` is merged over process.env,
+// for plumbing that needs GIT_INDEX_FILE pointed at a scratch index.
+async function run(dir: string, args: string[], stdin?: string, extraEnv?: NodeJS.ProcessEnv): Promise<ExecResult> {
   try {
     const child = execFileAsync("git", args, {
       cwd: dir,
       encoding: "utf8",
       maxBuffer: MAX_BUFFER,
+      env: extraEnv ? { ...process.env, ...extraEnv } : undefined,
     });
     if (stdin !== undefined) {
       child.child.stdin?.end(stdin, "utf8");
@@ -61,12 +64,29 @@ async function gitStdin(dir: string, input: string, ...args: string[]): Promise<
   return stdout.trim();
 }
 
+// gitEnv/gitStdinEnv are git()/gitStdin() with extra environment variables —
+// used only for plumbing against a scratch GIT_INDEX_FILE, which must never
+// touch the worktree's real index.
+async function gitEnv(dir: string, env: NodeJS.ProcessEnv, ...args: string[]): Promise<string> {
+  const { stdout } = await run(dir, args, undefined, env);
+  return stdout.trim();
+}
+
+async function gitStdinEnv(dir: string, input: string, env: NodeJS.ProcessEnv, ...args: string[]): Promise<string> {
+  const { stdout } = await run(dir, args, input, env);
+  return stdout.trim();
+}
+
 // Worktree is one session's isolated checkout.
 export class Worktree {
   readonly repo: string; // the user's repository
   readonly path: string; // .ctui/wt/<name>
   readonly branch: string; // ctui/<name>
-  readonly base: string; // repo HEAD at creation; every diff is taken against this
+  // Repo HEAD at creation; every diff is taken against this. Not readonly:
+  // advanceAfterAccept moves it forward after every successful accept, so a
+  // hunk already applied never shows up in the next diff. Only that method
+  // should ever assign it.
+  base: string;
 
   constructor(repo: string, path: string, branch: string, base: string) {
     this.repo = repo;
@@ -118,6 +138,31 @@ export class Worktree {
       "--no-textconv",
       this.base,
     );
+  }
+
+  // advanceAfterAccept moves base forward to old base + `patch`, so that a
+  // hunk just accepted stops showing up in the next diff() and isn't
+  // re-applied on the next accept. Built entirely with plumbing against a
+  // scratch index (GIT_INDEX_FILE) — the worktree's real index and working
+  // tree are never touched.
+  //
+  // Deliberately NOT "set base to the repo's new HEAD": that only agrees
+  // with this while the user's own branch hasn't moved. If they commit
+  // unrelated work in the meantime, reading HEAD as the new base would make
+  // diff() start showing the inverse of their own commits as pending
+  // changes — wrong exactly when it matters most.
+  async advanceAfterAccept(patch: string): Promise<void> {
+    const dir = await fs.mkdtemp(join(tmpdir(), "ctui-index-"));
+    const indexFile = join(dir, "index");
+    const env = { GIT_INDEX_FILE: indexFile };
+    try {
+      await gitEnv(this.path, env, "read-tree", this.base);
+      await gitStdinEnv(this.path, patch, env, "apply", "--cached");
+      const tree = await gitEnv(this.path, env, "write-tree");
+      this.base = await git(this.path, "commit-tree", tree, "-p", this.base, "-m", "ctui: accepted");
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   }
 }
 
