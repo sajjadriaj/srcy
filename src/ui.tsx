@@ -5,6 +5,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "./acp.js";
+import { blastRadius, type Symbol as BlastSymbol } from "./blast.js";
 import { changedLines, patchPaths, Review, type Hunk } from "./diff.js";
 import { applyPatch, commitAccepted, type Worktree } from "./git.js";
 
@@ -126,6 +127,19 @@ function FileWindow({
 // marked. A hunkless section — a pure rename or a mode-only change — has
 // nothing to show as a patch, so patch view says so explicitly instead of
 // rendering nothing.
+// blastLine renders one "blast radius" row: `name()  N callers · agent read
+// M`. Highlighted (color) when the agent changed the symbol without reading
+// any of its callers — the 3am page, shown before you accept it.
+function blastLine(s: BlastSymbol): React.JSX.Element {
+  const unread = s.callers.length > 0 && s.readCount === 0;
+  const callerWord = s.callers.length === 1 ? "caller" : "callers";
+  return (
+    <Text key={s.name} color={unread ? "red" : undefined}>
+      {`  ${(s.name + "()").padEnd(20)}${s.callers.length} ${callerWord} · agent read ${s.readCount}`}
+    </Text>
+  );
+}
+
 function ReviewPane({
   branch,
   review,
@@ -134,6 +148,7 @@ function ReviewPane({
   summaryPending,
   fileContent,
   fileError,
+  blast,
 }: {
   branch: string;
   review: Review;
@@ -142,6 +157,7 @@ function ReviewPane({
   summaryPending: boolean;
   fileContent: string | null;
   fileError: string | null;
+  blast: BlastSymbol[];
 }): React.JSX.Element {
   const file = review.files[review.fi];
   const hunk: Hunk | undefined = file?.hunks[review.hi];
@@ -160,6 +176,12 @@ function ReviewPane({
         )}
         {!summaryPending && summary === "" && <Text dimColor>(no summary — press A to accept without one)</Text>}
       </Box>
+      {blast.length > 0 && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text dimColor>blast radius</Text>
+          {blast.map(blastLine)}
+        </Box>
+      )}
       <Text dimColor>{"─".repeat(50)}</Text>
       {!file ? (
         <Text dimColor>nothing to review</Text>
@@ -242,6 +264,12 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
   const [reviewMessage, setReviewMessage] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
+  const [blast, setBlast] = useState<BlastSymbol[]>([]);
+  // Every path the agent has opened with a "read" tool call, across the
+  // whole session (not just the turn that produced the current diff) — a
+  // plain ref because it accumulates from the bridge listener without
+  // needing a re-render of its own.
+  const readPathsRef = useRef<Set<string>>(new Set());
   // True only while the explain-gate prompt itself is in flight, so
   // onUpdate can route its streamed answer into the summary instead of the
   // transcript. A plain ref: it must be current inside the bridge listener
@@ -308,6 +336,12 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
             if (verb !== undefined) patch.verb = verb;
             if (u.toolPath !== undefined) patch.path = u.toolPath;
             upsertTool(u.toolCallId, patch);
+          }
+          // Blast radius asks "did the agent read this file", not "did it
+          // touch it" — only a "read" tool kind counts, so an edit to a
+          // caller (which also carries a location) doesn't count as reading it.
+          if (u.toolKind === "read" && u.toolPath !== undefined) {
+            readPathsRef.current.add(u.toolPath);
           }
           break;
         }
@@ -411,7 +445,8 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
         setNotice("nothing to review");
         return;
       }
-      setReview(new Review(raw));
+      const rev = new Review(raw);
+      setReview(rev);
       setReviewVersion(0);
       setPaneMode("patch");
       setSummary("");
@@ -419,8 +454,12 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
       setReviewMessage(null);
       setFileContent(null);
       setFileError(null);
+      setBlast([]);
       setViewMode("review");
       void sendExplainPrompt();
+      blastRadius(worktree.path, rev.files, readPathsRef.current)
+        .then(setBlast)
+        .catch(() => setBlast([]));
     } finally {
       reviewOpeningRef.current = false;
     }
@@ -432,6 +471,7 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
     setReviewMessage(null);
     setFileContent(null);
     setFileError(null);
+    setBlast([]);
     // The "r" keystroke that opened review is delivered to TextInput too
     // (it stays focused for that same event), which inserts a stray "r"
     // into the input; TextInput is unmounted for the whole review, so this
@@ -614,6 +654,7 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
           summaryPending={summaryPending}
           fileContent={fileContent}
           fileError={fileError}
+          blast={blast}
         />
       ) : (
         <Box flexDirection="column" borderStyle="round">
