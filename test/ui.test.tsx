@@ -123,7 +123,9 @@ test("a does nothing while the summary is pending, and does nothing with no hunk
 
   // A prompt() that never resolves on its own, so summaryPending can be
   // observed deterministically instead of racing a real answer.
-  let resolvePrompt: (() => void) | null = null;
+  // A holder rather than a bare `let`: TypeScript cannot prove the callback
+  // below runs before the call site, and narrows a plain variable to null.
+  const gate: { resolve?: () => void } = {};
   const promptCalls: string[] = [];
   const session: AgentSession = {
     sessionId: "fake-session",
@@ -131,7 +133,7 @@ test("a does nothing while the summary is pending, and does nothing with no hunk
     prompt: async (text: string) => {
       promptCalls.push(text);
       await new Promise<void>((resolve) => {
-        resolvePrompt = resolve;
+        gate.resolve = resolve;
       });
       return "end_turn";
     },
@@ -181,7 +183,7 @@ test("a does nothing while the summary is pending, and does nothing with no hunk
   const status = await git(repo, "status", "--porcelain");
   assert.equal(status, "", "nothing should have been staged or committed while gated");
 
-  resolvePrompt?.();
+  gate.resolve?.();
   await tick();
 });
 
