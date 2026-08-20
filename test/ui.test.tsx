@@ -56,6 +56,7 @@ test("app mounts showing branch and mode, and renders an approval prompt when on
       worktree: fakeWorktree(),
       initialMode: "default",
       modeDegraded: false,
+      explain: false,
       onExit: () => {},
     }),
   );
@@ -88,6 +89,7 @@ test("pressing y resolves the approval prompt with the allow_once option's id, n
       worktree: fakeWorktree(),
       initialMode: "default",
       modeDegraded: false,
+      explain: false,
       onExit: () => {},
     }),
   );
@@ -147,6 +149,7 @@ test("a does nothing while the summary is pending, and does nothing with no hunk
       worktree: wt,
       initialMode: "default",
       modeDegraded: false,
+      explain: false,
       onExit: () => {},
     }),
   );
@@ -196,6 +199,7 @@ test("A accepts without a summary and the resulting commit records Ctui-Prompt: 
       worktree: wt,
       initialMode: "default",
       modeDegraded: false,
+      explain: false,
       onExit: () => {},
     }),
   );
@@ -217,4 +221,41 @@ test("A accepts without a summary and the resulting commit records Ctui-Prompt: 
 
   const trailer = await git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Prompt,valueonly)");
   assert.equal(trailer.trim(), "<none>");
+});
+
+// --explain: understanding, not writing. "r" must be refused rather than
+// opening review, regardless of whatever the agent left in the worktree.
+test("--explain: pressing r does not open review, and the status line says so", async () => {
+  const bridge = new EventEmitter();
+  const { stdin, lastFrame } = render(
+    React.createElement(App, {
+      branch: "ctui/why1",
+      session: fakeSession(),
+      bridge,
+      worktree: fakeWorktree(),
+      initialMode: "default",
+      modeDegraded: false,
+      explain: true,
+      onExit: () => {},
+    }),
+  );
+  await tick();
+
+  const initial = lastFrame() ?? "";
+  assert.match(initial, /ctui\/why1 · explain · nothing is kept/);
+
+  stdin.write("r");
+  await tick();
+
+  const after = lastFrame() ?? "";
+  assert.match(after, /explain session — nothing to accept/);
+  assert.ok(!after.includes("[space] select"), "review pane must not have opened in an explain session");
+
+  // The refused "r" still reaches TextInput (it's still focused), the same
+  // quirk closeReview() works around for a real review — but there's no
+  // review-close cycle to piggyback the cleanup on here, so it needs its
+  // own cleanup. Left unfixed, this "r" prefixes whatever gets typed next.
+  await tick();
+  const afterCleanup = lastFrame() ?? "";
+  assert.ok(!afterCleanup.includes("> r"), `stray "r" leaked into the input box:\n${afterCleanup}`);
 });

@@ -5,8 +5,9 @@ import { git, createWorktree } from "./git.js";
 import { startSession, type AgentSession, type AgentUpdate, type PermissionRequest } from "./acp.js";
 import { App } from "./ui.js";
 
-function parseArgs(argv: string[]): { name: string } {
+function parseArgs(argv: string[]): { name: string; explain: boolean } {
   let name = "s1";
+  let explain = false;
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--name") {
       const value = argv[i + 1];
@@ -16,9 +17,11 @@ function parseArgs(argv: string[]): { name: string } {
       }
       name = value;
       i++;
+    } else if (argv[i] === "--explain") {
+      explain = true;
     }
   }
-  return { name };
+  return { name, explain };
 }
 
 // Attempts to pin the session to "default" mode, per the invariant that
@@ -40,7 +43,7 @@ async function resolveMode(session: AgentSession): Promise<{ mode: string; degra
 }
 
 async function main(): Promise<void> {
-  const { name } = parseArgs(process.argv.slice(2));
+  const { name, explain } = parseArgs(process.argv.slice(2));
 
   let repo: string;
   try {
@@ -81,6 +84,7 @@ async function main(): Promise<void> {
       worktree,
       initialMode,
       modeDegraded,
+      explain,
       onExit: (result: { agentDied: boolean }) => {
         agentDied = result.agentDied;
       },

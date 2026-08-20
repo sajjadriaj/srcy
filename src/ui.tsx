@@ -234,10 +234,26 @@ export interface AppProps {
   // True if we could not confirm the session is in "default" mode — the
   // approval gate may be degraded, so this must stay visible, not silent.
   modeDegraded: boolean;
+  // Read-only: understanding, not writing. No review pane, "r" is refused,
+  // and the worktree is destroyed on exit without applying anything.
+  // ponytail: "read-only" here is discard-on-close, not an enforced
+  // read-only filesystem. Real enforcement means containers or mount
+  // tricks. Revisit if an explain session ever needs to be trusted
+  // against a dirty tree.
+  explain: boolean;
   onExit: (result: { agentDied: boolean }) => void;
 }
 
-export function App({ branch, session, bridge, worktree, initialMode, modeDegraded, onExit }: AppProps): React.JSX.Element {
+export function App({
+  branch,
+  session,
+  bridge,
+  worktree,
+  initialMode,
+  modeDegraded,
+  explain,
+  onExit,
+}: AppProps): React.JSX.Element {
   const { exit } = useApp();
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [mode, setMode] = useState(initialMode);
@@ -393,6 +409,19 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
       cancelled = true;
     };
   }, [review, reviewVersion, paneMode, worktree.path]);
+
+  // In an explain session "r" is refused rather than opening review, but the
+  // same keystroke still reaches TextInput (it's still focused, same quirk
+  // closeReview() below works around), leaving a stray "r" sitting in the
+  // input. There is no review-close cycle here to piggyback the cleanup on,
+  // so clear it in an effect: that runs strictly after the keystroke's own
+  // render commits, so it can't race TextInput's own append the way clearing
+  // it synchronously inside the key handler would.
+  useEffect(() => {
+    if (explain && notice === "explain session — nothing to accept") {
+      setInput("");
+    }
+  }, [explain, notice]);
 
   // mutateReview applies a mutation to the review's own class methods
   // (toggle/next/prev) and bumps reviewVersion to force the re-render React
@@ -612,7 +641,11 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
     // message (e.g. "read the file"), and only opens review when there is
     // nothing being typed for it to interrupt.
     if (char === "r" && input === "" && !running) {
-      void openReview();
+      if (explain) {
+        setNotice("explain session — nothing to accept");
+      } else {
+        void openReview();
+      }
       return;
     }
 
@@ -641,6 +674,7 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
 
   const statusWord = agentDied ? "agent exited" : running ? "running" : "idle";
   const modeWord = modeDegraded ? `${mode} mode (gate degraded)` : `${mode} mode`;
+  const statusLine = explain ? `${branch} · explain · nothing is kept` : `${branch} · ${modeWord} · ${statusWord}`;
   const inputEnabled = !running && !permission && !agentDied && viewMode === "chat";
 
   return (
@@ -658,9 +692,7 @@ export function App({ branch, session, bridge, worktree, initialMode, modeDegrad
         />
       ) : (
         <Box flexDirection="column" borderStyle="round">
-          <Text>
-            {branch} · {modeWord} · {statusWord}
-          </Text>
+          <Text>{statusLine}</Text>
           {transcript.map((entry, i) => {
             if (entry.kind === "tool") {
               const line = [entry.verb, entry.path].filter(Boolean).join("  ");
