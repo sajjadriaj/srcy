@@ -48,6 +48,17 @@ func TestSplitDiffSeparatesFilesAndHunks(t *testing.T) {
 	if files[0].Hunks[0].Body != wantBody {
 		t.Fatalf("hunk body = %q, want %q", files[0].Hunks[0].Body, wantBody)
 	}
+	// b.txt's hunk uses the omitted-count form on both sides ("-0,0 +1"), so
+	// this is what actually exercises countOr1's default-to-1 branch: the
+	// other two hunks above either spell the count out explicitly or are
+	// covered by NewCount/NewStart instead of Body.
+	if len(files[1].Hunks) != 1 {
+		t.Fatalf("b.txt: got %d hunks, want 1", len(files[1].Hunks))
+	}
+	wantBBody := "+brand new\n"
+	if files[1].Hunks[0].Body != wantBBody {
+		t.Fatalf("b.txt hunk body = %q, want %q", files[1].Hunks[0].Body, wantBBody)
+	}
 }
 
 // The dangerous case: a context line that looks like a file boundary.
@@ -197,15 +208,17 @@ func TestSplitDiffPathSurvivesSpacesAndQuoting(t *testing.T) {
 		want string
 	}{
 		{
+			// git appends a TAB after any path containing a space, on both
+			// the old and new side alike — the unified-diff convention that
+			// separates a path from an optional trailing timestamp.
 			name: "unquoted path with spaces",
-			raw: `diff --git a/my file.txt b/my file.txt
-index 1111111..2222222 100644
---- a/my file.txt
-+++ b/my file.txt
-@@ -1,1 +1,1 @@
--old
-+new
-`,
+			raw: "diff --git a/my file.txt b/my file.txt\n" +
+				"index 1111111..2222222 100644\n" +
+				"--- a/my file.txt\t\n" +
+				"+++ b/my file.txt\t\n" +
+				"@@ -1,1 +1,1 @@\n" +
+				"-old\n" +
+				"+new\n",
 			want: "my file.txt",
 		},
 		{
@@ -221,15 +234,18 @@ index 1111111..2222222 100644
 			want: "café.txt",
 		},
 		{
+			// Same TAB-after-a-space rule as above, but now the path is also
+			// quoted (non-ASCII bytes trigger quoting independently of the
+			// space): the tab sits outside the closing quote, and unquoting
+			// must still succeed.
 			name: "quoted path with spaces",
-			raw: `diff --git "a/caf\303\251 report.txt" "b/caf\303\251 report.txt"
-index 1111111..2222222 100644
---- "a/caf\303\251 report.txt"
-+++ "b/caf\303\251 report.txt"
-@@ -1,1 +1,1 @@
--old
-+new
-`,
+			raw: "diff --git \"a/caf\\303\\251 report.txt\" \"b/caf\\303\\251 report.txt\"\n" +
+				"index 1111111..2222222 100644\n" +
+				"--- \"a/caf\\303\\251 report.txt\"\t\n" +
+				"+++ \"b/caf\\303\\251 report.txt\"\t\n" +
+				"@@ -1,1 +1,1 @@\n" +
+				"-old\n" +
+				"+new\n",
 			want: "café report.txt",
 		},
 		{
@@ -243,6 +259,23 @@ index 1111111..0000000
 -bye
 `,
 			want: "gone.txt",
+		},
+		{
+			// Regression: stripping BOTH "a/" and "b/" off the same value
+			// (instead of only the side's own prefix) eats a real directory
+			// component whenever it happens to be named "b". A deletion is
+			// the case that actually exercises it — the old side ("--- ")
+			// is only ever consulted when the new side is /dev/null.
+			name: "deletion under a directory literally named b",
+			raw: `diff --git a/b/x.txt b/b/x.txt
+deleted file mode 100644
+index 1111111..0000000
+--- a/b/x.txt
++++ /dev/null
+@@ -1,1 +0,0 @@
+-one
+`,
+			want: "b/x.txt",
 		},
 	}
 	for _, c := range cases {
@@ -259,25 +292,31 @@ index 1111111..0000000
 }
 
 // A hunkless section — a pure rename or a mode-only change — must survive
-// selecting everything. Real git output only: a hand-written fixture is how
-// this bug (BuildPatch dropping such sections) was missed the first time.
+// selecting everything, and its Path must survive intact even when the
+// section has no `+++`/`--- ` line to read it from (so it falls back to the
+// `rename to ` line or the `diff --git` line instead). Both file names below
+// contain a space specifically to exercise that fallback, real git output
+// only: a hand-written fixture is how the original hunkless-section bug was
+// missed the first time, and space-free names are how the fallback's own
+// space-mangling bug was missed the second time.
 func TestBuildPatchKeepsHunklessFileSections(t *testing.T) {
 	repo := newRepo(t)
-	write(t, repo, "b.sh", "#!/bin/sh\necho hi\n")
+	write(t, repo, "ren me.txt", "one\n")
+	write(t, repo, "modeonly space.txt", "one\n")
 	if _, err := git(repo, "add", "-A"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := git(repo, "commit", "-qm", "add b.sh"); err != nil {
+	if _, err := git(repo, "commit", "-qm", "add files with spaces"); err != nil {
 		t.Fatal(err)
 	}
 	wt, err := CreateWorktree(repo, "s1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Rename(filepath.Join(wt.Path, "a.txt"), filepath.Join(wt.Path, "renamed.txt")); err != nil {
+	if err := os.Rename(filepath.Join(wt.Path, "ren me.txt"), filepath.Join(wt.Path, "renamed here.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(wt.Path, "b.sh"), 0o755); err != nil {
+	if err := os.Chmod(filepath.Join(wt.Path, "modeonly space.txt"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -285,19 +324,21 @@ func TestBuildPatchKeepsHunklessFileSections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(raw, "rename from a.txt") || !strings.Contains(raw, "old mode 100644") {
+	if !strings.Contains(raw, "rename from ren me.txt") || !strings.Contains(raw, "old mode 100644") {
 		t.Fatalf("test setup did not produce a rename and a mode change; got:\n%s", raw)
 	}
 
 	files := SplitDiff(raw)
-	foundRename := false
+	wantPaths := map[string]bool{"renamed here.txt": false, "modeonly space.txt": false}
 	for _, f := range files {
-		if f.Path == "renamed.txt" {
-			foundRename = true
+		if _, ok := wantPaths[f.Path]; ok {
+			wantPaths[f.Path] = true
 		}
 	}
-	if !foundRename {
-		t.Error("renamed file's Path should be the new name \"renamed.txt\"")
+	for path, found := range wantPaths {
+		if !found {
+			t.Errorf("no section had Path == %q — a space in a hunkless section's path was mangled", path)
+		}
 	}
 
 	patch := BuildPatch(files, func(fi, hi int) bool { return true })

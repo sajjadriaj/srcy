@@ -54,7 +54,7 @@ func SplitDiff(raw string) []FileDiff {
 		gitLine := lines[i]
 		f := FileDiff{}
 		var header []string
-		var plusLine, minusLine string
+		var plusLine, minusLine, renameToLine string
 		header = append(header, lines[i])
 		i++
 		// Header runs until the first hunk or the next file.
@@ -69,11 +69,13 @@ func SplitDiff(raw string) []FileDiff {
 				plusLine = lines[i]
 			} else if strings.HasPrefix(lines[i], "--- ") {
 				minusLine = lines[i]
+			} else if strings.HasPrefix(lines[i], "rename to ") {
+				renameToLine = lines[i]
 			}
 			header = append(header, lines[i])
 			i++
 		}
-		f.Path = filePath(gitLine, plusLine, minusLine)
+		f.Path = filePath(gitLine, renameToLine, plusLine, minusLine)
 		f.Header = strings.Join(header, "\n") + "\n"
 
 		for i < len(lines) && strings.HasPrefix(lines[i], "@@ ") {
@@ -175,56 +177,82 @@ func BuildPatch(files []FileDiff, selected func(fi, hi int) bool) string {
 	return b.String()
 }
 
-// pathFromHeader pulls the new-side path out of `diff --git a/x b/x`.
-//
-// This splits on whitespace, so it breaks on an unquoted path containing a
-// space and on git's quoted form alike. It exists only as the last-resort
-// fallback for sections with no `+++`/`--- ` line to read instead (a
-// mode-only change or a pure rename with no content diff).
-func pathFromHeader(line string) string {
-	fields := strings.Fields(line)
-	if len(fields) < 4 {
-		return ""
-	}
-	return strings.TrimPrefix(fields[3], "b/")
-}
-
-// filePath picks the file's path, preferring the `+++`/`--- ` content lines
-// over the `diff --git` header: they are each a single field, so they
-// survive spaces and git's quoting, where splitting the header line on
-// whitespace does not.
-func filePath(gitLine, plusLine, minusLine string) string {
+// filePath picks the file's path. It prefers the `+++`/`--- ` content
+// lines: each is a single field, so it survives spaces and git's quoting,
+// where splitting the `diff --git` line on whitespace does not. Failing
+// that (a mode-only change or a pure rename has no content lines at all),
+// a rename's `rename to ` line carries the new path exactly and unambiguously.
+// Only a mode-only or binary change with no other source falls back to
+// parsing the `diff --git` line itself.
+func filePath(gitLine, renameToLine, plusLine, minusLine string) string {
 	if plusLine != "" {
-		if p := pathFromDiffLine(plusLine, "+++ "); p != "" {
+		if p := pathFromDiffLine(plusLine, "+++ ", "b/"); p != "" {
 			return p
 		}
 	}
 	if minusLine != "" {
-		if p := pathFromDiffLine(minusLine, "--- "); p != "" {
+		if p := pathFromDiffLine(minusLine, "--- ", "a/"); p != "" {
 			return p
 		}
 	}
-	return pathFromHeader(gitLine)
+	if renameToLine != "" {
+		return unquotePath(strings.TrimPrefix(renameToLine, "rename to "))
+	}
+	return pathFromGitLine(gitLine)
 }
 
-// pathFromDiffLine extracts the path from a `+++ ` or `--- ` line. Returns
-// "" for /dev/null (add or delete), letting the caller fall back to the
-// other side. Git quotes a path in C-style double quotes with octal escapes
-// when it contains non-ASCII or other special bytes; strconv.Unquote
-// understands that syntax since it is also Go's.
-func pathFromDiffLine(line, prefix string) string {
-	p := strings.TrimPrefix(line, prefix)
+// pathFromDiffLine extracts the path from a `+++ ` or `--- ` line, stripping
+// only that side's own "a/"/"b/" prefix (ownPrefix) — never both, or a real
+// directory literally named "b" gets eaten along with the marker (e.g.
+// `--- a/b/x.txt` must yield "b/x.txt", not "x.txt"). Returns "" for
+// /dev/null (add or delete), letting the caller fall back to the other side.
+func pathFromDiffLine(line, marker, ownPrefix string) string {
+	p := strings.TrimPrefix(line, marker)
 	if p == "/dev/null" {
 		return ""
 	}
+	return strings.TrimPrefix(unquotePath(p), ownPrefix)
+}
+
+// unquotePath undoes what git did to a path before writing it to a
+// unified-diff line. Order matters: a trailing TAB (the timestamp
+// separator, which git appends whenever the path contains a space — on
+// both the old and new side alike) must come off before the C-style
+// quoting is parsed, or a quoted path with a space in it fails to unquote
+// and comes back with the quotes, octal escapes, and tab all still
+// attached. strconv.Unquote understands git's quoting because it is also
+// Go's.
+func unquotePath(p string) string {
+	p = strings.TrimSuffix(p, "\t")
 	if strings.HasPrefix(p, `"`) {
 		if unq, err := strconv.Unquote(p); err == nil {
-			p = unq
+			return unq
 		}
 	}
-	p = strings.TrimPrefix(p, "a/")
-	p = strings.TrimPrefix(p, "b/")
 	return p
+}
+
+// pathFromGitLine recovers the path from `diff --git a/P b/P` for a section
+// with nothing else to read it from — a mode-only change or a binary file,
+// neither renamed. Old and new are identical here: a rename carries its own
+// `rename from`/`rename to` lines, handled before this is ever reached.
+// Splitting on whitespace breaks the moment P itself contains a space, so
+// this instead finds the "P b/P" split point where both halves match.
+//
+// The quoted form (`diff --git "a/P" "b/P"`, for a non-ASCII path) is left
+// unhandled here, same as before this fix — nothing in this fallback's
+// input set exercises it.
+func pathFromGitLine(line string) string {
+	rest := strings.TrimPrefix(line, "diff --git a/")
+	if rest == line {
+		return ""
+	}
+	for i := 0; i+3 <= len(rest); i++ {
+		if rest[i:i+3] == " b/" && rest[:i] == rest[i+3:] {
+			return rest[:i]
+		}
+	}
+	return rest
 }
 
 func countOr1(s string) int {

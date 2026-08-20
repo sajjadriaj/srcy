@@ -361,3 +361,36 @@ func TestDiffPreservesTrailingBlankContextLine(t *testing.T) {
 			wantOld, wantNew, gotOld, gotNew, h.Header, h.Body)
 	}
 }
+
+// diff.mnemonicPrefix (c/i instead of a/b) is a user preference for reading
+// diffs; we are producing bytes for `git apply`, which needs a/b regardless
+// of how the repo (or the user's global config) has this set. Diff() must
+// neutralize it with an explicit -c, not just rely on git's default.
+func TestDiffIgnoresUserDiffConfig(t *testing.T) {
+	repo := newRepo(t)
+	if _, err := git(repo, "config", "diff.mnemonicPrefix", "true"); err != nil {
+		t.Fatal(err)
+	}
+
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, wt.Path, "a.txt", "one\ntwo\n")
+
+	raw, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "diff --git a/a.txt b/a.txt") {
+		t.Fatalf("diff.mnemonicPrefix was not neutralized, want a/b prefixes:\n%s", raw)
+	}
+	if strings.Contains(raw, "c/a.txt") || strings.Contains(raw, "i/a.txt") {
+		t.Fatalf("diff.mnemonicPrefix leaked into the diff:\n%s", raw)
+	}
+
+	files := SplitDiff(raw)
+	if len(files) != 1 || files[0].Path != "a.txt" {
+		t.Fatalf("got %+v, want a single file with Path \"a.txt\"", files)
+	}
+}

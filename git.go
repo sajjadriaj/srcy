@@ -189,8 +189,16 @@ func (w *Worktree) Diff() (string, error) {
 	if _, err := git(w.Path, "add", "-A"); err != nil {
 		return "", err
 	}
-	return gitRaw(w.Path, "-c", "core.attributesFile="+attrs,
-		"diff", "--cached", w.Base)
+	// We are producing bytes for `git apply`, so the diff must be literal
+	// regardless of how the user has configured *reading* diffs: neutralize
+	// diff.mnemonicPrefix (c/i instead of a/b) and diff.noprefix (no prefix
+	// at all), and disable any external diff driver or textconv filter that
+	// would make the output something other than a real patch.
+	return gitRaw(w.Path,
+		"-c", "core.attributesFile="+attrs,
+		"-c", "diff.mnemonicPrefix=false",
+		"-c", "diff.noprefix=false",
+		"diff", "--cached", "--no-ext-diff", "--no-textconv", w.Base)
 }
 
 // writeAttributes drops our driver mappings in .ctui and returns the path,
