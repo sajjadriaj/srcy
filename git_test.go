@@ -301,3 +301,63 @@ func TestDiffLeavesUserAttributesFileAlone(t *testing.T) {
 		t.Fatalf("ctui modified the user's attributes file.\nwant %q\ngot  %q", userContent, got)
 	}
 }
+
+// A file whose final line is blank produces a trailing whitespace-only
+// context line in git's diff output. The plain, trimming git() helper
+// would strip it, leaving the @@ header's declared counts describing more
+// lines than the body actually has — corrupt input for `git apply`. Diff()
+// must use the untrimmed gitRaw instead.
+func TestDiffPreservesTrailingBlankContextLine(t *testing.T) {
+	repo := newRepo(t)
+	write(t, repo, "f.txt", "l1\nl2\nl3\nl4\nl5\n\n")
+	if _, err := git(repo, "add", "-A"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git(repo, "commit", "-qm", "add f.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	wt, err := CreateWorktree(repo, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, wt.Path, "f.txt", "l1\nl2\nl3\nl4\nCHANGED\n\n")
+
+	raw, err := wt.Diff()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, "\n \n") {
+		t.Fatalf("trailing blank context line missing from diff:\n%q", raw)
+	}
+
+	files := SplitDiff(raw)
+	if len(files) != 1 || len(files[0].Hunks) == 0 {
+		t.Fatalf("expected one file with a hunk, got %+v", files)
+	}
+	h := files[0].Hunks[len(files[0].Hunks)-1]
+	m := hunkRe.FindStringSubmatch(strings.TrimSuffix(h.Header, "\n"))
+	if m == nil {
+		t.Fatalf("hunk header did not parse: %q", h.Header)
+	}
+	wantOld, wantNew := countOr1(m[2]), countOr1(m[4])
+
+	gotOld, gotNew := 0, 0
+	for _, line := range strings.Split(strings.TrimSuffix(h.Body, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(line, "-"):
+			gotOld++
+		case strings.HasPrefix(line, "+"):
+			gotNew++
+		case strings.HasPrefix(line, `\`):
+			// no-newline marker; not a counted line
+		default:
+			gotOld++
+			gotNew++
+		}
+	}
+	if gotOld != wantOld || gotNew != wantNew {
+		t.Fatalf("hunk declares -%d +%d lines but body has %d old, %d new\nheader: %q\nbody: %q",
+			wantOld, wantNew, gotOld, gotNew, h.Header, h.Body)
+	}
+}

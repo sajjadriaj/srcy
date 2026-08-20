@@ -24,6 +24,22 @@ func git(dir string, args ...string) (string, error) {
 	return strings.TrimSpace(stdout.String()), nil
 }
 
+// gitRaw is git() without the trimming. Diff output is bytes we hand to
+// `git apply` verbatim, and a trailing whitespace-only context line is
+// content, not noise: trimming it leaves the @@ counts describing more
+// lines than the body contains, which git rejects as a corrupt patch.
+func gitRaw(dir string, args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s: %w: %s",
+			strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.String(), nil
+}
+
 // Worktree is one session's isolated checkout.
 type Worktree struct {
 	Repo   string // the user's repository
@@ -173,7 +189,7 @@ func (w *Worktree) Diff() (string, error) {
 	if _, err := git(w.Path, "add", "-A"); err != nil {
 		return "", err
 	}
-	return git(w.Path, "-c", "core.attributesFile="+attrs,
+	return gitRaw(w.Path, "-c", "core.attributesFile="+attrs,
 		"diff", "--cached", w.Base)
 }
 

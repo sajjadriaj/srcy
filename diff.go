@@ -51,8 +51,10 @@ func SplitDiff(raw string) []FileDiff {
 			i++ // preamble or trailing junk
 			continue
 		}
-		f := FileDiff{Path: pathFromHeader(lines[i])}
+		gitLine := lines[i]
+		f := FileDiff{}
 		var header []string
+		var plusLine, minusLine string
 		header = append(header, lines[i])
 		i++
 		// Header runs until the first hunk or the next file.
@@ -63,9 +65,15 @@ func SplitDiff(raw string) []FileDiff {
 				strings.HasPrefix(lines[i], "GIT binary patch") {
 				f.Binary = true
 			}
+			if strings.HasPrefix(lines[i], "+++ ") {
+				plusLine = lines[i]
+			} else if strings.HasPrefix(lines[i], "--- ") {
+				minusLine = lines[i]
+			}
 			header = append(header, lines[i])
 			i++
 		}
+		f.Path = filePath(gitLine, plusLine, minusLine)
 		f.Header = strings.Join(header, "\n") + "\n"
 
 		for i < len(lines) && strings.HasPrefix(lines[i], "@@ ") {
@@ -83,14 +91,27 @@ func SplitDiff(raw string) []FileDiff {
 func readHunk(lines []string, start int) (Hunk, int) {
 	m := hunkRe.FindStringSubmatch(lines[start])
 	h := Hunk{Header: lines[start] + "\n"}
-	oldLeft, newLeft := 0, 0
-	if m != nil {
-		oldLeft = countOr1(m[2])
-		h.NewStart = atoi(m[3])
-		newLeft = countOr1(m[4])
-		h.NewCount = newLeft
-		h.Func = strings.TrimSpace(m[5])
+	if m == nil {
+		// ponytail: prefix scan is the known-inferior fallback, used only where
+		// the @@ counts are unavailable. Correct input never reaches this path.
+		var body []string
+		i := start + 1
+		for i < len(lines) &&
+			!strings.HasPrefix(lines[i], "@@ ") &&
+			!strings.HasPrefix(lines[i], "diff --git ") {
+			body = append(body, lines[i])
+			i++
+		}
+		if len(body) > 0 {
+			h.Body = strings.Join(body, "\n") + "\n"
+		}
+		return h, i
 	}
+	oldLeft := countOr1(m[2])
+	h.NewStart = atoi(m[3])
+	newLeft := countOr1(m[4])
+	h.NewCount = newLeft
+	h.Func = strings.TrimSpace(m[5])
 
 	var body []string
 	i := start + 1
@@ -140,6 +161,9 @@ func BuildPatch(files []FileDiff, selected func(fi, hi int) bool) string {
 			}
 		}
 		if len(kept) == 0 {
+			if len(f.Hunks) == 0 && selected(fi, 0) { // mode-only, pure rename
+				b.WriteString(f.Header)
+			}
 			continue
 		}
 		b.WriteString(f.Header)
@@ -152,12 +176,55 @@ func BuildPatch(files []FileDiff, selected func(fi, hi int) bool) string {
 }
 
 // pathFromHeader pulls the new-side path out of `diff --git a/x b/x`.
+//
+// This splits on whitespace, so it breaks on an unquoted path containing a
+// space and on git's quoted form alike. It exists only as the last-resort
+// fallback for sections with no `+++`/`--- ` line to read instead (a
+// mode-only change or a pure rename with no content diff).
 func pathFromHeader(line string) string {
 	fields := strings.Fields(line)
 	if len(fields) < 4 {
 		return ""
 	}
 	return strings.TrimPrefix(fields[3], "b/")
+}
+
+// filePath picks the file's path, preferring the `+++`/`--- ` content lines
+// over the `diff --git` header: they are each a single field, so they
+// survive spaces and git's quoting, where splitting the header line on
+// whitespace does not.
+func filePath(gitLine, plusLine, minusLine string) string {
+	if plusLine != "" {
+		if p := pathFromDiffLine(plusLine, "+++ "); p != "" {
+			return p
+		}
+	}
+	if minusLine != "" {
+		if p := pathFromDiffLine(minusLine, "--- "); p != "" {
+			return p
+		}
+	}
+	return pathFromHeader(gitLine)
+}
+
+// pathFromDiffLine extracts the path from a `+++ ` or `--- ` line. Returns
+// "" for /dev/null (add or delete), letting the caller fall back to the
+// other side. Git quotes a path in C-style double quotes with octal escapes
+// when it contains non-ASCII or other special bytes; strconv.Unquote
+// understands that syntax since it is also Go's.
+func pathFromDiffLine(line, prefix string) string {
+	p := strings.TrimPrefix(line, prefix)
+	if p == "/dev/null" {
+		return ""
+	}
+	if strings.HasPrefix(p, `"`) {
+		if unq, err := strconv.Unquote(p); err == nil {
+			p = unq
+		}
+	}
+	p = strings.TrimPrefix(p, "a/")
+	p = strings.TrimPrefix(p, "b/")
+	return p
 }
 
 func countOr1(s string) int {
