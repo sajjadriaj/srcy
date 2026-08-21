@@ -134,6 +134,12 @@ export class Worktree {
       "core.quotePath=false",
       "diff",
       "--cached",
+      // Without --binary, git emits "Binary files … differ" for a changed
+      // binary file — not real patch data, so `git apply` rejects it
+      // ("cannot apply binary patch without full index line"). Worse, git
+      // apply treats the whole patch as one unit, so one unappliable binary
+      // section fails every other (text) hunk in the same accept too.
+      "--binary",
       "--no-ext-diff",
       "--no-textconv",
       this.base,
@@ -283,16 +289,96 @@ async function runPostCreate(w: Worktree): Promise<void> {
   }
 }
 
+// dirtyPaths returns which of `paths` already have unstaged or staged
+// changes in the user's repo (not the worktree — the real repo applyPatch
+// targets). The caller must refuse to apply anything touching one of these
+// before ever calling applyPatch: --3way is not atomic the way plain `git
+// apply` is — on a path with the user's own staged content, a conflicting
+// 3-way merge can write conflict markers into their file AND replace their
+// staged version in the index with the (rejected) 3-way merge state, then
+// still exit non-zero. Refusing up front is the fix; applyPatch itself
+// makes no attempt to be safe against this, by design (see its own comment).
+export async function dirtyPaths(repo: string, paths: string[]): Promise<string[]> {
+  const dirty: string[] = [];
+  for (const p of paths) {
+    const [unstaged, staged] = await Promise.all([
+      isDirty(repo, ["diff", "--quiet", "--", p]),
+      isDirty(repo, ["diff", "--cached", "--quiet", "--", p]),
+    ]);
+    if (unstaged || staged) dirty.push(p);
+  }
+  return dirty;
+}
+
+// isDirty runs a `git diff --quiet` variant, whose real API is its exit
+// code: 0 means no difference, 1 means there is one, and anything else is a
+// genuine error that must not be swallowed as "clean".
+async function isDirty(repo: string, args: string[]): Promise<boolean> {
+  try {
+    await run(repo, args);
+    return false;
+  } catch (err) {
+    if (err instanceof Error && /exit status 1:/.test(err.message)) return true;
+    throw err;
+  }
+}
+
 // applyPatch applies a patch to the user's repository.
 //
 // --3way lets git use blob context to place a hunk whose surroundings have
 // drifted; --index keeps the working tree and index in step so the commit
-// that follows sees exactly what was applied. On failure git applies
-// nothing, which is the behaviour the review gate depends on: a rejected
-// patch must never leave the repo half-changed. The thrown error carries
-// git's stderr verbatim (via gitStdin -> run).
+// that follows sees exactly what was applied.
+//
+// Unlike plain `git apply`, --3way is NOT atomic: on conflict it can write
+// conflict markers into a file and partially update the index before
+// exiting non-zero, and with multiple files in one patch, files that don't
+// conflict can land fully applied and staged while a sibling fails. Callers
+// MUST refuse to call this at all for any path with the user's own pending
+// changes (see dirtyPaths) — that is what actually prevents the dangerous
+// case, not anything in here. What this function still guarantees is
+// honest reporting: on failure it never claims "nothing changed" without
+// having checked, so a conflict caused by something other than a dirty
+// target (e.g. the patch's base has drifted from HEAD) is at least
+// described accurately rather than misreported as a no-op.
 export async function applyPatch(repo: string, patch: string): Promise<void> {
-  await gitStdin(repo, patch, "apply", "--3way", "--index", "-");
+  try {
+    await gitStdin(repo, patch, "apply", "--3way", "--index", "-");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    const report = await describeApplyFailure(repo).catch((describeErr) => ` (could not inspect repo state after the failure: ${describeErr})`);
+    throw new Error(`${detail}${report}`);
+  }
+}
+
+// describeApplyFailure inspects the repo immediately after a failed
+// `git apply --3way --index` and reports exactly what landed: which paths
+// applied cleanly and are now staged, and which are left with conflict
+// markers (git ls-files -u lists a conflicted path once per stage, 1/2/3).
+async function describeApplyFailure(repo: string): Promise<string> {
+  const [unmerged, stagedNames] = await Promise.all([
+    git(repo, "ls-files", "-u"),
+    git(repo, "diff", "--cached", "--name-only"),
+  ]);
+  const conflicted = new Set(
+    unmerged
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "")
+      // `ls-files -u` format: "<mode> <sha> <stage>\t<path>"
+      .map((l) => l.slice(l.indexOf("\t") + 1)),
+  );
+  const staged = stagedNames
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "" && !conflicted.has(l));
+
+  if (conflicted.size === 0 && staged.length === 0) {
+    return " — nothing was applied";
+  }
+  const parts: string[] = [];
+  if (staged.length > 0) parts.push(`applied and staged: ${staged.join(", ")}`);
+  if (conflicted.size > 0) parts.push(`conflict markers written to: ${[...conflicted].join(", ")}`);
+  return ` — ${parts.join("; ")}`;
 }
 
 // commitAccepted commits ONLY the given paths, carrying the agent's own

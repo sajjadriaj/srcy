@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, rename, stat, writeFile } from "node:fs/promise
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyPatch, commitAccepted, createWorktree, git, why } from "../src/git.js";
+import { applyPatch, commitAccepted, createWorktree, dirtyPaths, git, why } from "../src/git.js";
 import { buildPatch, countOr1, hunkRe, patchPaths, Review, splitDiff } from "../src/diff.js";
 import { newRepo, write } from "./helpers.js";
 
@@ -253,15 +253,17 @@ test("diff path for non-ASCII mode-only file", async (t) => {
   await git(wt.path, "ls-files", "--error-unmatch", "--", files[0].path);
 });
 
-// Same gap, on a binary file: no "+++" line either, only "Binary files ..."
-// and the "diff --git" line.
+// Same gap, on a binary file: no "+++" line either, only the binary marker
+// ("GIT binary patch", now that diff() passes --binary — see the I6 test
+// below for why plain "Binary files … differ" isn't enough) and the
+// "diff --git" line.
 test("diff path for non-ASCII binary file", async (t) => {
   const repo = await newRepo(t);
   const wt = await createWorktree(repo, "s1");
   await writeFile(join(wt.path, "café.bin"), Buffer.from([0x00, 0x01, 0x02, 0x03]));
 
   const raw = await wt.diff();
-  assert.ok(raw.includes("Binary files"), `test setup did not produce a binary file; got:\n${raw}`);
+  assert.ok(raw.includes("GIT binary patch"), `test setup did not produce a binary file; got:\n${raw}`);
   assert.ok(!raw.includes("\\303"), `core.quotePath=false did not take effect, path still quoted:\n${raw}`);
 
   const files = splitDiff(raw);
@@ -325,6 +327,131 @@ test("applyPatch leaves repo untouched on conflict", async (t) => {
 
   const after = await readFile(join(repo, "a.txt"));
   assert.ok(before.equals(after), "a failed apply must leave the file byte-identical");
+});
+
+// C1: the case above only demonstrates the branch where the atomicity
+// guarantee happens to hold — an UNSTAGED mismatch makes `git apply --index`
+// bail out before 3-way ever runs. A STAGED conflict is different: --index
+// does not reject early, so --3way actually runs, conflicts, and DOES leave
+// conflict markers in the file plus a partial (stage 1/2/3) index update
+// before exiting non-zero. applyPatch cannot make that atomic after the
+// fact — the real fix is that a caller must never call it against a dirty
+// target in the first place (see dirtyPaths, and its use in accept()'s
+// precheck, covered end-to-end in ui.test.tsx). What this test pins is that
+// the failure here is at least reported honestly, never as a bare "nothing
+// changed" when something plainly did.
+test("applyPatch on a staged conflict writes conflict markers and reports them accurately, not \"nothing changed\"", async (t) => {
+  const repo = await newRepo(t);
+  const lines: string[] = [];
+  for (let i = 1; i <= 10; i++) lines.push(`l${i}`);
+  await write(repo, "f.txt", lines.join("\n") + "\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "seed f.txt");
+
+  const wt = await createWorktree(repo, "s1");
+  const agentLines = lines.slice();
+  agentLines[3] = "AGENT-line4"; // line 4
+  await write(wt.path, "f.txt", agentLines.join("\n") + "\n");
+  const raw = await wt.diff();
+  const patch = buildPatch(splitDiff(raw), () => true);
+
+  // The user has their own edit to the very same line, staged.
+  const userLines = lines.slice();
+  userLines[3] = "USER-line4";
+  await write(repo, "f.txt", userLines.join("\n") + "\n");
+  await git(repo, "add", "-A");
+
+  await assert.rejects(applyPatch(repo, patch), (err: unknown) => {
+    const message = (err as Error).message;
+    assert.ok(!/nothing (was )?changed/i.test(message), `must not claim nothing changed when it did:\n${message}`);
+    assert.ok(message.includes("f.txt"), `error should name the affected file:\n${message}`);
+    return true;
+  });
+
+  // The bug this documents: the file really is mutated (conflict markers)
+  // and the index really is left mid-merge — not "untouched".
+  const status = await git(repo, "status", "--porcelain");
+  assert.match(status, /^UU f\.txt$/m, `expected f.txt left as an unmerged conflict:\n${status}`);
+});
+
+// C1's multi-file case: a patch touching two files where only one conflicts
+// must not have its failure misreported as "nothing changed" — the other
+// file really did land, fully applied and staged.
+test("applyPatch reports exactly what landed on a multi-file partial conflict", async (t) => {
+  const repo = await newRepo(t);
+  const lines: string[] = [];
+  for (let i = 1; i <= 10; i++) lines.push(`l${i}`);
+  await write(repo, "a.txt", "clean\n");
+  await write(repo, "b.txt", lines.join("\n") + "\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "seed a.txt and b.txt");
+
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "clean-agent-edit\n");
+  const agentLines = lines.slice();
+  agentLines[3] = "AGENT-line4";
+  await write(wt.path, "b.txt", agentLines.join("\n") + "\n");
+  const raw = await wt.diff();
+  const patch = buildPatch(splitDiff(raw), () => true);
+
+  // Only b.txt conflicts — staged with the user's own overlapping edit;
+  // a.txt is left completely clean.
+  const userLines = lines.slice();
+  userLines[3] = "USER-line4";
+  await write(repo, "b.txt", userLines.join("\n") + "\n");
+  await git(repo, "add", "-A");
+
+  await assert.rejects(applyPatch(repo, patch), (err: unknown) => {
+    const message = (err as Error).message;
+    assert.ok(message.includes("a.txt"), `error should report a.txt landed:\n${message}`);
+    assert.ok(message.includes("b.txt"), `error should report b.txt conflicted:\n${message}`);
+    return true;
+  });
+
+  const gotA = await readFile(join(repo, "a.txt"), "utf8");
+  assert.equal(gotA, "clean-agent-edit\n", "a.txt should have applied even though b.txt conflicted");
+});
+
+// dirtyPaths is the actual C1/C2 fix: accept() must refuse before ever
+// calling applyPatch against a path the user already has pending work in,
+// staged or not.
+test("dirtyPaths flags unstaged and staged paths, and leaves a clean path alone", async (t) => {
+  const repo = await newRepo(t); // a.txt = "one\n", committed
+  await write(repo, "b.txt", "b\n");
+  await write(repo, "c.txt", "c\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "seed b and c");
+
+  await write(repo, "a.txt", "unstaged edit\n"); // unstaged
+  await write(repo, "b.txt", "staged edit\n");
+  await git(repo, "add", "b.txt"); // staged
+
+  const dirty = await dirtyPaths(repo, ["a.txt", "b.txt", "c.txt"]);
+  assert.deepEqual(new Set(dirty), new Set(["a.txt", "b.txt"]), `got ${JSON.stringify(dirty)}`);
+});
+
+// I6: without --binary, diff() emits "Binary files … differ", which git
+// apply rejects outright — and since a patch applies as one unit, that one
+// unappliable section fails every other (text) hunk in the same accept too.
+test("a selected binary file applies via --binary and no longer poisons a selected text hunk (I6)", async (t) => {
+  const repo = await newRepo(t);
+  const wt = await createWorktree(repo, "s1");
+  await write(wt.path, "a.txt", "one\ntwo\n");
+  await writeFile(join(wt.path, "img.bin"), Buffer.from([0, 1, 2, 3, 255, 254, 0, 0, 0, 9, 9, 9]));
+
+  const raw = await wt.diff();
+  const files = splitDiff(raw);
+  assert.ok(files.some((f) => f.binary), "test setup did not produce a binary file section");
+  const patch = buildPatch(files, () => true);
+  await applyPatch(repo, patch);
+
+  const gotText = await readFile(join(repo, "a.txt"), "utf8");
+  assert.equal(gotText, "one\ntwo\n", "the binary file's section must not have poisoned the text hunk's apply");
+  const gotBin = await readFile(join(repo, "img.bin"));
+  assert.ok(
+    gotBin.equals(Buffer.from([0, 1, 2, 3, 255, 254, 0, 0, 0, 9, 9, 9])),
+    "binary content did not round-trip through apply",
+  );
 });
 
 // Selecting one hunk of two must apply only that hunk. The two edits below
