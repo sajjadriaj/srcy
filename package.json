@@ -12,6 +12,7 @@
   "scripts": {
     "test": "tsx --test test/*.test.ts test/*.test.tsx",
     "build": "tsc",
+    "prepare": "tsc",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

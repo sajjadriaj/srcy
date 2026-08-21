@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { EventEmitter } from "node:events";
+import { realpathSync } from "node:fs";
 import { relative, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import React from "react";
@@ -200,7 +201,19 @@ async function main(): Promise<void> {
 // imports installSignalCleanup for direct testing, and main() is a real CLI
 // run (spawns the agent, renders Ink, touches the real filesystem): that must
 // never fire as a side effect of importing this module for its exports.
-const isEntryPoint = process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolvePath(process.argv[1]);
+// Both sides go through realpathSync: `npm link` and `npm install -g` put a
+// symlink in node_modules/.bin, so argv[1] is that symlink while
+// import.meta.url is always the real file. Comparing them unresolved makes
+// every installed `ctui` exit 0 having done nothing at all.
+const isEntryPoint = ((): boolean => {
+  const invoked = process.argv[1];
+  if (invoked === undefined) return false;
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(resolvePath(invoked));
+  } catch {
+    return false;
+  }
+})();
 if (isEntryPoint) {
   main().catch((err) => {
     console.error(err instanceof Error ? err.stack ?? err.message : err);
