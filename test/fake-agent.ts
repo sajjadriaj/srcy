@@ -43,7 +43,6 @@ if (scenario === "exit-immediately") {
 }
 
 if (scenario === "stubborn-child") {
-  process.on("SIGTERM", () => {});
   const grandchild = spawn(
     process.execPath,
     ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30);"],
@@ -53,6 +52,15 @@ if (scenario === "stubborn-child") {
   if (pidFile && grandchild.pid != null) {
     writeFileSync(pidFile, String(grandchild.pid));
   }
+  // Mirrors the real npx wrapper: its write end of the stdout pipe closes —
+  // ending our ndjson stream, so conn.closed resolves — well before the
+  // process tree it spawned actually exits. This process itself still
+  // ignores SIGTERM and keeps running (like the grandchild above), so the
+  // only thing that proves close() escalated to SIGKILL is the grandchild
+  // actually dying, not conn.closed resolving early.
+  process.on("SIGTERM", () => {
+    process.stdout.end();
+  });
 }
 
 function makeAgent(conn: AgentSideConnection): Agent {

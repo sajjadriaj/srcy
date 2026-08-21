@@ -183,6 +183,10 @@ async function main(): Promise<void> {
   );
 
   await instance.waitUntilExit();
+  // Ordering matters: close() (see acp.ts) now waits for the agent's whole
+  // process group to actually die — not just for its stdout pipe to close —
+  // before resolving, so by the time worktree.destroy() runs below, nothing
+  // is left that could still be writing into the worktree it force-removes.
   await session.close().catch(() => {});
 
   if (agentDied) {

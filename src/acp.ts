@@ -246,27 +246,62 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
     }
   }
 
+  // conn.closed resolves when the ndjson *stream* ends — our end of the
+  // pipe — not when the process group exits. argv is commonly a wrapper
+  // (npx) execing a shell execing the real agent; the wrapper's own hold on
+  // that pipe can end well before the tree it spawned actually dies (it can
+  // even close its stdout without dying at all). So conn.closed is never
+  // trusted as proof of death here — the process group itself, polled
+  // directly, is. process.kill(-pid, 0) throws ESRCH once nothing is left in
+  // the group to signal; any other outcome (success, or a different errno
+  // like EPERM) means something is still there. Win32 has no process-group
+  // signal, so there we fall back to the immediate child's own "exit" —
+  // the same platform limitation killTree already documents.
+  let childExited = false;
+  child.once("exit", () => {
+    childExited = true;
+  });
+
+  function groupAlive(): boolean {
+    if (process.platform === "win32") return !childExited;
+    if (child.pid == null) return false;
+    try {
+      process.kill(-child.pid, 0);
+      return true;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  }
+
+  // Polls groupAlive() until it's false or deadlineMs elapses. 50ms is short
+  // enough that a process which dies promptly (the common case) doesn't add
+  // noticeable latency to close().
+  async function waitForGroupGone(deadlineMs: number): Promise<boolean> {
+    const deadline = Date.now() + deadlineMs;
+    while (groupAlive()) {
+      if (Date.now() >= deadline) return false;
+      await delay(50);
+    }
+    return true;
+  }
+
   let closed = false;
   // Never hangs and never rejects: idempotent via `closed`, and bounded by
-  // the grace period below regardless of what the child (or a stubborn
-  // descendant that traps SIGTERM) does. conn.closed — not the child's own
-  // "exit" — is the only trustworthy signal that nothing is left holding its
-  // stdout open, since a wrapper process can exit while what it exec'd or
-  // spawned keeps running; that is exactly the orphaned-grandchild bug this
-  // replaces child.kill() + await conn.closed to fix.
+  // the grace period plus the post-SIGKILL confirmation wait below,
+  // regardless of what the child (or a stubborn descendant that traps
+  // SIGTERM) does.
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
 
     killTree("SIGTERM");
 
-    const result = await Promise.race([conn.closed.then(() => "closed" as const), delay(1000, "timeout" as const)]);
-
-    if (result === "timeout") {
+    if (!(await waitForGroupGone(1000))) {
       killTree("SIGKILL");
-      // SIGKILL cannot be ignored, so the group is coming down; give the OS
-      // a moment to finish reaping it, then return regardless.
-      await Promise.race([conn.closed, delay(1000)]);
+      // SIGKILL cannot be ignored, so the group is coming down; confirm it's
+      // actually gone (bounded) before resolving, rather than just assuming
+      // the signal worked.
+      await waitForGroupGone(2000);
     }
   }
 
