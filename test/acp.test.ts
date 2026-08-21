@@ -148,26 +148,38 @@ test("agent exiting mid-turn rejects prompt without hanging; close() after is sa
   await session.close(); // idempotent
 });
 
-test("close() kills the whole process tree, not just its immediate child", async (t) => {
-  const cwd = await newRepo(t);
-  const pidFile = join(cwd, "grandchild.pid");
-  const session = await startSession({
-    cwd,
-    argv: argvFor("stubborn-child", pidFile),
-    onUpdate: () => {},
-    onPermission: async () => null,
-  });
-  // Written synchronously at the fake agent's module load, well before
-  // initialize()/newSession() (awaited inside startSession) could return.
-  const grandchildPid = Number((await readFile(pidFile, "utf8")).trim());
-  assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
-  assert.ok(isAlive(grandchildPid), "grandchild should be running before close()");
+test(
+  "close() kills the whole process tree, not just its immediate child",
+  { timeout: 10000 }, // removing the SIGKILL escalation used to hang this for the full 10-minute default instead of failing fast
+  async (t) => {
+    const cwd = await newRepo(t);
+    const pidFile = join(cwd, "grandchild.pid");
+    const session = await startSession({
+      cwd,
+      argv: argvFor("stubborn-child", pidFile),
+      onUpdate: () => {},
+      onPermission: async () => null,
+    });
+    // Written synchronously at the fake agent's module load, well before
+    // initialize()/newSession() (awaited inside startSession) could return.
+    const grandchildPid = Number((await readFile(pidFile, "utf8")).trim());
+    assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
+    assert.ok(isAlive(grandchildPid), "grandchild should be running before close()");
 
-  const start = Date.now();
-  await session.close();
-  assert.ok(Date.now() - start < 3000, "close() must not hang");
-  assert.ok(!isAlive(grandchildPid), "close() must kill the grandchild too, not just its immediate child");
-});
+    const start = Date.now();
+    await session.close();
+    assert.ok(Date.now() - start < 3000, "close() must not hang");
+    // Polled rather than asserted immediately: close() returning only means
+    // SIGKILL was sent and conn.closed settled, not that the kernel has
+    // finished reaping the grandchild — a zombie can still answer
+    // process.kill(pid, 0) as "alive" for a brief window. Failed once during
+    // the review sweep on an immediate assertion here.
+    assert.ok(
+      await waitUntilDead(grandchildPid, 2000),
+      "close() must kill the grandchild too, not just its immediate child",
+    );
+  },
+);
 
 test("close() twice does not throw", async (t) => {
   const cwd = await newRepo(t);
@@ -212,6 +224,58 @@ test("scrubs CLAUDECODE and CLAUDE_CODE_SSE_PORT from the child env", async (t) 
   assert.equal(seen.ssePort, null);
 });
 
+// C4: startup failure must reject startSession() instead of hanging forever
+// or crashing the whole process, on each of the three ways it can happen.
+test("startSession rejects instead of hanging when the binary does not exist (spawn ENOENT)", async (t) => {
+  const cwd = await newRepo(t);
+  const start = Date.now();
+  await assert.rejects(
+    startSession({
+      cwd,
+      argv: ["/definitely/not/a/real/binary-xyz"],
+      onUpdate: () => {},
+      onPermission: async () => null,
+    }),
+  );
+  assert.ok(Date.now() - start < 3000, "must reject promptly, not hang");
+});
+
+test("startSession rejects when the adapter exits before ever answering initialize", async (t) => {
+  const cwd = await newRepo(t);
+  await assert.rejects(
+    startSession({
+      cwd,
+      argv: argvFor("exit-immediately"),
+      onUpdate: () => {},
+      onPermission: async () => null,
+    }),
+  );
+});
+
+test("startSession rejects via its startup timeout when the adapter hangs during initialize, and kills it rather than leaking it", async (t) => {
+  const cwd = await newRepo(t);
+  const pidFile = join(cwd, "hung.pid");
+  const start = Date.now();
+  await assert.rejects(
+    startSession({
+      cwd,
+      argv: argvFor("hang-init", pidFile),
+      startupTimeoutMs: 200,
+      onUpdate: () => {},
+      onPermission: async () => null,
+    }),
+  );
+  const elapsed = Date.now() - start;
+  assert.ok(elapsed < 5000, `should fail close to the 200ms startup timeout, took ${elapsed}ms`);
+
+  const hungPid = Number((await readFile(pidFile, "utf8")).trim());
+  assert.ok(Number.isInteger(hungPid) && hungPid > 0);
+  assert.ok(
+    await waitUntilDead(hungPid, 2000),
+    "a startup failure must kill the child, not leave it running as an orphan",
+  );
+});
+
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -219,4 +283,17 @@ function isAlive(pid: number): boolean {
   } catch {
     return false;
   }
+}
+
+// Polls rather than asserting immediately after an action that only
+// guarantees a kill signal was sent: process.kill(pid, 0) can still report a
+// just-killed process as "alive" for a brief window while the kernel
+// finishes reaping it.
+async function waitUntilDead(pid: number, deadlineMs: number): Promise<boolean> {
+  const start = Date.now();
+  while (Date.now() - start < deadlineMs) {
+    if (!isAlive(pid)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return !isAlive(pid);
 }

@@ -64,9 +64,30 @@ export interface SessionOptions {
   onUpdate(u: AgentUpdate): void;
   onPermission(req: PermissionRequest): Promise<string | null>;
   argv?: string[];
+  // How long to wait for the adapter to answer initialize/newSession before
+  // giving up. A dead or never-spawned adapter is caught by childClosed
+  // (close/error events) long before this fires; this only covers one that
+  // neither replies nor exits. Overridable so tests can exercise it without
+  // a real multi-second wait.
+  startupTimeoutMs?: number;
 }
 
 const DEFAULT_ARGV = ["npx", "-y", "@zed-industries/claude-code-acp"];
+const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
+
+// startupTimeout rejects after `ms` unless something else settles first.
+// unref()'d so a pending one never keeps the process alive, and — since
+// Promise.race attaches its own handler to every promise it's given,
+// including the one that loses — this never produces an unhandled
+// rejection either, so there's no need to cancel it explicitly.
+function startupTimeout(ms: number): Promise<never> {
+  return new Promise((_resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`claude-code-acp did not respond within ${ms}ms of starting`));
+    }, ms);
+    timer.unref();
+  });
+}
 
 // C0/C1 control characters. The agent controls every string here, and an
 // ANSI escape in a permission dialog is an obvious attack.
@@ -162,10 +183,19 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
 
   // The SDK never rejects a pending request when the stream ends — it just
   // hangs (see Connection#sendRequest/#receive in dist/acp.js). If the child
-  // dies mid-turn, this is what makes `prompt()` reject instead of hanging.
+  // dies mid-turn, this is what makes `prompt()` reject instead of hanging —
+  // and, raced against initialize()/newSession() below, what makes startup
+  // fail loudly instead of hanging forever when the adapter dies before ever
+  // answering. `error` (e.g. spawn ENOENT: the binary doesn't exist) feeds
+  // the same channel: Node's ChildProcess throws if an 'error' event has no
+  // listener at all, so without this a missing binary crashes the whole
+  // process instead of failing this session cleanly.
   const childClosed = new Promise<never>((_resolve, reject) => {
     child.once("close", (code, signal) => {
       reject(new Error(`claude-code-acp exited (code=${code} signal=${signal}): ${stderrTail.trim()}`));
+    });
+    child.once("error", (err) => {
+      reject(new Error(`failed to launch claude-code-acp: ${err.message}`));
     });
   });
   childClosed.catch(() => {}); // don't warn if nothing ever awaits this
@@ -199,13 +229,6 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
     () => client,
     ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)),
   );
-
-  await conn.initialize({
-    protocolVersion: PROTOCOL_VERSION,
-    clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
-  });
-  const { sessionId, modes: initialModes } = await conn.newSession({ cwd: opts.cwd, mcpServers: [] });
-  modes = initialModes ?? null;
 
   // Signals `signal` to the whole process group `child` leads (see spawn's
   // detached above), not just `child` itself — that is what actually reaches
@@ -245,6 +268,37 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
       // a moment to finish reaping it, then return regardless.
       await Promise.race([conn.closed, delay(1000)]);
     }
+  }
+
+  let sessionId: string;
+  try {
+    // Raced the same way prompt() is raced against childClosed, and for the
+    // same underlying reason: the SDK never rejects a pending request on its
+    // own. Without this, an adapter that exits (or never spawns, or never
+    // answers) during startup leaves initialize()/newSession() pending
+    // forever — a blank terminal and a leaked worktree/branch, with nothing
+    // ever printed and the caller's own catch never reached.
+    const initFlow = (async () => {
+      await conn.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: { fs: { readTextFile: false, writeTextFile: false } },
+      });
+      return conn.newSession({ cwd: opts.cwd, mcpServers: [] });
+    })();
+
+    const result = await Promise.race([
+      initFlow,
+      childClosed,
+      startupTimeout(opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS),
+    ]);
+    sessionId = result.sessionId;
+    modes = result.modes ?? null;
+  } catch (err) {
+    // Startup failed one way or another: nothing here is usable, so don't
+    // leave the child (or, if it's still alive — the hung-adapter/timeout
+    // case — its whole process group) running unattended.
+    await close().catch(() => {});
+    throw err;
   }
 
   return {

@@ -35,6 +35,13 @@ const defaultOptions: PermissionOption[] = [
 // returning early just because *this* process happened to exit quickly —
 // the real bug was a wrapper (npx) exiting while what it spawned kept
 // running, so a real fix must not depend on the immediate child dying.
+// For acp.test.ts's C4 coverage: an adapter that crashes before it ever
+// answers initialize, simulating claude-code-acp dying during startup
+// rather than mid-turn.
+if (scenario === "exit-immediately") {
+  process.exit(3);
+}
+
 if (scenario === "stubborn-child") {
   process.on("SIGTERM", () => {});
   const grandchild = spawn(
@@ -52,6 +59,16 @@ function makeAgent(conn: AgentSideConnection): Agent {
   let cwd = "";
   return {
     async initialize(): Promise<InitializeResponse> {
+      // For acp.test.ts's C4 coverage: an adapter that hangs during startup
+      // rather than answering or exiting — pins startSession's startup
+      // timeout rather than its childClosed race. Writes its own pid first
+      // so the test can confirm the timeout path actually kills it instead
+      // of leaving it running.
+      if (scenario === "hang-init") {
+        const pidFile = process.argv[3];
+        if (pidFile) writeFileSync(pidFile, String(process.pid));
+        return new Promise(() => {}); // never resolves
+      }
       return { protocolVersion: PROTOCOL_VERSION };
     },
     async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
