@@ -6,7 +6,8 @@ import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "./acp.js";
 import { blastRadius, type Symbol as BlastSymbol } from "./blast.js";
-import { LiveDiff, mapEntries, PlanBar, planFrom, RepoMap, type PlanEntry } from "./cockpit.js";
+import { runChecks, type CheckResult } from "./checks.js";
+import { ChecksPane, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap, type PlanEntry } from "./cockpit.js";
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
@@ -381,6 +382,11 @@ export function App({
   // refresh at end of turn (see submit) makes the final state correct
   // regardless of how many mid-turn ones were skipped.
   const refreshingRef = useRef(false);
+  // Whether the project's own checker passed on what the agent wrote.
+  // `null` after a run means "no check is configured", which the pane must
+  // render differently from "checked and clean" — see ChecksPane.
+  const [checks, setChecks] = useState<CheckResult | null>(null);
+  const [checksRunning, setChecksRunning] = useState(false);
 
   // Review state. `review` is a mutable class instance (toggle/next/prev
   // mutate it in place, per diff.ts); reviewVersion is bumped after every
@@ -923,6 +929,26 @@ export function App({
       // is guaranteed to run against the finished state. Also covers an
       // agent that writes through a tool kind we don't recognise.
       void refreshWorkspace();
+      // Checks run once the agent has stopped, never per write: a build
+      // halfway through a turn reports failures the agent was already on
+      // its way to fixing, which trains the reader to ignore the pane.
+      void runProjectChecks();
+    }
+  }
+
+  // Runs the project's own checker against the worktree. Like the diff
+  // refresh this is display-only and must never throw into a render: a
+  // checker that cannot run is reported by runChecks itself, and anything
+  // beyond that leaves the previous result standing rather than blanking
+  // the pane.
+  async function runProjectChecks(): Promise<void> {
+    setChecksRunning(true);
+    try {
+      setChecks(await runChecks(worktree.path, worktree.repo));
+    } catch {
+      // display-only; see above
+    } finally {
+      setChecksRunning(false);
     }
   }
 
@@ -961,7 +987,7 @@ export function App({
           <Text>{statusLine}</Text>
           <Box>
             <Box width={30} flexShrink={0} flexDirection="column">
-              <RepoMap entries={mapEntries(diffFiles, readPathsRef.current)} />
+              <RepoMap entries={mapEntries(diffFiles, readPathsRef.current, checks?.problems ?? [])} />
             </Box>
             <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
               {/* The transcript is windowed to its tail so it can't push the
@@ -994,6 +1020,7 @@ export function App({
               </Box>
             </Box>
           </Box>
+          <ChecksPane result={checks} running={checksRunning} />
           <PlanBar entries={plan} />
         </Box>
       )}
@@ -1013,6 +1040,17 @@ export function App({
       {viewMode === "review" ? (
         <>
           {reviewMessage && <Text color="red">{reviewMessage}</Text>}
+          {/* The accept key is never blocked on a failing check — the
+              human decides — but it must never be pressed in ignorance of
+              one either, so the count sits directly above the key that
+              lands the code. */}
+          {checks && !checks.ok && (
+            <Text color="red">
+              {`  ✖ ${checks.command} is failing${
+                checks.problems.length > 0 ? ` (${checks.problems.length} location${checks.problems.length === 1 ? "" : "s"})` : ""
+              } — accepting lands it anyway`}
+            </Text>
+          )}
           {review && <Text dimColor>{selectionLabel(review)}</Text>}
           <Text dimColor>
             {"  [space] select  [j/k] move  [tab] file view  [a] accept  [A] accept unexplained  [q] back"}

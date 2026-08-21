@@ -1,5 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
+import type { CheckResult, Problem } from "./checks.js";
 import type { FileDiff } from "./diff.js";
 
 // The two things a file can be to a session: changed against the base
@@ -13,6 +14,7 @@ export interface MapEntry {
   touch: Touch;
   added: number;
   removed: number;
+  problems: number; // failing check locations in this file
 }
 
 export interface PlanEntry {
@@ -40,14 +42,26 @@ export function diffStats(f: FileDiff): { added: number; removed: number } {
 // worktree diff is the authority for "wrote": a file the agent edited and
 // then reverted has no diff section, so it correctly falls back to "read"
 // rather than claiming a change that no longer exists.
-export function mapEntries(diffFiles: FileDiff[], readPaths: Iterable<string>): MapEntry[] {
+export function mapEntries(
+  diffFiles: FileDiff[],
+  readPaths: Iterable<string>,
+  problems: Problem[] = [],
+): MapEntry[] {
   const byPath = new Map<string, MapEntry>();
   for (const path of readPaths) {
-    byPath.set(path, { path, touch: "read", added: 0, removed: 0 });
+    byPath.set(path, { path, touch: "read", added: 0, removed: 0, problems: 0 });
   }
   for (const f of diffFiles) {
     const { added, removed } = diffStats(f);
-    byPath.set(f.path, { path: f.path, touch: "wrote", added, removed });
+    byPath.set(f.path, { path: f.path, touch: "wrote", added, removed, problems: 0 });
+  }
+  // A check can fail in a file this session never touched — a caller that
+  // no longer compiles against a changed signature is exactly the failure
+  // worth seeing, so it earns a row of its own rather than being dropped.
+  for (const problem of problems) {
+    const existing = byPath.get(problem.path);
+    if (existing) existing.problems++;
+    else byPath.set(problem.path, { path: problem.path, touch: "read", added: 0, removed: 0, problems: 1 });
   }
   return [...byPath.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
 }
@@ -109,6 +123,16 @@ export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element
           // identifies the file.
           const label = `${indent}${row.name}`;
           const stat = entry.touch === "wrote" ? `${label.padEnd(NAME_WIDTH)} +${entry.added} -${entry.removed}` : label;
+          // A file with failing checks reads as broken first and changed
+          // second: the marker and the whole row go red, because "this one
+          // does not compile" outranks "this one grew by 12 lines".
+          if (entry.problems > 0) {
+            return (
+              <Text key={i} color="red">
+                {`✖  ${stat}`}
+              </Text>
+            );
+          }
           return (
             <Text key={i} color={entry.touch === "wrote" ? "green" : undefined} dimColor={entry.touch === "read"}>
               {`${MARK[entry.touch]}  ${stat}`}
@@ -116,7 +140,7 @@ export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element
           );
         })
       )}
-      <Text dimColor>{"● wrote  ○ read"}</Text>
+      <Text dimColor>{"● wrote  ○ read  ✖ failing"}</Text>
     </Box>
   );
 }
@@ -194,6 +218,56 @@ export function PlanBar({ entries }: { entries: PlanEntry[] }): React.JSX.Elemen
       })}
     </Box>
   );
+}
+
+// How many failing locations the pane lists before summarising the rest.
+const PROBLEMS_SHOWN = 4;
+
+// ChecksPane is the red-squiggle line: does the code the agent just wrote
+// still build, and still pass. Four states, each of which has to look
+// different from the others — "not checked" reading like "passed" is the
+// one failure that would make the pane worse than not having it.
+export function ChecksPane({
+  result,
+  running,
+}: {
+  result: CheckResult | null;
+  running: boolean;
+}): React.JSX.Element | null {
+  if (running) {
+    return <Text dimColor>{"CHECKS  running…"}</Text>;
+  }
+  if (result === null) {
+    // Deliberately not silent: a project with no check configured should
+    // learn that it could have one, exactly when it would have mattered.
+    return <Text dimColor>{"CHECKS  none configured — add an executable .ctui/check"}</Text>;
+  }
+  if (result.ok) {
+    return <Text color="green">{`CHECKS  ${result.command}  ✔ passing`}</Text>;
+  }
+  const shown = result.problems.slice(0, PROBLEMS_SHOWN);
+  const rest = result.problems.length - shown.length;
+  return (
+    <Box flexDirection="column">
+      <Text color="red">{`CHECKS  ${result.command}  ✖ failing`}</Text>
+      {shown.map((problem, i) => (
+        <Text key={i} color="red">
+          {`  ✖ ${problem.path}:${problem.line}  ${problem.message}`}
+        </Text>
+      ))}
+      {rest > 0 && <Text dimColor>{`  …and ${rest} more`}</Text>}
+      {/* With no parsed location the output is all there is to go on, so
+          the pane shows it rather than an empty failing header. */}
+      {result.problems.length === 0 && result.tail !== "" && <Text dimColor>{indent(result.tail)}</Text>}
+    </Box>
+  );
+}
+
+function indent(s: string): string {
+  return s
+    .split("\n")
+    .map((l) => `  ${l}`)
+    .join("\n");
 }
 
 // planFrom reads a "plan" session update defensively: it is the one update

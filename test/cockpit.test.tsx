@@ -2,7 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { buildTree, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap } from "../src/cockpit.js";
+import {
+  buildTree,
+  ChecksPane,
+  diffStats,
+  hunkLines,
+  LiveDiff,
+  mapEntries,
+  PlanBar,
+  planFrom,
+  RepoMap,
+} from "../src/cockpit.js";
 import { splitDiff, type FileDiff } from "../src/diff.js";
 
 // A real two-file diff, the shape splitDiff actually produces — writing the
@@ -181,4 +191,67 @@ test("planFrom degrades to no plan instead of throwing on an unexpected payload"
   assert.deepEqual(planFrom({}), []);
   assert.deepEqual(planFrom(null), []);
   assert.deepEqual(planFrom({ entries: [{ content: 7 }, null, { content: "" }] }), []);
+});
+
+test("mapEntries gives a failing file its own row even if untouched", () => {
+  // A caller that stopped compiling against a changed signature is exactly
+  // the failure worth surfacing, and this session never opened it.
+  const entries = mapEntries([], [], [{ path: "src/api/routes.ts", line: 9, message: "error" }]);
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0]!.path, "src/api/routes.ts");
+  assert.equal(entries[0]!.problems, 1);
+});
+
+test("RepoMap marks a failing file as broken rather than merely changed", () => {
+  const entries = mapEntries(files(), [], [{ path: "src/auth/token.ts", line: 41, message: "error" }]);
+  const frame = render(<RepoMap entries={entries} />).lastFrame() ?? "";
+  const tokenRow = frame.split("\n").find((l) => l.includes("token.ts"))!;
+  assert.match(tokenRow, /^✖/);
+  // README.md changed and still builds, so it keeps the ordinary marker.
+  assert.match(frame.split("\n").find((l) => l.includes("README.md"))!, /^●/);
+});
+
+test("ChecksPane never renders 'no check configured' the same as 'passing'", () => {
+  const none = render(<ChecksPane result={null} running={false} />).lastFrame() ?? "";
+  const passing =
+    render(<ChecksPane result={{ command: "npm run typecheck", ok: true, problems: [], tail: "" }} running={false} />)
+      .lastFrame() ?? "";
+  assert.match(none, /none configured/);
+  assert.doesNotMatch(none, /✔/);
+  assert.match(passing, /✔ passing/);
+});
+
+test("ChecksPane lists failing locations and says how many it left out", () => {
+  const problems = Array.from({ length: 7 }, (_, i) => ({
+    path: `src/f${i}.ts`,
+    line: i + 1,
+    message: `error ${i}`,
+  }));
+  const frame =
+    render(
+      <ChecksPane result={{ command: "npm run typecheck", ok: false, problems, tail: "" }} running={false} />,
+    ).lastFrame() ?? "";
+  assert.match(frame, /✖ failing/);
+  assert.match(frame, /src\/f0\.ts:1  error 0/);
+  assert.match(frame, /…and 3 more/);
+});
+
+test("ChecksPane shows the output when a failure names no location", () => {
+  // Otherwise a segfault or a missing binary renders as a failing header
+  // with nothing under it — indistinguishable from a bug in our parser.
+  const frame =
+    render(
+      <ChecksPane
+        result={{ command: "./.ctui/check", ok: false, problems: [], tail: "Segmentation fault" }}
+        running={false}
+      />,
+    ).lastFrame() ?? "";
+  assert.match(frame, /Segmentation fault/);
+});
+
+test("ChecksPane says it is running rather than showing a stale verdict", () => {
+  const frame =
+    render(<ChecksPane result={{ command: "x", ok: true, problems: [], tail: "" }} running={true} />).lastFrame() ?? "";
+  assert.match(frame, /running/);
+  assert.doesNotMatch(frame, /✔ passing/);
 });

@@ -1,13 +1,21 @@
-// `npm run preview` — paints one cockpit frame from canned session updates
-// and prints it. Layout work needs to be looked at, and looking at it
-// otherwise means starting a real agent and waiting for it to write
-// something. Fixture data only: no agent, no worktree, no git.
+// `npm run preview` — paints one cockpit frame and prints it. Layout work
+// needs to be looked at, and looking at it otherwise means starting a real
+// agent and waiting for it to write something.
+//
+// It drives the real App through its real code path: canned session updates
+// arrive on the bridge, then a prompt is typed and submitted, which is what
+// triggers the end-of-turn diff refresh and check run. Only the agent and
+// the worktree are fakes — the layout, the panes and the wiring are the
+// ones that ship.
 import { EventEmitter } from "node:events";
+import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import React from "react";
 import { render } from "ink-testing-library";
-import { App } from "../src/ui.js";
 import type { AgentSession } from "../src/acp.js";
 import type { Worktree } from "../src/git.js";
+import { App } from "../src/ui.js";
 
 const DIFF = [
   "diff --git a/src/auth/token.ts b/src/auth/token.ts",
@@ -34,6 +42,13 @@ const DIFF = [
   "",
 ].join("\n");
 
+// A repo whose check fails the way a real typecheck would.
+const repo = await mkdtemp(join(tmpdir(), "ctui-preview-"));
+await mkdir(join(repo, ".ctui"), { recursive: true });
+const check = join(repo, ".ctui", "check");
+await writeFile(check, '#!/bin/sh\necho "src/auth/token.ts(41,5): error TS2532: Object is possibly undefined."\nexit 1\n');
+await chmod(check, 0o755);
+
 const bridge = new EventEmitter();
 const session = {
   sessionId: "s1",
@@ -41,9 +56,13 @@ const session = {
   cancel: async () => {},
   close: async () => {},
 } as AgentSession;
-const worktree = { path: "/tmp/wt", repo: "/repo", diff: async () => DIFF } as unknown as Worktree;
+const worktree = {
+  path: repo,
+  repo,
+  diff: async () => DIFF,
+} as unknown as Worktree;
 
-const { lastFrame } = render(
+const { lastFrame, stdin } = render(
   <App
     branch="ctui/auth"
     session={session}
@@ -56,12 +75,9 @@ const { lastFrame } = render(
   />,
 );
 
-const up = (u: Record<string, unknown>) => bridge.emit("update", { raw: u, ...u });
+const up = (u: Record<string, unknown>): boolean => bridge.emit("update", { raw: u, ...u });
+const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-up({ kind: "user" });
-bridge.emit("update", { kind: "agent_message_chunk", text: "", raw: {} });
-
-// A turn: plan, reads, thinking, writes.
 up({
   kind: "plan",
   entries: [
@@ -72,20 +88,28 @@ up({
 });
 up({ kind: "tool_call", toolCallId: "1", toolKind: "read", toolTitle: "Read", toolPath: "src/auth/session.ts" });
 up({ kind: "tool_call", toolCallId: "2", toolKind: "read", toolTitle: "Read", toolPath: "src/auth/token.ts" });
-bridge.emit("update", {
+up({
   kind: "agent_thought_chunk",
   text: "expiry check is exclusive; a token expiring this exact ms is still accepted",
-  raw: {},
 });
-bridge.emit("update", {
+up({
   kind: "agent_message_chunk",
   text: "Off-by-one in verify(): `<` lets a token that expired this millisecond through. Changing to `<=`.",
-  raw: {},
 });
 up({ kind: "tool_call", toolCallId: "3", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/token.ts" });
 up({ kind: "tool_call", toolCallId: "4", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/session.ts" });
-up({ kind: "tool_call", toolCallId: "3", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/token.ts" });
 
-await new Promise((r) => setTimeout(r, 300));
+// Submitting is what ends a turn, and the end of a turn is what refreshes
+// the map and runs the checks — so the frame below is the one a real
+// session paints, not a hand-assembled approximation of it.
+await settle(50);
+// Typing and submitting are separate writes: delivered as one chunk, the
+// carriage return is just another character in the inserted text and the
+// prompt is never submitted at all.
+stdin.write("fix the token expiry off-by-one");
+await settle(50);
+stdin.write("\r");
+await settle(800);
+
 process.stdout.write((lastFrame() ?? "") + "\n");
 process.exit(0);
