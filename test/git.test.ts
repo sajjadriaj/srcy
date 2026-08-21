@@ -605,6 +605,31 @@ test("why on a path with no history errors clearly", async (t) => {
   await assert.rejects(why(repo, "nope.txt", 1), "expected an error for a file with no history");
 });
 
+// why's single -L query embeds %b directly in the same --format string as
+// the marker/sha/date/trailers fields. %b can itself contain newlines (a
+// multi-line commit body), which is exactly what made folding the old
+// per-commit `git log -1 --format=%b` call into the -L query's own output
+// hard to parse correctly — this pins that the body still comes back whole.
+test("why carries a multi-line commit body intact through the single -L query", async (t) => {
+  const repo = await newRepo(t);
+  await write(repo, "a.txt", "one\ntarget\n");
+  await git(repo, "add", "-A");
+  await commitAccepted(
+    repo,
+    ["a.txt"],
+    "add target",
+    "Line one of the body.\nLine two of the body.",
+    "claude-1",
+    "add a target line",
+  );
+
+  const got = await why(repo, "a.txt", 2);
+  const found = got.find((p) => p.session === "claude-1");
+  assert.ok(found, `accepting commit not found: ${JSON.stringify(got)}`);
+  assert.ok(found!.body.includes("Line one of the body."), `body truncated: ${JSON.stringify(found!.body)}`);
+  assert.ok(found!.body.includes("Line two of the body."), `body truncated: ${JSON.stringify(found!.body)}`);
+});
+
 // The accept -> keep-working -> accept-again loop: after accepting one hunk
 // of two, the next diff() must show only the remaining hunk. Without
 // advanceAfterAccept, base never moves and the accepted hunk keeps

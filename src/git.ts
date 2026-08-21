@@ -430,36 +430,45 @@ export interface Provenance {
 // A marker prefix on our own --format output. -L forces patch output, and a
 // diff body can contain anything, including 40-hex strings, so a plain scan
 // for "looks like a commit line" is not safe — this makes commit lines
-// unambiguous.
+// unambiguous. whyEnd bounds the other side of the same record: %b can
+// itself contain embedded newlines (a multi-line commit body), and
+// %(trailers:...,valueonly) emits a trailing newline of its own whenever
+// the trailer is present but nothing at all when it's absent — so this
+// output cannot be scanned line-by-line. Splitting the whole stream on
+// whyMarker (never produced by a diff or a commit message) isolates one
+// chunk per commit; whyEnd then marks exactly where that record's fields
+// stop and -L's own patch output begins, so %b can be read whole without
+// also swallowing the diff that follows it.
 const whyMarker = "CTUI\x1f";
+const whyEnd = "\x1eEND";
 
 // why answers "why does this line exist" by walking the line's own history.
 //
 // `git log -L` follows a line through renames, moves and reformatting,
 // which is the hard part of line-level provenance and the reason this is a
-// git query rather than a database.
+// git query rather than a database. Every field this needs — sha, date,
+// and the provenance trailers — comes back from this single command via
+// --format; no per-commit follow-up query.
 export async function why(repo: string, file: string, line: number): Promise<Provenance[]> {
-  const out = await git(
-    repo,
-    "log",
-    `-L${line},${line}:${file}`,
-    `--format=${whyMarker}%H\x1f%ad`,
-    "--date=short",
-  );
+  const format =
+    `${whyMarker}%H\x1f%ad\x1f%(trailers:key=Ctui-Session,valueonly)` +
+    `\x1f%(trailers:key=Ctui-Prompt,valueonly)\x1f%b${whyEnd}`;
+  const out = await git(repo, "log", `-L${line},${line}:${file}`, `--format=${format}`, "--date=short");
 
   const res: Provenance[] = [];
-  for (const l of out.split("\n")) {
-    if (!l.startsWith(whyMarker)) continue;
-    const parts = l.split("\x1f");
-    if (parts.length < 3) continue;
-    const sha = parts[1];
-    const date = parts[2];
-    const [session, prompt, body] = await Promise.all([
-      git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Session,valueonly)", sha),
-      git(repo, "log", "-1", "--format=%(trailers:key=Ctui-Prompt,valueonly)", sha),
-      git(repo, "log", "-1", "--format=%b", sha),
-    ]);
-    res.push({ sha, date, session, prompt, body });
+  for (const chunk of out.split(whyMarker).slice(1)) {
+    const end = chunk.indexOf(whyEnd);
+    if (end === -1) continue;
+    const fields = chunk.slice(0, end).split("\x1f");
+    if (fields.length < 5) continue;
+    const [sha, date, session, prompt, ...bodyParts] = fields;
+    res.push({
+      sha,
+      date: date.trim(),
+      session: session.trim(),
+      prompt: prompt.trim(),
+      body: bodyParts.join("\x1f").trim(),
+    });
   }
   return res;
 }

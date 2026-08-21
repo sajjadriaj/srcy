@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "ctui": "dist/src/index.js"
+  },
   "engines": {
     "node": ">=20"
   },
