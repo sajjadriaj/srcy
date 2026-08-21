@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { App } from "../src/ui.js";
+import { App, splitSummary } from "../src/ui.js";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "../src/acp.js";
 import { createWorktree, git, type Worktree } from "../src/git.js";
 import { newRepo, write } from "./helpers.js";
@@ -45,6 +45,94 @@ const liveOrderedOptions: PermissionRequest["options"] = [
   { optionId: "allow", kind: "allow_once", name: "Allow" },
   { optionId: "reject", kind: "reject_once", name: "Reject" },
 ];
+
+// splitSummary derives the commit subject from the explain-gate answer.
+// Live-verification finding: the explain prompt asks for plain prose but
+// the agent routinely answers in a bolded, numbered structure anyway, and
+// the old implementation let that markdown straight through, truncated mid-
+// word, and duplicated the (mangled) subject as the body's first line. Each
+// case here asserts the subject carries none of `*`, `#`, or a backtick, and
+// that a capped subject was cut on a word boundary, not mid-word.
+const splitSummaryCases: Array<{ name: string; input: string; wantSubject: string; wantBody: string }> = [
+  {
+    name: "bold prefix",
+    input: "**What and why:** I added JSDoc comments to add() and multiply().",
+    wantSubject: "What and why: I added JSDoc comments to add() and multiply()",
+    wantBody: "",
+  },
+  {
+    name: "numbered bold prefix",
+    input: "1. **What and why:** I added helpful comments. 2. **What could break:** Nothing.",
+    wantSubject: "What and why: I added helpful comments",
+    wantBody: "2. What could break: Nothing.",
+  },
+  {
+    name: "plain sentence",
+    input: "Fixed a bug in the parser.",
+    wantSubject: "Fixed a bug in the parser",
+    wantBody: "",
+  },
+  {
+    name: "no terminator",
+    input: "I refactored the auth module to use async validators",
+    wantSubject: "I refactored the auth module to use async validators",
+    wantBody: "",
+  },
+  {
+    name: "shorter than cap",
+    input: "Fix typo.",
+    wantSubject: "Fix typo",
+    wantBody: "",
+  },
+  {
+    name: "first sentence exceeds the cap",
+    input:
+      "This is a very long explanatory sentence that goes on and on describing many details about the change made here and does not stop for quite a while.",
+    wantSubject: "This is a very long explanatory sentence that goes on and on...",
+    wantBody: "",
+  },
+  {
+    // Verbatim from the live run this bug was found in (see FIX 2 report):
+    // `git log --oneline` showed
+    //   b2b97c3 **What and why:** I added JSDoc comments above the `add()` and `multi...`
+    name: "verbatim live-run string",
+    input: "**What and why:** I added JSDoc comments above the `add()` and `multi...`",
+    wantSubject: "What and why: I added JSDoc comments above the add() and multi...",
+    wantBody: "",
+  },
+];
+
+test("splitSummary derives a clean commit subject from the agent's markdown answer", () => {
+  for (const { name, input, wantSubject, wantBody } of splitSummaryCases) {
+    const { subject, body } = splitSummary(input);
+    assert.equal(subject, wantSubject, `[${name}] subject`);
+    assert.equal(body, wantBody, `[${name}] body`);
+    assert.ok(!/[*#`]/.test(subject), `[${name}] markdown syntax survived into subject: ${JSON.stringify(subject)}`);
+    assert.ok(subject.length <= 72, `[${name}] subject exceeds the cap: ${JSON.stringify(subject)}`);
+  }
+});
+
+test("splitSummary caps a long subject on a word boundary, not mid-word", () => {
+  const { subject } = splitSummary(splitSummaryCases[5]!.input);
+  assert.ok(subject.endsWith("..."), `expected an ellipsis, got: ${JSON.stringify(subject)}`);
+  const withoutEllipsis = subject.slice(0, -3);
+  const nextWord = splitSummaryCases[5]!.input.slice(withoutEllipsis.length).trimStart();
+  // A word-boundary cut means the character right after where we stopped is
+  // whitespace (or the string simply ended) — never the middle of a word
+  // that continues in the source.
+  assert.ok(
+    withoutEllipsis === "" || splitSummaryCases[5]!.input[withoutEllipsis.length] === " " || nextWord === "",
+    `subject was cut mid-word: ${JSON.stringify(subject)}`,
+  );
+});
+
+test("splitSummary treats empty and whitespace-only input the same, with no body", () => {
+  for (const input of ["", "   \n  "]) {
+    const { subject, body } = splitSummary(input);
+    assert.equal(subject, "ctui: accept unexplained change");
+    assert.equal(body, "");
+  }
+});
 
 test("app mounts showing branch and mode, and renders an approval prompt when one is pending", async () => {
   const bridge = new EventEmitter();

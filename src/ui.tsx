@@ -52,35 +52,76 @@ const EXPLAIN_PROMPT = `Before I review this change, answer in plain prose, brie
 Do not summarize the diff line by line. If something is a placeholder or a
 fallback that silently degrades, say so explicitly.`;
 
+const SUBJECT_CAP = 72;
+
+// Strips markdown syntax that would otherwise leak into a commit subject.
+// The explain prompt asks for plain prose but does not forbid — and models
+// routinely reply with — a bolded, numbered structure (see EXPLAIN_PROMPT
+// above); a raw "*", "#" or backtick surviving into `git log --oneline` is a
+// standing advertisement that a machine wrote the message. Removing the
+// characters outright (rather than trying to balance **/`` pairs) is enough:
+// there's nothing for stray delimiters to misparse once they're just gone.
+function stripMarkdown(s: string): string {
+  return s.replace(/[`*#]/g, "");
+}
+
+// Caps `s` at SUBJECT_CAP characters on a word boundary, never mid-word,
+// trimming to an ellipsis when it had to cut anything.
+// ponytail: a single token longer than the cap (no space to back up to)
+// still gets cut mid-word — not a shape the explain-gate answer produces in
+// practice, and not worth a hyphenation heuristic until it is.
+function capSubject(s: string): string {
+  if (s.length <= SUBJECT_CAP) return s;
+  const budget = SUBJECT_CAP - 3; // room for "..."
+  const cut = s.slice(0, budget);
+  const lastSpace = cut.lastIndexOf(" ");
+  const wordSafe = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
+  return wordSafe.trimEnd() + "...";
+}
+
 // splitSummary uses the agent's first sentence as the commit subject; the
 // rest, if any, becomes the body.
 //
 // Live-verification finding: the explain prompt asks for plain prose but
 // does not forbid a numbered list, and models routinely answer its three
-// questions as one. A leading "1. " reads as a false sentence end to a
-// naive first-period scan (subject becomes the single character "1"), so a
-// leading list/bullet marker is skipped before searching for the real
-// terminator. The body always keeps the marker — only the subject search is
-// offset past it.
-function splitSummary(raw: string): { subject: string; body: string } {
-  const s = raw.trim();
-  if (s === "") return { subject: "ctui: accept unexplained change", body: "" };
-  const marker = /^(\d{1,2}[.)]|[-*])\s+/.exec(s);
-  const from = marker ? marker[0].length : 0;
-  let idx = -1;
-  for (let i = from; i < s.length; i++) {
-    if (s[i] === "." || s[i] === "\n") {
-      idx = i;
+// questions as one, in markdown. A leading "1. " reads as a false sentence
+// end to a naive first-period scan (subject becomes the single character
+// "1"), so a leading list/bullet marker is stripped before searching for the
+// real terminator; body/subject are then complementary slices of the same
+// cleaned text (subject = the head up to the terminator, body = the tail
+// after it) so they can never duplicate each other, even when the subject
+// itself gets truncated by capSubject.
+export function splitSummary(raw: string): { subject: string; body: string } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { subject: "ctui: accept unexplained change", body: "" };
+
+  const marker = /^(\d{1,2}[.)]|[-*])\s+/.exec(trimmed);
+  const afterMarker = marker ? trimmed.slice(marker[0].length) : trimmed;
+  const cleaned = stripMarkdown(afterMarker).replace(/[ \t]+/g, " ").trim();
+
+  // First sentence ends at a "." or a newline — but a run of 2+ dots is an
+  // ellipsis, not a terminator (a truncated "multi..." shouldn't read as a
+  // one-word sentence), so those are skipped over rather than split on.
+  let end = -1;
+  for (let i = 0; i < cleaned.length; i++) {
+    if (cleaned[i] === "\n") {
+      end = i;
       break;
     }
+    if (cleaned[i] === ".") {
+      let j = i;
+      while (cleaned[j] === ".") j++;
+      if (j - i === 1) {
+        end = i;
+        break;
+      }
+      i = j - 1;
+    }
   }
-  if (idx > from && idx < from + 72) {
-    return { subject: s.slice(from, idx).trim(), body: s.slice(idx + 1).trim() };
-  }
-  if (s.length - from > 72) {
-    return { subject: s.slice(from, from + 69) + "...", body: s };
-  }
-  return { subject: s.slice(from).trim(), body: "" };
+  const firstSentence = (end === -1 ? cleaned : cleaned.slice(0, end)).trim();
+  const body = end === -1 ? "" : cleaned.slice(end + 1).trim();
+
+  return { subject: capSubject(firstSentence), body };
 }
 
 // sessionNameOf recovers the short session name ("s1") from a worktree
