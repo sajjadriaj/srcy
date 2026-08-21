@@ -16,10 +16,12 @@ import {
   Outline,
   PlanBar,
   planFrom,
+  FilePicker,
   RepoMap,
   type PlanEntry,
 } from "./cockpit.js";
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
+import { filterFiles, listFiles } from "./files.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
 // How many transcript entries the cockpit's centre column keeps on screen.
@@ -412,11 +414,21 @@ export function App({
   const [checks, setChecks] = useState<CheckResult | null>(null);
   const [checksRunning, setChecksRunning] = useState(false);
 
+  // ctrl-P: open any file in the tree, not just the ones the agent touched.
+  // `openPath` non-null means a file is being read; otherwise the picker
+  // itself is up. Both live under viewMode "open".
+  const [allFiles, setAllFiles] = useState<string[]>([]);
+  const [openQuery, setOpenQuery] = useState("");
+  const [openIndex, setOpenIndex] = useState(0);
+  const [openPath, setOpenPath] = useState<string | null>(null);
+  const [openContent, setOpenContent] = useState<string | null>(null);
+  const [openLine, setOpenLine] = useState(1);
+
   // Review state. `review` is a mutable class instance (toggle/next/prev
   // mutate it in place, per diff.ts); reviewVersion is bumped after every
   // mutation purely to force a re-render, since React does not see a
   // mutation to an object it already holds a reference to.
-  const [viewMode, setViewMode] = useState<"chat" | "review">("chat");
+  const [viewMode, setViewMode] = useState<"chat" | "review" | "open">("chat");
   const [notice, setNotice] = useState<string | null>(null);
   const [review, setReview] = useState<Review | null>(null);
   const [reviewVersion, setReviewVersion] = useState(0);
@@ -878,6 +890,41 @@ export function App({
       return;
     }
 
+    if (viewMode === "open") {
+      if (key.escape) {
+        // Escape backs out one level at a time — out of the file to the
+        // list, out of the list to the session — rather than dropping the
+        // reader all the way back on a mistyped query.
+        if (openPath !== null) closeOpenFile();
+        else closePicker();
+        return;
+      }
+      if (openPath !== null) {
+        // Reading a file: j/k and the arrows scroll it.
+        if (char === "j" || key.downArrow) setOpenLine((n) => n + 1);
+        else if (char === "k" || key.upArrow) setOpenLine((n) => Math.max(1, n - 1));
+        else if (char === "d" || key.pageDown) setOpenLine((n) => n + FILE_VIEW_WINDOW);
+        else if (char === "u" || key.pageUp) setOpenLine((n) => Math.max(1, n - FILE_VIEW_WINDOW));
+        return;
+      }
+      const matches = filterFiles(allFiles, openQuery);
+      if (key.return) {
+        const chosen = matches[openIndex];
+        if (chosen !== undefined) void openFile(chosen);
+        return;
+      }
+      // The arrows move the selection; the query box owns every other
+      // printable key, so j/k cannot be used here — they are text.
+      if (key.downArrow) setOpenIndex((i) => Math.min(matches.length - 1, i + 1));
+      else if (key.upArrow) setOpenIndex((i) => Math.max(0, i - 1));
+      return;
+    }
+
+    if (viewMode === "chat" && key.ctrl && char === "p") {
+      void openPicker();
+      return;
+    }
+
     if (viewMode === "review") {
       if (char === "q") {
         closeReview();
@@ -960,6 +1007,43 @@ export function App({
     }
   }
 
+  // ctrl-P. The list is re-read every time rather than cached: the agent
+  // creates files mid-session, and a picker that cannot open the file the
+  // agent just wrote is the one case that matters most.
+  async function openPicker(): Promise<void> {
+    setOpenQuery("");
+    setOpenIndex(0);
+    setOpenPath(null);
+    setOpenContent(null);
+    setViewMode("open");
+    try {
+      setAllFiles(await listFiles(worktree.path));
+    } catch {
+      setAllFiles([]);
+    }
+  }
+
+  function closePicker(): void {
+    setViewMode("chat");
+  }
+
+  async function openFile(path: string): Promise<void> {
+    setOpenPath(path);
+    setOpenLine(1);
+    try {
+      setOpenContent(await readFile(join(worktree.path, path), "utf8"));
+    } catch (err) {
+      // A directory, a broken symlink, a binary the reader would not want
+      // painted into their terminal anyway — say which and stay open.
+      setOpenContent(`(cannot read ${path}: ${err instanceof Error ? err.message : String(err)})`);
+    }
+  }
+
+  function closeOpenFile(): void {
+    setOpenPath(null);
+    setOpenContent(null);
+  }
+
   // Runs the project's own checker against the worktree. Like the diff
   // refresh this is display-only and must never throw into a render: a
   // checker that cannot run is reported by runChecks itself, and anything
@@ -991,6 +1075,49 @@ export function App({
   // recently, falling back to whatever changed last so the pane still says
   // something useful when a write arrived without a path.
   const activeFile = diffFiles.find((f) => f.path === activePath) ?? diffFiles[diffFiles.length - 1];
+
+  const openMatches = filterFiles(allFiles, openQuery);
+
+  if (viewMode === "open") {
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="column" borderStyle="round">
+          <Text>{statusLine}</Text>
+          {openPath !== null ? (
+            <Box flexDirection="column">
+              <Text dimColor>{openPath}</Text>
+              {openContent === null ? (
+                <Text dimColor>(loading...)</Text>
+              ) : (
+                <FileWindow content={openContent} changed={new Set()} centerLine={openLine} />
+              )}
+            </Box>
+          ) : (
+            <FilePicker query={openQuery} matches={openMatches} index={openIndex} total={allFiles.length} />
+          )}
+        </Box>
+        {openPath !== null ? (
+          <Text dimColor>{"  [j/k] scroll  [u/d] page  [esc] back to list"}</Text>
+        ) : (
+          <Box>
+            <Text>{"open ▸ "}</Text>
+            <TextInput
+              value={openQuery}
+              onChange={(v) => {
+                setOpenQuery(v);
+                // Any edit invalidates the old position: leaving the index
+                // where it was would select whatever row happens to land
+                // there next, which is not what the reader pointed at.
+                setOpenIndex(0);
+              }}
+              onSubmit={() => {}}
+              focus
+            />
+          </Box>
+        )}
+      </Box>
+    );
+  }
 
   return (
     <Box flexDirection="column">
@@ -1083,6 +1210,7 @@ export function App({
       ) : (
         <>
           {notice && <Text color="yellow">{notice}</Text>}
+          <Text dimColor>{"  [r] review  [ctrl-p] open any file"}</Text>
           <Box>
             <Text>{"> "}</Text>
             <TextInput value={input} onChange={inputEnabled ? setInput : () => {}} onSubmit={submit} focus={inputEnabled} />

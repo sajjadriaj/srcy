@@ -396,3 +396,34 @@ export function Outline({
 
 // Column the outline's counts line up in, as NAME_WIDTH does for the map.
 const OUTLINE_WIDTH = 34;
+
+// FilePicker is ctrl-P: open anything in the tree, not only what the agent
+// touched. "What does the caller look like" is the question review raises
+// most often, and until now it was the one question the pane could not
+// answer.
+export function FilePicker({
+  query,
+  matches,
+  index,
+  total,
+}: {
+  query: string;
+  matches: string[];
+  index: number;
+  total: number;
+}): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      <Text dimColor>{`OPEN  ${total} files`}</Text>
+      {matches.length === 0 ? (
+        <Text dimColor>{query === "" ? "  (no files)" : "  no match"}</Text>
+      ) : (
+        matches.map((path, i) => (
+          <Text key={path} inverse={i === index}>
+            {`  ${path}`}
+          </Text>
+        ))
+      )}
+    </Box>
+  );
+}
