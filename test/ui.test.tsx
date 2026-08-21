@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { App, splitSummary } from "../src/ui.js";
+import { App, commitMessage, splitSummary } from "../src/ui.js";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "../src/acp.js";
 import { createWorktree, git, type Worktree } from "../src/git.js";
 import { newRepo, write } from "./helpers.js";
@@ -132,6 +132,80 @@ test("splitSummary treats empty and whitespace-only input the same, with no body
     assert.equal(subject, "ctui: accept unexplained change");
     assert.equal(body, "");
   }
+});
+
+// commitMessage picks what actually becomes the accepted commit's subject.
+// The old approach derived it from the agent's explain-gate answer
+// (splitSummary above) — a structured markdown essay, since the explain
+// prompt asks for three numbered points — which kept leaking the prompt's
+// own scaffolding ("What and why:") into permanent git history and trailing
+// off into an ellipsis. The user's own prompt is already one line, already
+// what a human would have written, and describes intent rather than
+// implementation, so it's the primary source now; the agent's full summary
+// becomes the body untouched. splitSummary is still the fallback for the
+// unexplained-accept path, where there's no prompt.
+const commitMessageCases: Array<{
+  name: string;
+  prompt: string;
+  summary: string;
+  wantSubject: string;
+  wantBody: string;
+}> = [
+  {
+    name: "a normal prompt becomes the subject verbatim when short",
+    prompt: "Add a JSDoc comment above greet()",
+    summary: "1. **What and why:** I added a JSDoc comment above greet().",
+    wantSubject: "Add a JSDoc comment above greet()",
+    wantBody: "1. **What and why:** I added a JSDoc comment above greet().",
+  },
+  {
+    name: "a long prompt is cut at a word boundary, under the cap, no ellipsis",
+    prompt:
+      "Add a JSDoc comment above the greet function describing its single parameter and what it returns to the caller in all cases",
+    summary: "ok",
+    wantSubject: "Add a JSDoc comment above the greet function describing its single",
+    wantBody: "ok",
+  },
+  {
+    name: "a multi-line prompt collapses to one line",
+    prompt: "Add a comment\nabove greet()\n\nexplaining the parameter",
+    summary: "ok",
+    wantSubject: "Add a comment above greet() explaining the parameter",
+    wantBody: "ok",
+  },
+  {
+    name: "an empty prompt falls back to the summary-derived subject",
+    prompt: "",
+    summary: "Fixed a bug in the parser.",
+    wantSubject: "Fixed a bug in the parser",
+    wantBody: "",
+  },
+  {
+    name: "both empty falls back to the unexplained placeholder",
+    prompt: "",
+    summary: "",
+    wantSubject: "ctui: accept unexplained change",
+    wantBody: "",
+  },
+];
+
+test("commitMessage prefers the user's prompt as the subject, falling back to the summary", () => {
+  for (const { name, prompt, summary, wantSubject, wantBody } of commitMessageCases) {
+    const { subject, body } = commitMessage(prompt, summary);
+    assert.equal(subject, wantSubject, `[${name}] subject`);
+    assert.equal(body, wantBody, `[${name}] body`);
+  }
+});
+
+test("commitMessage never appends an ellipsis to a prompt-derived subject, and cuts on a word boundary", () => {
+  const long = commitMessageCases[1]!;
+  const { subject } = commitMessage(long.prompt, long.summary);
+  assert.ok(!subject.includes("..."), `expected no ellipsis, got: ${JSON.stringify(subject)}`);
+  assert.ok(subject.length <= 72, `subject exceeds the cap: ${JSON.stringify(subject)}`);
+  // Word-boundary cut: the character right after where we stopped, in the
+  // original prompt, is whitespace (or the string simply ended there).
+  const nextChar = long.prompt[subject.length];
+  assert.ok(nextChar === undefined || nextChar === " ", `subject was cut mid-word: ${JSON.stringify(subject)}`);
 });
 
 test("app mounts showing branch and mode, and renders an approval prompt when one is pending", async () => {

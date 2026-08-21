@@ -65,18 +65,36 @@ function stripMarkdown(s: string): string {
   return s.replace(/[`*#]/g, "");
 }
 
-// Caps `s` at SUBJECT_CAP characters on a word boundary, never mid-word,
-// trimming to an ellipsis when it had to cut anything.
+// Cuts `s` to at most `max` characters on a word boundary, never mid-word,
+// appending `suffix` only once a cut actually happened.
 // ponytail: a single token longer than the cap (no space to back up to)
-// still gets cut mid-word — not a shape the explain-gate answer produces in
+// still gets cut mid-word — not a shape either caller below produces in
 // practice, and not worth a hyphenation heuristic until it is.
-function capSubject(s: string): string {
-  if (s.length <= SUBJECT_CAP) return s;
-  const budget = SUBJECT_CAP - 3; // room for "..."
-  const cut = s.slice(0, budget);
+function cutAtWordBoundary(s: string, max: number, suffix: string): string {
+  if (s.length <= max) return s;
+  const cut = s.slice(0, max - suffix.length);
   const lastSpace = cut.lastIndexOf(" ");
   const wordSafe = lastSpace > 0 ? cut.slice(0, lastSpace) : cut;
-  return wordSafe.trimEnd() + "...";
+  return wordSafe.trimEnd() + suffix;
+}
+
+// Caps `s` at SUBJECT_CAP characters on a word boundary, trimming to an
+// ellipsis when it had to cut anything. Used only by splitSummary's
+// summary-derived subject (see below) — the primary, prompt-derived subject
+// never gets an ellipsis; see subjectFromPrompt.
+function capSubject(s: string): string {
+  return cutAtWordBoundary(s, SUBJECT_CAP, "...");
+}
+
+// The user's own prompt, collapsed to one line and capped at SUBJECT_CAP on
+// a word boundary — no ellipsis, since a trimmed subject reads fine in
+// `git log --oneline` and a trailing "..." there does not. This is the
+// primary source for the accepted commit's subject (see commitMessage
+// below): it's one line already, it's what a human would have written, and
+// it describes intent rather than however the agent chose to phrase its
+// explain-gate answer this particular turn.
+function subjectFromPrompt(prompt: string): string {
+  return cutAtWordBoundary(prompt.trim().replace(/\s+/g, " "), SUBJECT_CAP, "");
 }
 
 // splitSummary uses the agent's first sentence as the commit subject; the
@@ -122,6 +140,17 @@ export function splitSummary(raw: string): { subject: string; body: string } {
   const body = end === -1 ? "" : cleaned.slice(end + 1).trim();
 
   return { subject: capSubject(firstSentence), body };
+}
+
+// commitMessage picks the accepted commit's subject and body. The user's
+// prompt (subjectFromPrompt) is the primary subject source, with the full,
+// untouched agent summary as the body — the detail belongs there, not
+// squeezed into one line. Falls back to the summary-derived subject/body
+// (splitSummary) only when there's no prompt: the "A" unexplained-accept
+// path, or an empty prompt.
+export function commitMessage(prompt: string, summary: string): { subject: string; body: string } {
+  const subject = prompt.trim() === "" ? "" : subjectFromPrompt(prompt);
+  return subject === "" ? splitSummary(summary) : { subject, body: summary.trim() };
 }
 
 // sessionNameOf recovers the short session name ("s1") from a worktree
@@ -680,7 +709,7 @@ export function App({
       // when there is one (e.g. it started streaming before A was pressed)
       // and always record the prompt that led here, falling back to "<none>"
       // only when there truly isn't one.
-      const { subject, body } = splitSummary(summary);
+      const { subject, body } = commitMessage(lastPrompt, summary);
       const promptTrailer = lastPrompt !== "" ? lastPrompt : "<none>";
       try {
         await commitAccepted(worktree.repo, paths, subject, body, sessionNameOf(worktree.branch), promptTrailer);
