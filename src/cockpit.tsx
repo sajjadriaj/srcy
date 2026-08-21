@@ -26,14 +26,23 @@ export interface PlanEntry {
 // ' ', '+', '-' and '\' prefixes — the "+++"/"---" header lines live in
 // FileDiff.header, never in a body — so a first-character test is enough
 // and cannot mistake a header for a changed line.
+export function hunkStats(body: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of body.split("\n")) {
+    if (line.startsWith("+")) added++;
+    else if (line.startsWith("-")) removed++;
+  }
+  return { added, removed };
+}
+
 export function diffStats(f: FileDiff): { added: number; removed: number } {
   let added = 0;
   let removed = 0;
   for (const hunk of f.hunks) {
-    for (const line of hunk.body.split("\n")) {
-      if (line.startsWith("+")) added++;
-      else if (line.startsWith("-")) removed++;
-    }
+    const stats = hunkStats(hunk.body);
+    added += stats.added;
+    removed += stats.removed;
   }
   return { added, removed };
 }
@@ -286,3 +295,104 @@ export function planFrom(raw: unknown): PlanEntry[] {
   }
   return out;
 }
+
+export interface OutlineEntry {
+  func: string; // enclosing function, from git's own xfuncname
+  added: number;
+  removed: number;
+}
+
+// The name shown for hunks git could not attribute to any enclosing
+// function — imports, module constants, a header comment.
+export const TOP_LEVEL = "(top level)";
+
+// outline answers "which functions did this touch", which is the question a
+// diff cannot answer on its own: a reader scrolling +40/-12 across four
+// hunks has no idea whether that is one function reworked or four grazed.
+//
+// Names come from git's `@@ ... @@ <func>` headers, which git computes with
+// xfuncname — no parser, no language configuration, and correct wherever
+// git's own diff headers are.
+//
+// ponytail: xfuncname is a per-language regex, so it names the enclosing
+// *declaration*, not a full symbol path — a nested closure reports its
+// outer function. Upgrade to tree-sitter if that ambiguity starts costing
+// real review time.
+export function outline(f: FileDiff): OutlineEntry[] {
+  const byFunc = new Map<string, OutlineEntry>();
+  for (const hunk of f.hunks) {
+    const name = hunk.func.trim() === "" ? TOP_LEVEL : hunk.func.trim();
+    const stats = hunkStats(hunk.body);
+    const existing = byFunc.get(name);
+    if (existing) {
+      existing.added += stats.added;
+      existing.removed += stats.removed;
+    } else {
+      byFunc.set(name, { func: name, added: stats.added, removed: stats.removed });
+    }
+  }
+  // Insertion order: functions appear as they appear in the file, which is
+  // the order the reviewer will meet them scrolling through it.
+  return [...byFunc.values()];
+}
+
+const BLOCKS = " ▁▂▃▄▅▆▇█";
+
+// densityBar is the minimap: whereabouts in the file the edits landed. One
+// scattered change across a 900-line file and one concentrated rewrite of
+// forty lines both read as "+40" in a diff stat and mean very different
+// things to whoever has to maintain the result.
+//
+// Bars are scaled to the file's own busiest bucket, not to an absolute
+// count: the question is where the changes are relative to each other, and
+// an absolute scale renders every small edit as a flat line.
+export function densityBar(changed: Iterable<number>, totalLines: number, width: number): string {
+  if (totalLines <= 0 || width <= 0) return "";
+  const buckets = new Array<number>(width).fill(0);
+  for (const line of changed) {
+    if (line < 1 || line > totalLines) continue;
+    // line-1 so line 1 lands in bucket 0; min() keeps the last line of the
+    // file out of a bucket that does not exist.
+    const idx = Math.min(width - 1, Math.floor(((line - 1) / totalLines) * width));
+    buckets[idx]!++;
+  }
+  const peak = Math.max(...buckets);
+  if (peak === 0) return "";
+  return buckets
+    .map((count) => {
+      if (count === 0) return BLOCKS[0]!;
+      // At least one visible block for any bucket that has anything in it:
+      // a change that renders as blank is a change the reader cannot see.
+      const level = Math.max(1, Math.round((count / peak) * (BLOCKS.length - 1)));
+      return BLOCKS[level]!;
+    })
+    .join("");
+}
+
+// Outline is the review pane's header: what changed, by function, with the
+// minimap beside it.
+export function Outline({
+  entries,
+  bar,
+}: {
+  entries: OutlineEntry[];
+  bar: string;
+}): React.JSX.Element | null {
+  if (entries.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      <Box>
+        <Text dimColor>OUTLINE</Text>
+        {bar !== "" && <Text dimColor>{`  ${bar}`}</Text>}
+      </Box>
+      {entries.map((entry, i) => (
+        <Text key={i} color={entry.func === TOP_LEVEL ? undefined : "green"} dimColor={entry.func === TOP_LEVEL}>
+          {`  ${entry.func.padEnd(OUTLINE_WIDTH)} +${entry.added} -${entry.removed}`}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
+// Column the outline's counts line up in, as NAME_WIDTH does for the map.
+const OUTLINE_WIDTH = 34;

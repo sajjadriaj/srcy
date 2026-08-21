@@ -7,7 +7,18 @@ import TextInput from "ink-text-input";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "./acp.js";
 import { blastRadius, type Symbol as BlastSymbol } from "./blast.js";
 import { runChecks, type CheckResult } from "./checks.js";
-import { ChecksPane, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap, type PlanEntry } from "./cockpit.js";
+import {
+  ChecksPane,
+  densityBar,
+  LiveDiff,
+  mapEntries,
+  outline,
+  Outline,
+  PlanBar,
+  planFrom,
+  RepoMap,
+  type PlanEntry,
+} from "./cockpit.js";
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
@@ -16,6 +27,9 @@ import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js"
 // scrollback still holds everything Ink has painted. Give the pane its own
 // scroll keys if reading back more than this becomes routine.
 const TRANSCRIPT_WINDOW = 14;
+
+// Width of the review pane's minimap, in characters.
+const DENSITY_WIDTH = 24;
 
 type TranscriptEntry =
   | { kind: "user"; text: string }
@@ -255,6 +269,15 @@ function ReviewPane({
   const hunk: Hunk | undefined = file?.hunks[review.hi];
   const selected = file ? review.selected(review.fi, review.hi) : false;
   const position = file ? (file.hunks.length > 0 ? `hunk ${review.hi + 1}/${file.hunks.length}` : "(no hunks)") : "";
+  // What changed by function, and where in the file it landed. The bar
+  // needs the file's own length, which is only known once its snapshot has
+  // loaded — until then the outline renders without one rather than
+  // guessing a length and drawing a wrong picture.
+  const entries = file ? outline(file) : [];
+  const bar =
+    file && fileContent !== null
+      ? densityBar(changedLines(file), fileContent.split("\n").length, DENSITY_WIDTH)
+      : "";
 
   return (
     <Box flexDirection="column" borderStyle="round">
@@ -281,6 +304,7 @@ function ReviewPane({
           )}
         </Box>
       )}
+      <Outline entries={entries} bar={bar} />
       <Text dimColor>{"─".repeat(50)}</Text>
       {!file ? (
         <Text dimColor>nothing to review</Text>
