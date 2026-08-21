@@ -69,10 +69,29 @@ which is how to iterate on the layout without waiting on a real turn.
 Keys:
 
 ```
-r        open review          space  select hunk / file
-tab      patch <-> file view  a      accept selected
-A        accept unexplained   esc    interrupt the agent
+r        open review          space   select hunk / file
+tab      patch <-> file view  a       accept selected
+A        accept unexplained   esc     interrupt the agent
+ctrl-p   open any file        j/k     move / scroll
 ```
+
+### What review shows you
+
+```
+OUTLINE   ▁▁▃█▁▁▁▁▁▂▁▁          which functions changed, and where in
+  verify()          +1 -1       the file the edits landed
+  Session.renew()   +2 -0
+
+── 2026-06-02  a1b2c3d4  add token renewal      the prompt that produced
+      41   this.renewals++                     each run of lines, while
+── this session                                you read the file
++     42   if (exp <= now())
+```
+
+`CHECKS` runs the project's own checker in the worktree after each turn.
+`.ctui/check` (executable) if you have one, otherwise your `typecheck` or
+`build` npm script. Failing files turn red in the repo map, and the count
+sits directly above the accept key — accept is informed, never blocked.
 
 `a` stays disabled until the agent has answered what changed, what could
 break, and what it did not test. `A` accepts anyway and records
