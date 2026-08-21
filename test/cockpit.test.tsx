@@ -1,0 +1,184 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import React from "react";
+import { render } from "ink-testing-library";
+import { buildTree, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap } from "../src/cockpit.js";
+import { splitDiff, type FileDiff } from "../src/diff.js";
+
+// A real two-file diff, the shape splitDiff actually produces — writing the
+// FileDiff objects by hand would test the components against a shape git
+// never emits.
+const DIFF = [
+  "diff --git a/src/auth/token.ts b/src/auth/token.ts",
+  "index 1111111..2222222 100644",
+  "--- a/src/auth/token.ts",
+  "+++ b/src/auth/token.ts",
+  "@@ -39,4 +39,4 @@ export function verify(t: string) {",
+  "   const exp = decode(t)",
+  "-  if (exp < now)",
+  "+  if (exp <= now)",
+  "     return null",
+  "   return session",
+  "diff --git a/README.md b/README.md",
+  "index 3333333..4444444 100644",
+  "--- a/README.md",
+  "+++ b/README.md",
+  "@@ -1,2 +1,3 @@",
+  " # project",
+  "+a new line",
+  " ",
+  "",
+].join("\n");
+
+function files(): FileDiff[] {
+  return splitDiff(DIFF);
+}
+
+test("diffStats counts changed lines and ignores context", () => {
+  const token = files().find((f) => f.path === "src/auth/token.ts")!;
+  assert.deepEqual(diffStats(token), { added: 1, removed: 1 });
+
+  const readme = files().find((f) => f.path === "README.md")!;
+  assert.deepEqual(diffStats(readme), { added: 1, removed: 0 });
+});
+
+test("mapEntries lets a written file outrank the same file merely read", () => {
+  const entries = mapEntries(files(), ["src/auth/token.ts", "src/auth/session.ts"]);
+  const token = entries.find((e) => e.path === "src/auth/token.ts")!;
+  assert.equal(token.touch, "wrote");
+  assert.equal(token.added, 1);
+  const session = entries.find((e) => e.path === "src/auth/session.ts")!;
+  assert.equal(session.touch, "read");
+  // Sorted, so buildTree's "same segment as the row above" collapse holds.
+  assert.deepEqual(
+    entries.map((e) => e.path),
+    ["README.md", "src/auth/session.ts", "src/auth/token.ts"],
+  );
+});
+
+test("mapEntries reports a file the agent edited and reverted as merely read", () => {
+  // No diff section for it: the worktree is the authority for "wrote", so
+  // claiming a change that no longer exists would be a lie the map tells
+  // right up until review shows nothing there.
+  const entries = mapEntries([], ["src/auth/token.ts"]);
+  assert.equal(entries[0]!.touch, "read");
+  assert.equal(entries[0]!.added, 0);
+});
+
+test("buildTree emits each directory once and indents by depth", () => {
+  const rows = buildTree(
+    mapEntries(files(), ["src/auth/session.ts", "src/api/routes.ts"]),
+  );
+  assert.deepEqual(
+    rows.map((r) => [r.depth, r.name, r.dir]),
+    [
+      [0, "README.md", false],
+      [0, "src/", true],
+      [1, "api/", true],
+      [2, "routes.ts", false],
+      [1, "auth/", true],
+      [2, "session.ts", false],
+      [2, "token.ts", false],
+    ],
+  );
+});
+
+test("hunkLines shows the new-side number against a removed line too", () => {
+  const token = files().find((f) => f.path === "src/auth/token.ts")!;
+  const lines = hunkLines(token.hunks[0]!.body, token.hunks[0]!.newStart);
+  assert.deepEqual(
+    lines.map((l) => [l.num, l.sign]),
+    [
+      ["39", " "],
+      ["40", "-"],
+      // The replacement reads as line 40 changing, not as 40 vanishing and
+      // 41 appearing: only new-side lines advance the counter.
+      ["40", "+"],
+      ["41", " "],
+      ["42", " "],
+    ],
+  );
+});
+
+test("hunkLines gives the no-newline marker no line number", () => {
+  const lines = hunkLines(" a\n\\ No newline at end of file\n", 7);
+  assert.deepEqual(lines.map((l) => l.num), ["7", ""]);
+});
+
+test("RepoMap shows what was written, what was read, and the counts", () => {
+  const { lastFrame } = render(<RepoMap entries={mapEntries(files(), ["src/auth/session.ts"])} />);
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /token\.ts.*\+1 -1/);
+  assert.match(frame, /●/);
+  assert.match(frame, /○/);
+  // Directories appear once, not once per file beneath them.
+  assert.equal(frame.split("\n").filter((l) => l.trim() === "src/").length, 1);
+});
+
+test("RepoMap says so when nothing has been touched", () => {
+  const { lastFrame } = render(<RepoMap entries={[]} />);
+  assert.match(lastFrame() ?? "", /nothing touched yet/);
+});
+
+test("LiveDiff renders the current file's changed lines", () => {
+  const token = files().find((f) => f.path === "src/auth/token.ts")!;
+  const { lastFrame } = render(<LiveDiff file={token} />);
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /src\/auth\/token\.ts:39/);
+  assert.match(frame, /40 - {3}if \(exp < now\)/);
+  assert.match(frame, /40 \+ {3}if \(exp <= now\)/);
+});
+
+test("LiveDiff keeps the newest lines when a hunk is longer than the pane", () => {
+  const body = Array.from({ length: 30 }, (_, i) => `+line ${i + 1}`).join("\n") + "\n";
+  const file: FileDiff = {
+    path: "big.txt",
+    header: "",
+    binary: false,
+    hunks: [{ header: "@@ -1,0 +1,30 @@", body, func: "", newStart: 1, newCount: 30 }],
+  };
+  const frame = render(<LiveDiff file={file} maxLines={5} />).lastFrame() ?? "";
+  assert.match(frame, /line 30/);
+  assert.doesNotMatch(frame, /line 25\b/);
+});
+
+test("LiveDiff says something useful with no diff, a binary file, or no hunks", () => {
+  assert.match(render(<LiveDiff />).lastFrame() ?? "", /no changes yet/);
+  const bin: FileDiff = { path: "logo.png", header: "", binary: true, hunks: [] };
+  assert.match(render(<LiveDiff file={bin} />).lastFrame() ?? "", /binary/);
+  const renamed: FileDiff = { path: "b.txt", header: "", binary: false, hunks: [] };
+  assert.match(render(<LiveDiff file={renamed} />).lastFrame() ?? "", /metadata only/);
+});
+
+test("PlanBar marks done, current, and pending steps differently", () => {
+  const frame =
+    render(
+      <PlanBar
+        entries={[
+          { content: "find expiry check", status: "completed" },
+          { content: "fix off-by-one", status: "in_progress" },
+          { content: "add test", status: "pending" },
+        ]}
+      />,
+    ).lastFrame() ?? "";
+  assert.match(frame, /✔ find expiry check/);
+  assert.match(frame, /▸ fix off-by-one/);
+  assert.match(frame, /☐ add test/);
+});
+
+test("PlanBar renders nothing at all when there is no plan", () => {
+  assert.equal(render(<PlanBar entries={[]} />).lastFrame(), "");
+});
+
+test("planFrom degrades to no plan instead of throwing on an unexpected payload", () => {
+  assert.deepEqual(planFrom({ entries: [{ content: "a", status: "completed" }] }), [
+    { content: "a", status: "completed" },
+  ]);
+  // A missing status is a plan step we can still show, so it defaults
+  // rather than being dropped.
+  assert.deepEqual(planFrom({ entries: [{ content: "a" }] }), [{ content: "a", status: "pending" }]);
+  assert.deepEqual(planFrom({ entries: "nope" }), []);
+  assert.deepEqual(planFrom({}), []);
+  assert.deepEqual(planFrom(null), []);
+  assert.deepEqual(planFrom({ entries: [{ content: 7 }, null, { content: "" }] }), []);
+});

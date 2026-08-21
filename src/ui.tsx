@@ -6,8 +6,15 @@ import { Box, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "./acp.js";
 import { blastRadius, type Symbol as BlastSymbol } from "./blast.js";
-import { changedLines, patchPaths, Review, type Hunk } from "./diff.js";
+import { LiveDiff, mapEntries, PlanBar, planFrom, RepoMap, type PlanEntry } from "./cockpit.js";
+import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
+
+// How many transcript entries the cockpit's centre column keeps on screen.
+// ponytail: a fixed window, not real scrollback — the terminal's own
+// scrollback still holds everything Ink has painted. Give the pane its own
+// scroll keys if reading back more than this becomes routine.
+const TRANSCRIPT_WINDOW = 14;
 
 type TranscriptEntry =
   | { kind: "user"; text: string }
@@ -361,6 +368,20 @@ export function App({
   const [agentDied, setAgentDied] = useState(false);
   const [lastPrompt, setLastPrompt] = useState("");
 
+  // Cockpit state: what the session has changed so far (the repo map and
+  // the live diff pane both read this), which file the agent touched most
+  // recently, and the agent's own plan. All of it is display-only — accept
+  // still works from the diff review() captures for itself, so a stale or
+  // failed refresh here can never change what gets applied.
+  const [diffFiles, setDiffFiles] = useState<FileDiff[]>([]);
+  const [activePath, setActivePath] = useState<string | null>(null);
+  const [plan, setPlan] = useState<PlanEntry[]>([]);
+  // Drops a refresh that arrives while one is already running rather than
+  // queueing it: refreshes are triggered per write, and the guaranteed
+  // refresh at end of turn (see submit) makes the final state correct
+  // regardless of how many mid-turn ones were skipped.
+  const refreshingRef = useRef(false);
+
   // Review state. `review` is a mutable class instance (toggle/next/prev
   // mutate it in place, per diff.ts); reviewVersion is bumped after every
   // mutation purely to force a re-render, since React does not see a
@@ -428,6 +449,24 @@ export function App({
     });
   }
 
+  // Re-reads the worktree diff so the repo map and the live diff pane show
+  // what the agent has written so far. Closes over nothing that changes
+  // across renders (worktree is a fixed prop; setters and refs are stable),
+  // so the copy the bridge listener captured on first render stays correct.
+  // A failure only leaves the display briefly stale — never fatal, and
+  // never able to affect what accept applies.
+  async function refreshWorkspace(): Promise<void> {
+    if (refreshingRef.current) return;
+    refreshingRef.current = true;
+    try {
+      setDiffFiles(splitDiff(await worktree.diff()));
+    } catch {
+      // display-only; see above
+    } finally {
+      refreshingRef.current = false;
+    }
+  }
+
   useEffect(() => {
     function onUpdate(u: AgentUpdate): void {
       // The explain-gate prompt (see EXPLAIN_PROMPT) is a normal turn, so
@@ -465,8 +504,19 @@ export function App({
           if (u.toolKind === "read" && u.toolPath !== undefined) {
             readPathsRef.current.add(u.toolPath);
           }
+          // A tool that can change the tree moves the live diff pane to
+          // that file and re-reads the diff. Listing the writing kinds
+          // (rather than excluding "read") keeps a new or unknown ACP kind
+          // from silently pointing the pane at a file nothing wrote.
+          if (u.toolKind === "edit" || u.toolKind === "delete" || u.toolKind === "move") {
+            if (u.toolPath !== undefined) setActivePath(u.toolPath);
+            void refreshWorkspace();
+          }
           break;
         }
+        case "plan":
+          setPlan(planFrom(u.raw));
+          break;
         case "current_mode_update":
           if (u.modeId != null) setMode(u.modeId);
           break;
@@ -868,6 +918,11 @@ export function App({
       append({ kind: "agent", text: `[agent process exited: ${message}]` });
     } finally {
       setRunning(false);
+      // The refresh that makes the map correct: mid-turn refreshes are
+      // dropped whenever one is already in flight, so this is the one that
+      // is guaranteed to run against the finished state. Also covers an
+      // agent that writes through a tool kind we don't recognise.
+      void refreshWorkspace();
     }
   }
 
@@ -882,6 +937,10 @@ export function App({
     ? `${branch} · explain · worktree discarded on exit`
     : `${branch} · ${modeWord} · ${statusWord} · worktree discarded on exit`;
   const inputEnabled = !running && !permission && !agentDied && viewMode === "chat";
+  // The file the live diff pane shows: the one the agent touched most
+  // recently, falling back to whatever changed last so the pane still says
+  // something useful when a write arrived without a path.
+  const activeFile = diffFiles.find((f) => f.path === activePath) ?? diffFiles[diffFiles.length - 1];
 
   return (
     <Box flexDirection="column">
@@ -900,27 +959,42 @@ export function App({
       ) : (
         <Box flexDirection="column" borderStyle="round">
           <Text>{statusLine}</Text>
-          {transcript.map((entry, i) => {
-            if (entry.kind === "tool") {
-              const line = [entry.verb, entry.path].filter(Boolean).join("  ");
-              return (
-                <Text key={i} dimColor>
-                  {`▸ ${line}`}
-                </Text>
-              );
-            }
-            if (entry.kind === "thought") {
-              return (
-                <Text key={i} dimColor>
-                  {entry.text}
-                </Text>
-              );
-            }
-            if (entry.kind === "user") {
-              return <Text key={i}>{`> ${entry.text}`}</Text>;
-            }
-            return <Text key={i}>{entry.text}</Text>;
-          })}
+          <Box>
+            <Box width={30} flexShrink={0} flexDirection="column">
+              <RepoMap entries={mapEntries(diffFiles, readPathsRef.current)} />
+            </Box>
+            <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
+              {/* The transcript is windowed to its tail so it can't push the
+                  live diff pane off the bottom of the terminal — an
+                  unbounded transcript column would grow without limit and
+                  take the pane with it. */}
+              {transcript.slice(-TRANSCRIPT_WINDOW).map((entry, i) => {
+                if (entry.kind === "tool") {
+                  const line = [entry.verb, entry.path].filter(Boolean).join("  ");
+                  return (
+                    <Text key={i} dimColor>
+                      {`▸ ${line}`}
+                    </Text>
+                  );
+                }
+                if (entry.kind === "thought") {
+                  return (
+                    <Text key={i} dimColor>
+                      {entry.text}
+                    </Text>
+                  );
+                }
+                if (entry.kind === "user") {
+                  return <Text key={i}>{`> ${entry.text}`}</Text>;
+                }
+                return <Text key={i}>{entry.text}</Text>;
+              })}
+              <Box marginTop={1}>
+                <LiveDiff file={activeFile} />
+              </Box>
+            </Box>
+          </Box>
+          <PlanBar entries={plan} />
         </Box>
       )}
       {confirmingExit && (

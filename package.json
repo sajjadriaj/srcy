@@ -11,9 +11,10 @@
   },
   "scripts": {
     "test": "tsx --test test/*.test.ts test/*.test.tsx",
-    "build": "tsc",
-    "prepare": "tsc",
-    "typecheck": "tsc --noEmit"
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/src/index.js', 0o755)\"",
+    "prepare": "tsc && node -e \"require('fs').chmodSync('dist/src/index.js', 0o755)\"",
+    "typecheck": "tsc --noEmit",
+    "preview": "tsx scripts/preview.tsx"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

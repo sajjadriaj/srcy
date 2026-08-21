@@ -35,6 +35,37 @@ ctui why src/tts.ts:18     # which prompt produced this line, and what the
                            # agent warned about at the time
 ```
 
+The session screen is a cockpit, not a scrolling log:
+
+```
+╭──────────────────────────────────────────────────────────────────────────╮
+│ctui/auth · default mode · idle · worktree discarded on exit              │
+│REPO                           ▸ Read  src/auth/session.ts                │
+│   src/                        ▸ Read  src/auth/token.ts                  │
+│     auth/                     Off-by-one in verify(): `<` lets a token   │
+│●      session.ts    +2 -0     that expired this millisecond through.     │
+│●      token.ts      +1 -1     ▸ Edit  src/auth/token.ts                  │
+│● wrote  ○ read                                                           │
+│                               src/auth/token.ts:38                       │
+│                                 40                                       │
+│                                 41 -   if (exp < now())                  │
+│                                 41 +   if (exp <= now())                 │
+│                                 42       return null                     │
+│PLAN                                                                      │
+│  ✔ find the expiry comparison                                            │
+│  ▸ fix the off-by-one                                                    │
+│  ☐ add a regression test                                                 │
+╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+Left: every file this session has touched, nested as it sits in the repo,
+with how much of each changed. Right: what the agent is saying, and under it
+the file it is editing *as it edits it*. Bottom: the agent's own plan as a
+live checklist.
+
+`npm run preview` paints that frame from fixture data — no agent, no git —
+which is how to iterate on the layout without waiting on a real turn.
+
 Keys:
 
 ```
