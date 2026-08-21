@@ -53,12 +53,14 @@ test("listFiles honours .gitignore and lists each path once", async (t) => {
 });
 
 function renderApp(worktree: Worktree): ReturnType<typeof render> {
+  // Only the members App actually reaches for; the rest of AgentSession is
+  // the transport's business, not the picker's.
   const session = {
     sessionId: "s1",
     prompt: async () => "",
     cancel: async () => {},
     close: async () => {},
-  } as AgentSession;
+  } as unknown as AgentSession;
   return render(
     <App
       branch="ctui/s1"

@@ -22,6 +22,7 @@ import {
 } from "./cockpit.js";
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { filterFiles, listFiles } from "./files.js";
+import { lineOrigins, type LineOrigin } from "./provenance.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
 // How many transcript entries the cockpit's centre column keeps on screen.
@@ -196,17 +197,45 @@ function FileWindow({
   content,
   changed,
   centerLine,
+  origins,
 }: {
   content: string;
   changed: Set<number>;
   centerLine: number;
+  // Which prompt produced each line. Absent while it is still loading, or
+  // for a file opened outside review.
+  origins?: Map<number, LineOrigin>;
 }): React.JSX.Element {
   const lines = content.split("\n");
+  // A file ending in a newline splits to a trailing "" that is the
+  // terminator, not a line of the file. Rendering it invents a numbered
+  // empty line past the end that the editor does not have and the gutter
+  // then has to attribute to somebody.
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
   const start = Math.max(1, centerLine - FILE_VIEW_WINDOW);
   const end = Math.min(lines.length, centerLine + FILE_VIEW_WINDOW);
   const rows: React.JSX.Element[] = [];
+  // Provenance is announced when it changes, not repeated on every line: a
+  // label against all twenty lines is a column of noise, while a rule at
+  // each boundary is the shape of the answer — this run came from here,
+  // that run came from there.
+  let lastLabel: string | null = null;
   for (let n = start; n <= end; n++) {
-    const isChanged = changed.has(n);
+    const origin = origins?.get(n);
+    if (origin && origin.label !== lastLabel) {
+      lastLabel = origin.label;
+      const dateAndSha = origin.sha === "" ? "" : `${origin.date}  ${origin.sha.slice(0, 8)}  `;
+      rows.push(
+        <Text key={`o${n}`} dimColor={origin.sha !== ""} color={origin.sha === "" ? "cyan" : undefined}>
+          {`      ── ${dateAndSha}${origin.label}`}
+        </Text>,
+      );
+    }
+    // With provenance loaded, "this line is new" is something we know
+    // exactly — a line with no counterpart in the committed file. Without
+    // it, fall back to the hunk's span, which marks the changed region but
+    // includes the context lines around it.
+    const isChanged = origin ? origin.sha === "" : changed.has(n);
     rows.push(
       <Text key={n} color={isChanged ? "green" : undefined}>
         {`${isChanged ? "+" : " "} ${String(n).padStart(5)}  ${lines[n - 1] ?? ""}`}
@@ -253,6 +282,7 @@ function ReviewPane({
   summary,
   summaryPending,
   fileContent,
+  origins,
   fileError,
   blast,
   blastError,
@@ -263,6 +293,7 @@ function ReviewPane({
   summary: string;
   summaryPending: boolean;
   fileContent: string | null;
+  origins: Map<number, LineOrigin> | null;
   fileError: string | null;
   blast: BlastSymbol[];
   blastError: string | null;
@@ -333,7 +364,12 @@ function ReviewPane({
           ) : fileContent === null ? (
             <Text dimColor>(loading...)</Text>
           ) : (
-            <FileWindow content={fileContent} changed={changedLines(file)} centerLine={hunk?.newStart ?? 1} />
+            <FileWindow
+              content={fileContent}
+              changed={changedLines(file)}
+              centerLine={hunk?.newStart ?? 1}
+              origins={origins ?? undefined}
+            />
           )}
         </Box>
       )}
@@ -423,6 +459,9 @@ export function App({
   const [openPath, setOpenPath] = useState<string | null>(null);
   const [openContent, setOpenContent] = useState<string | null>(null);
   const [openLine, setOpenLine] = useState(1);
+  // Which prompt produced each line of the file currently in file view.
+  // Loaded per file, not per line: see provenance.lineOrigins.
+  const [origins, setOrigins] = useState<Map<number, LineOrigin> | null>(null);
 
   // Review state. `review` is a mutable class instance (toggle/next/prev
   // mutate it in place, per diff.ts); reviewVersion is bumped after every
@@ -576,6 +615,33 @@ export function App({
       bridge.off("permission", onPermission);
     };
   }, [bridge]);
+
+  // The provenance gutter: which prompt produced each line of the file the
+  // reviewer is reading. Runs off the same snapshot the file view renders,
+  // so the labels line up with the lines actually on screen. Keyed on the
+  // content itself rather than on the path, because the snapshot is what
+  // the line numbers belong to.
+  useEffect(() => {
+    if (paneMode !== "file" || fileContent === null) {
+      setOrigins(null);
+      return;
+    }
+    const path = review?.files[review.fi]?.path;
+    if (path === undefined) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const map = await lineOrigins(worktree.repo, path, fileContent.split("\n").length, review?.files[review.fi]);
+        if (!cancelled) setOrigins(map);
+      } catch {
+        // No gutter is fine; a crashed review pane is not.
+        if (!cancelled) setOrigins(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [paneMode, fileContent, reviewVersion, review, worktree]);
 
   // Shows the current file's content whenever file view is active and the
   // cursor (or the review itself) moves — from the snapshot captured at
@@ -1129,6 +1195,7 @@ export function App({
           summary={summary}
           summaryPending={summaryPending}
           fileContent={fileContent}
+          origins={origins}
           fileError={fileError}
           blast={blast}
           blastError={blastError}
