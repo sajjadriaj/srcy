@@ -127,17 +127,29 @@ function FileWindow({
 // marked. A hunkless section — a pure rename or a mode-only change — has
 // nothing to show as a patch, so patch view says so explicitly instead of
 // rendering nothing.
-// blastLine renders one "blast radius" row: `name()  N callers · agent read
-// M`. Highlighted (color) when the agent changed the symbol without reading
-// any of its callers — the 3am page, shown before you accept it.
+// blastLine renders one "blast radius" row: `name()  N references · agent
+// read M`. Highlighted (color) when the agent changed the symbol without
+// reading any of its references — the 3am page, shown before you accept it.
+// Said as "references", not "callers": this comes from `git grep`, which
+// finds textual matches, not verified call sites.
 function blastLine(s: BlastSymbol): React.JSX.Element {
   const unread = s.callers.length > 0 && s.readCount === 0;
-  const callerWord = s.callers.length === 1 ? "caller" : "callers";
+  const refWord = s.callers.length === 1 ? "reference" : "references";
   return (
     <Text key={s.name} color={unread ? "red" : undefined}>
-      {`  ${(s.name + "()").padEnd(20)}${s.callers.length} ${callerWord} · agent read ${s.readCount}`}
+      {`  ${(s.name + "()").padEnd(20)}${s.callers.length} ${refWord} · agent read ${s.readCount}`}
     </Text>
   );
+}
+
+// selectionLabel is the review footer's aggregate: "3 hunks in 2 files
+// selected". The pane below only shows the hunk under the cursor, so this
+// is the one place the user can see the whole of what an irreversible
+// accept is about to act on without walking the list themselves.
+function selectionLabel(review: Review): string {
+  const { units, files } = review.selectionSummary();
+  if (units === 0) return "nothing selected yet";
+  return `${units} hunk${units === 1 ? "" : "s"} in ${files} file${files === 1 ? "" : "s"} selected`;
 }
 
 function ReviewPane({
@@ -149,6 +161,7 @@ function ReviewPane({
   fileContent,
   fileError,
   blast,
+  blastError,
 }: {
   branch: string;
   review: Review;
@@ -158,6 +171,7 @@ function ReviewPane({
   fileContent: string | null;
   fileError: string | null;
   blast: BlastSymbol[];
+  blastError: string | null;
 }): React.JSX.Element {
   const file = review.files[review.fi];
   const hunk: Hunk | undefined = file?.hunks[review.hi];
@@ -176,10 +190,17 @@ function ReviewPane({
         )}
         {!summaryPending && summary === "" && <Text dimColor>(no summary — press A to accept without one)</Text>}
       </Box>
-      {blast.length > 0 && (
+      {(blast.length > 0 || blastError) && (
         <Box flexDirection="column" marginBottom={1}>
           <Text dimColor>blast radius</Text>
-          {blast.map(blastLine)}
+          {blastError ? (
+            // A broken blast radius must never render as an empty list —
+            // that's indistinguishable from "no other references", and a
+            // safety display must not fail toward reassurance.
+            <Text color="red">{`  could not check: ${blastError}`}</Text>
+          ) : (
+            blast.map(blastLine)
+          )}
         </Box>
       )}
       <Text dimColor>{"─".repeat(50)}</Text>
@@ -263,6 +284,10 @@ export function App({
     null,
   );
   const [confirmingExit, setConfirmingExit] = useState(false);
+  // Why the confirm-before-exit prompt is up, so its message can be honest
+  // about what's actually at risk: a turn (or accept) still running, or —
+  // I9 — unaccepted work already sitting in the worktree while idle.
+  const [confirmReason, setConfirmReason] = useState<"busy" | "dirty">("busy");
   const [agentDied, setAgentDied] = useState(false);
   const [lastPrompt, setLastPrompt] = useState("");
 
@@ -281,6 +306,9 @@ export function App({
   const [fileContent, setFileContent] = useState<string | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [blast, setBlast] = useState<BlastSymbol[]>([]);
+  // I11: a broken blast radius must render as a visible error, not blend in
+  // with "nothing at risk" the way an empty `blast` array does.
+  const [blastError, setBlastError] = useState<string | null>(null);
   // Every path the agent has opened with a "read" tool call, across the
   // whole session (not just the turn that produced the current diff) — a
   // plain ref because it accumulates from the bridge listener without
@@ -293,6 +321,14 @@ export function App({
   const explainInFlightRef = useRef(false);
   const reviewOpeningRef = useRef(false);
   const acceptingRef = useRef(false);
+  // I8: every non-binary file's content, captured once at the moment the
+  // diff itself was captured (openReview), not read live whenever the file
+  // pane happens to render. The explain turn is a normal prompt with tool
+  // access, so the agent can keep editing the worktree while answering it —
+  // a live read would then show content review.patch() (built from that
+  // same original diff) will never actually apply. A plain ref: it's write-
+  // once per review and read only inside an effect keyed off reviewVersion.
+  const fileSnapshotRef = useRef<Map<string, string>>(new Map());
 
   function append(entry: TranscriptEntry): void {
     setTranscript((prev) => {
@@ -379,10 +415,13 @@ export function App({
     };
   }, [bridge]);
 
-  // Loads the current file's content from the worktree whenever file view
-  // is active and the cursor (or the review itself) moves. Reads from
-  // worktree.path — the agent's own checkout — not the real repo, so file
-  // view shows the change exactly as it stands before acceptance.
+  // Shows the current file's content whenever file view is active and the
+  // cursor (or the review itself) moves — from the snapshot captured at
+  // openReview() (see fileSnapshotRef), not a live read. A live read here
+  // raced review.patch(), which replays the diff captured back then: the
+  // explain turn is a normal prompt with tool access, so the agent can keep
+  // editing while the reviewer looks, and a live read would show content
+  // that was never what's about to be applied (I8).
   useEffect(() => {
     if (!review || paneMode !== "file") return;
     const file = review.files[review.fi];
@@ -392,23 +431,15 @@ export function App({
       setFileError("(binary or metadata-only change)");
       return;
     }
-    let cancelled = false;
-    readFile(join(worktree.path, file.path), "utf8")
-      .then((content) => {
-        if (cancelled) return;
-        setFileContent(content);
-        setFileError(null);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setFileContent(null);
-        const message = err instanceof Error ? err.message : String(err);
-        setFileError(`(could not read file: ${message})`);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [review, reviewVersion, paneMode, worktree.path]);
+    const content = fileSnapshotRef.current.get(file.path);
+    if (content === undefined) {
+      setFileContent(null);
+      setFileError("(could not read this file when the review opened)");
+      return;
+    }
+    setFileContent(content);
+    setFileError(null);
+  }, [review, reviewVersion, paneMode]);
 
   // In an explain session "r" is refused rather than opening review, but the
   // same keystroke still reaches TextInput (it's still focused, same quirk
@@ -475,6 +506,25 @@ export function App({
         return;
       }
       const rev = new Review(raw);
+
+      // I8: snapshot every non-binary file's content now, at the moment the
+      // diff itself was captured — before the explain turn below gives the
+      // agent another chance to keep editing the worktree.
+      const snapshot = new Map<string, string>();
+      await Promise.all(
+        rev.files
+          .filter((f) => !f.binary)
+          .map(async (f) => {
+            try {
+              snapshot.set(f.path, await readFile(join(worktree.path, f.path), "utf8"));
+            } catch {
+              // Left unset; the file-view effect reports "could not read"
+              // for it, the same as a live read failing used to.
+            }
+          }),
+      );
+      fileSnapshotRef.current = snapshot;
+
       setReview(rev);
       setReviewVersion(0);
       setPaneMode("patch");
@@ -484,13 +534,34 @@ export function App({
       setFileContent(null);
       setFileError(null);
       setBlast([]);
+      setBlastError(null);
       setViewMode("review");
       void sendExplainPrompt();
       blastRadius(worktree.path, rev.files, readPathsRef.current)
-        .then(setBlast)
-        .catch(() => setBlast([]));
+        .then((result) => {
+          setBlast(result);
+          setBlastError(null);
+        })
+        .catch((err) => {
+          // I11: a broken blast radius must show up as an error, not
+          // silently render as an empty (= "nothing at risk") list.
+          setBlast([]);
+          setBlastError(err instanceof Error ? err.message : String(err));
+        });
     } finally {
       reviewOpeningRef.current = false;
+      // I7: the early returns above (diff failed, or "nothing to review")
+      // skip past closeReview()'s own setInput("") below, leaving whatever
+      // stray "r" TextInput's own onChange queued for this same keystroke
+      // (see closeReview()'s comment) sitting in the input box — the next
+      // "r" then just types another character instead of retrying review.
+      // Cleared here, unconditionally, once for every exit path (including
+      // success) instead of patched into each return; every path reaches
+      // this only after the `await worktree.diff()` above, so — like
+      // closeReview()'s effect-based cleanup for the explain-session case —
+      // this can't race TextInput's own synchronous append the keystroke
+      // handler itself would.
+      setInput("");
     }
   }
 
@@ -501,6 +572,7 @@ export function App({
     setFileContent(null);
     setFileError(null);
     setBlast([]);
+    setBlastError(null);
     // The "r" keystroke that opened review is delivered to TextInput too
     // (it stays focused for that same event), which inserts a stray "r"
     // into the input; TextInput is unmounted for the whole review, so this
