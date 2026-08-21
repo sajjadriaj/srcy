@@ -426,6 +426,19 @@ export class Review {
     return this.sel.size > 0;
   }
 
+  // selectionSummary reports how many selectable units (a hunk, or a whole
+  // hunkless section) and how many distinct files are currently selected —
+  // what the accept key is actually about to act on. The review pane shows
+  // only the hunk under the cursor, so this is the one place the user can
+  // see the aggregate before pressing an irreversible key.
+  selectionSummary(): { units: number; files: number } {
+    const files = new Set<number>();
+    for (const k of this.sel) {
+      files.add(Number(k.split(":")[0]));
+    }
+    return { units: this.sel.size, files: files.size };
+  }
+
   patch(): string {
     return buildPatch(this.files, (fi, hi) => this.selected(fi, hi));
   }

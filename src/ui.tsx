@@ -7,7 +7,7 @@ import TextInput from "ink-text-input";
 import type { AgentSession, AgentUpdate, PermissionRequest } from "./acp.js";
 import { blastRadius, type Symbol as BlastSymbol } from "./blast.js";
 import { changedLines, patchPaths, Review, type Hunk } from "./diff.js";
-import { applyPatch, commitAccepted, type Worktree } from "./git.js";
+import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
 type TranscriptEntry =
   | { kind: "user"; text: string }
@@ -601,19 +601,46 @@ export function App({
     acceptingRef.current = true;
     try {
       const patch = review.patch();
+      const paths = patchPaths(review.files, (fi, hi) => review.selected(fi, hi));
+
+      // C1/C2: refuse before ever calling applyPatch, rather than try to
+      // clean up after it. `git apply --3way --index` is not atomic: on a
+      // path the user already has pending work in, it can write conflict
+      // markers into their file and replace their staged content with a
+      // rejected merge before exiting non-zero — and even when it succeeds
+      // cleanly, `git commit -- <paths>` commits the whole current content
+      // of those paths, sweeping the user's own unrelated staged edit in
+      // under the agent's provenance trailers. Checking first is a smaller,
+      // safer change than making either failure mode survivable afterward.
       try {
-        await applyPatch(worktree.repo, patch);
+        const dirty = await dirtyPaths(worktree.repo, paths);
+        if (dirty.length > 0) {
+          setReviewMessage(`your working tree has changes to ${dirty.join(", ")} — commit or stash them first`);
+          return;
+        }
       } catch (err) {
-        // Nothing was applied — git's own guarantee. Show its error and let
-        // the worktree and repo sit exactly as they were.
         const message = err instanceof Error ? err.message : String(err);
-        setReviewMessage(`apply failed, nothing changed: ${message}`);
+        setReviewMessage(`could not check your working tree before applying: ${message}`);
         return;
       }
 
-      const paths = patchPaths(review.files, (fi, hi) => review.selected(fi, hi));
-      const { subject, body } = splitSummary(unexplained ? "" : summary);
-      const promptTrailer = unexplained ? "<none>" : lastPrompt;
+      try {
+        await applyPatch(worktree.repo, patch);
+      } catch (err) {
+        // applyPatch itself now reports exactly what landed rather than
+        // ever claiming an unqualified "nothing changed" — see its comment.
+        const message = err instanceof Error ? err.message : String(err);
+        setReviewMessage(`apply failed: ${message}`);
+        return;
+      }
+
+      // A ("accept unexplained") means "don't wait for an explanation", not
+      // "discard whatever provenance is already known" — use the summary
+      // when there is one (e.g. it started streaming before A was pressed)
+      // and always record the prompt that led here, falling back to "<none>"
+      // only when there truly isn't one.
+      const { subject, body } = splitSummary(summary);
+      const promptTrailer = lastPrompt !== "" ? lastPrompt : "<none>";
       try {
         await commitAccepted(worktree.repo, paths, subject, body, sessionNameOf(worktree.branch), promptTrailer);
       } catch (err) {
@@ -645,12 +672,42 @@ export function App({
 
   useInput((char, key) => {
     if (key.ctrl && char === "c") {
-      if (confirmingExit || !running) {
+      if (confirmingExit) {
         onExit({ agentDied });
         exit();
-      } else {
-        setConfirmingExit(true);
+        return;
       }
+      // I12: an in-flight accept() must be treated as busy the same way a
+      // running turn is — it isn't gated by `running`, so without this,
+      // Ctrl+C here takes the immediate-exit branch and index.ts's
+      // worktree.destroy() can run concurrently with applyPatch/
+      // commitAccepted/advanceAfterAccept, with the UI already unmounted so
+      // neither a success nor a failure message can ever display.
+      if (running || acceptingRef.current) {
+        setConfirmReason("busy");
+        setConfirmingExit(true);
+        return;
+      }
+      // I9: idle, and no accept in flight — still don't exit silently if
+      // there's unaccepted work sitting in the worktree. Quitting right
+      // after `q`-ing out of review must not discard it with no prompt.
+      void (async () => {
+        let dirty = false;
+        try {
+          dirty = (await worktree.diff()).trim() !== "";
+        } catch {
+          // Can't tell — err toward confirming, not toward silently
+          // discarding whatever might be there.
+          dirty = true;
+        }
+        if (dirty) {
+          setConfirmReason("dirty");
+          setConfirmingExit(true);
+        } else {
+          onExit({ agentDied });
+          exit();
+        }
+      })();
       return;
     }
     if (confirmingExit) setConfirmingExit(false);
@@ -746,7 +803,14 @@ export function App({
 
   const statusWord = agentDied ? "agent exited" : running ? "running" : "idle";
   const modeWord = modeDegraded ? `${mode} mode (gate degraded)` : `${mode} mode`;
-  const statusLine = explain ? `${branch} · explain · nothing is kept` : `${branch} · ${modeWord} · ${statusWord}`;
+  // "worktree discarded on exit", not "nothing is kept"/unqualified: the
+  // guarantee is only that the worktree goes away — the agent can still run
+  // `git push`, or write outside the worktree, during either kind of
+  // session. A wrong claim about what's contained is the same defect class
+  // as everything else fixed this pass.
+  const statusLine = explain
+    ? `${branch} · explain · worktree discarded on exit`
+    : `${branch} · ${modeWord} · ${statusWord} · worktree discarded on exit`;
   const inputEnabled = !running && !permission && !agentDied && viewMode === "chat";
 
   return (
@@ -761,6 +825,7 @@ export function App({
           fileContent={fileContent}
           fileError={fileError}
           blast={blast}
+          blastError={blastError}
         />
       ) : (
         <Box flexDirection="column" borderStyle="round">
@@ -788,7 +853,13 @@ export function App({
           })}
         </Box>
       )}
-      {confirmingExit && <Text color="yellow">Turn running — press Ctrl+C again to exit.</Text>}
+      {confirmingExit && (
+        <Text color="yellow">
+          {confirmReason === "busy"
+            ? "Turn running — press Ctrl+C again to exit."
+            : "Unaccepted changes in the worktree — press Ctrl+C again to discard them and exit."}
+        </Text>
+      )}
       {permission && (
         <Text>
           {"  "}
@@ -798,6 +869,7 @@ export function App({
       {viewMode === "review" ? (
         <>
           {reviewMessage && <Text color="red">{reviewMessage}</Text>}
+          {review && <Text dimColor>{selectionLabel(review)}</Text>}
           <Text dimColor>
             {"  [space] select  [j/k] move  [tab] file view  [a] accept  [A] accept unexplained  [q] back"}
           </Text>
