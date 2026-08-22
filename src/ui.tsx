@@ -21,6 +21,7 @@ import {
   PlanBar,
   planFrom,
   FilePicker,
+  PaneLabel,
   RepoMap,
   type PlanEntry,
 } from "./cockpit.js";
@@ -1284,6 +1285,28 @@ export function App({
 
   const openMatches = filterFiles(allFiles, openQuery);
 
+  // A confirmation or a permission prompt belongs to the frame it interrupts,
+  // not to the scrollback under it: rendered outside the border it reads as
+  // terminal output that happens to be nearby, and the one thing it must not
+  // look like is something already scrolled past.
+  const overlays = (
+    <>
+      {confirmingExit && (
+        <Text color="yellow">
+          {confirmReason === "busy"
+            ? "Turn running — press Ctrl+C again to exit."
+            : "Unaccepted changes in the worktree — press Ctrl+C again to discard them and exit."}
+        </Text>
+      )}
+      {permission && (
+        <Text>
+          {"  "}
+          {permission.req.title} [y] allow [n] reject
+        </Text>
+      )}
+    </>
+  );
+
   if (viewMode === "open") {
     return (
       <Box flexDirection="column">
@@ -1308,28 +1331,29 @@ export function App({
           ) : (
             <FilePicker query={openQuery} matches={openMatches} index={openIndex} total={allFiles.length} />
           )}
-        </Box>
-        {openPath !== null ? (
-          <Text dimColor>
-            {`  [j/k] scroll  [u/d] page  [esc] ${openFrom === "map" ? "back to the session" : "back to the list"}`}
-          </Text>
-        ) : (
-          <Box>
-            <Text>{"open ▸ "}</Text>
+          {overlays}
+          {openPath !== null ? (
+            <Text dimColor>
+              {`  [j/k] scroll  [u/d] page  [esc] ${openFrom === "map" ? "back to the session" : "back to the list"}`}
+            </Text>
+          ) : (
+            <Box>
+              <Text>{"open ▸ "}</Text>
             <TextInput
-              value={openQuery}
-              onChange={(v) => {
+                value={openQuery}
+                onChange={(v) => {
                 setOpenQuery(v);
                 // Any edit invalidates the old position: leaving the index
                 // where it was would select whatever row happens to land
                 // there next, which is not what the reader pointed at.
                 setOpenIndex(0);
               }}
-              onSubmit={() => {}}
-              focus
-            />
-          </Box>
-        )}
+                onSubmit={() => {}}
+                focus
+              />
+            </Box>
+          )}
+        </Box>
       </Box>
     );
   }
@@ -1366,8 +1390,33 @@ export function App({
               borderDimColor={!mapFocus}
             >
               <RepoMap entries={mapRows} cursor={mapFocus ? mapIndex : -1} />
+              {/* The plan is a narrow checklist, and the sidebar was two
+                  thirds empty. Below the token gauge it also read as less
+                  important than a number nobody acts on; beside the files
+                  it reads as what it is — what the agent is doing to them. */}
+              {plan.length > 0 && (
+                <Box marginTop={1}>
+                  <PlanBar entries={plan} />
+                </Box>
+              )}
             </Box>
-            <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
+            {/* Bordered like the map, for two reasons: the labels then sit
+                on the same row instead of one pane's label riding a row
+                above the other's, and focus reads the same on both sides —
+                whichever pane owns the keyboard is the one lit up. */}
+            <Box
+              flexDirection="column"
+              flexGrow={1}
+              marginLeft={1}
+              borderStyle="round"
+              borderColor={mapFocus ? undefined : "cyan"}
+              borderDimColor={mapFocus}
+            >
+              {/* The only unlabelled pane on screen used to be the biggest
+                  one — and with focus now movable, a pane that cannot say
+                  it has the keyboard leaves the reader guessing where the
+                  next keystroke lands. */}
+              <PaneLabel name="AGENT" focused={!mapFocus} />
               {/* The transcript is windowed to its tail so it can't push the
                   live diff pane off the bottom of the terminal — an
                   unbounded transcript column would grow without limit and
@@ -1423,26 +1472,28 @@ export function App({
               </Box>
             </Box>
           </Box>
-          <UsageBar usage={usage} />
+          {/* Checks first: "it no longer compiles" is something to act on,
+              and the token gauge is not. */}
           <ChecksPane result={checks} running={checksRunning} />
-          <PlanBar entries={plan} />
+          <UsageBar usage={usage} />
+          {overlays}
+          {notice && <Text color="yellow">{notice}</Text>}
+          <Text dimColor>
+            {mapFocus
+              ? "  [j/k] move  [⏎] open the file  [tab] back to the prompt"
+              : "  [tab] repo map  [r] review  [ctrl-p] open any file"}
+          </Text>
+          {/* Inside the border, like everything else: the line you type into
+              is part of the cockpit, not a shell prompt underneath it. */}
+          <Box>
+            <Text>{"> "}</Text>
+            <TextInput value={input} onChange={inputEnabled ? setInput : () => {}} onSubmit={submit} focus={inputEnabled} />
+          </Box>
         </Box>
       )}
-      {confirmingExit && (
-        <Text color="yellow">
-          {confirmReason === "busy"
-            ? "Turn running — press Ctrl+C again to exit."
-            : "Unaccepted changes in the worktree — press Ctrl+C again to discard them and exit."}
-        </Text>
-      )}
-      {permission && (
-        <Text>
-          {"  "}
-          {permission.req.title} [y] allow [n] reject
-        </Text>
-      )}
-      {viewMode === "review" ? (
+      {viewMode === "review" && (
         <>
+          {overlays}
           {reviewMessage && <Text color="red">{reviewMessage}</Text>}
           {/* The accept key is never blocked on a failing check — the
               human decides — but it must never be pressed in ignorance of
@@ -1459,19 +1510,6 @@ export function App({
           <Text dimColor>
             {"  [space] select  [j/k] move  [tab] file view  [a] accept  [A] accept unexplained  [q] back"}
           </Text>
-        </>
-      ) : (
-        <>
-          {notice && <Text color="yellow">{notice}</Text>}
-          <Text dimColor>
-            {mapFocus
-              ? "  [j/k] move  [⏎] open the file  [tab] back to the prompt"
-              : "  [tab] repo map  [r] review  [ctrl-p] open any file"}
-          </Text>
-          <Box>
-            <Text>{"> "}</Text>
-            <TextInput value={input} onChange={inputEnabled ? setInput : () => {}} onSubmit={submit} focus={inputEnabled} />
-          </Box>
         </>
       )}
     </Box>

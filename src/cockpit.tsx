@@ -108,6 +108,15 @@ export function buildTree(entries: MapEntry[]): TreeRow[] {
 // since ✖ is Neutral, one failing row would then sit a column off from
 // every other row inside a fixed-width box. Check any replacement with
 // `unicodedata.east_asian_width` before using it.
+// PaneLabel is how a pane says whether it has the keyboard. Both panes use
+// it so the two can never disagree about what focus looks like, and the
+// marker sits after the name rather than before it: a prefix would shift
+// the label sideways as focus moved, which is the reflow the caret column
+// was built to avoid.
+export function PaneLabel({ name, focused }: { name: string; focused: boolean }): React.JSX.Element {
+  return focused ? <Text color="cyan">{`${name} ▸`}</Text> : <Text dimColor>{name}</Text>;
+}
+
 const MARK: Record<Touch, string> = { wrote: "▪", read: "▫" };
 
 // Column the +/- counts line up in, measured from the start of the name.
@@ -131,7 +140,7 @@ export function RepoMap({
   let fileIndex = -1;
   return (
     <Box flexDirection="column">
-      {cursor >= 0 ? <Text color="cyan">{"REPO ▸"}</Text> : <Text dimColor>REPO</Text>}
+      <PaneLabel name="REPO" focused={cursor >= 0} />
       {rows.length === 0 ? (
         <Text dimColor>{"   (nothing touched yet)"}</Text>
       ) : (
@@ -255,10 +264,19 @@ export function PlanBar({ entries }: { entries: PlanEntry[] }): React.JSX.Elemen
       {entries.map((entry, i) => {
         const done = entry.status === "completed";
         const active = entry.status === "in_progress";
+        const color = active ? "cyan" : undefined;
+        // Marker and text are separate columns so a step too long for the
+        // pane wraps under its own text rather than back to column zero,
+        // where the continuation would read as another step.
         return (
-          <Text key={i} dimColor={done} color={active ? "cyan" : undefined}>
-            {`  ${done ? "✔" : active ? "▸" : "☐"} ${entry.content}`}
-          </Text>
+          <Box key={i}>
+            <Text dimColor={done} color={color}>{`  ${done ? "✔" : active ? "▸" : "☐"} `}</Text>
+            <Box>
+              <Text dimColor={done} color={color}>
+                {entry.content}
+              </Text>
+            </Box>
+          </Box>
         );
       })}
     </Box>

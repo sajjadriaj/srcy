@@ -44,35 +44,43 @@ The session screen is a cockpit, not a scrolling log:
 ```
 ╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ctui/auth · default mode · running 2.0s · worktree discarded on exit                              │
-│╭────────────────────────────╮ > fix the token expiry off-by-one                                  │
-││REPO                        │ ▸ Read  src/auth/session.ts                                        │
-││   src/                     │ ▸ Read  src/auth/token.ts                                          │
-││     auth/                  │ expiry check is exclusive; a token expiring this exact ms is still │
-││▪      session.ts    +2 -0  │ accepted                                                           │
-││▪      token.ts      +1 -1  │ Off-by-one in verify(): `<` lets a token that expired this         │
-││▪ wrote                     │ millisecond through. Changing to `<=`.                             │
-││                            │ ▸ Edit  src/auth/token.ts                                          │
-││                            │ ▸ Edit  src/auth/session.ts                                        │
-││                            │ ✖ Execute  npm test  1.4s                                          │
-││                            │ ⟳ Execute  npm run typecheck  0.6s                                 │
-││                            │                                                                    │
-││                            │ src/auth/session.ts:12                                             │
-││                            │   12   export class Session {                                      │
-││                            │   13 +   private renewals = 0                                      │
-││                            │   14 +   renew() { this.renewals++ }                               │
-│╰────────────────────────────╯   15   }                                                           │
+│╭────────────────────────────╮ ╭─────────────────────────────────────────────────────────────────╮│
+││REPO                        │ │AGENT ▸                                                          ││
+││   src/                     │ │> fix the token expiry off-by-one                                ││
+││     auth/                  │ │▸ Read  src/auth/session.ts                                      ││
+││▪      session.ts    +2 -0  │ │▸ Read  src/auth/token.ts                                        ││
+││▪      token.ts      +1 -1  │ │expiry check is exclusive; a token expiring this exact ms is     ││
+││▪ wrote                     │ │still accepted                                                   ││
+││                            │ │Off-by-one in verify(): `<` lets a token that expired this       ││
+││PLAN                        │ │millisecond through. Changing to `<=`.                           ││
+││  ✔ find the expiry         │ │▸ Edit  src/auth/token.ts                                        ││
+││    comparison              │ │▸ Edit  src/auth/session.ts                                      ││
+││  ▸ fix the off-by-one      │ │✖ Execute  npm test  1.4s                                        ││
+││  ☐ add a regression test   │ │⟳ Execute  npm run typecheck  0.6s                               ││
+││                            │ │                                                                 ││
+││                            │ │src/auth/session.ts:12                                           ││
+││                            │ │  12   export class Session {                                    ││
+││                            │ │  13 +   private renewals = 0                                    ││
+││                            │ │  14 +   renew() { this.renewals++ }                             ││
+││                            │ │  15   }                                                         ││
+│╰────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────╯│
 │CONTEXT ▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯  52%  105k/200k  $0.41                                                   │
-│PLAN                                                                                              │
-│  ✔ find the expiry comparison                                                                    │
-│  ▸ fix the off-by-one                                                                            │
-│  ☐ add a regression test                                                                         │
+│  [tab] repo map  [r] review  [ctrl-p] open any file                                              │
+│>                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Left: every file this session has touched, nested as it sits in the repo,
-with how much of each changed. Right: what the agent is saying, and under it
-the file it is editing *as it edits it*. Bottom: the agent's own plan as a
-live checklist.
+with how much of each changed, and under it the agent's own plan as a live
+checklist. Right: what the agent is saying, and under that the file it is
+editing *as it edits it*. Bottom: whether the code still builds, then how
+full the context window is — in that order, because one of them is
+something to act on and the other is a number.
+
+Both panes carry a label and a border, and the one with the keyboard is the
+one lit up. The prompt and the key hints live inside the frame too: a line
+you type into that renders below the closing border reads as shell output
+that happens to be nearby.
 
 Every tool line carries its own clock. `⟳` is still running, `▸` finished,
 `✖` failed — an agent thrashing through failing commands should not look
@@ -93,7 +101,8 @@ It appears only if the agent reports it — ACP's usage update is optional and
 several adapters never send one. An unmeasured window is left blank rather
 than drawn empty.
 
-`tab` moves the keyboard into the repo map. `j`/`k` walk the cursor, `⏎`
+`tab` moves the keyboard between the two panes — `AGENT ▸` and `REPO ▸`
+say which one has it. In the map, `j`/`k` walk the cursor and `⏎`
 opens that file — positioned on what this session changed, with the
 provenance gutter saying where every other line came from. A map row you can
 watch turn red but cannot open is a picture, not an instrument.
@@ -106,6 +115,12 @@ watch turn red but cannot open is a picture, not an instrument.
 │▪      session.ts    +2 -0  │
 │✖►     token.ts      +1 -1  │
 │▪ wrote  ✖ failing          │
+│                            │
+│PLAN                        │
+│  ✔ find the expiry         │
+│    comparison              │
+│  ▸ fix the off-by-one      │
+│  ☐ add a regression test   │
 ╰────────────────────────────╯
 ```
 

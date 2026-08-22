@@ -92,7 +92,9 @@ test("ctrl-P opens the picker without leaking the keystroke into the query", asy
   // The keystroke that opened the picker must not also land in the query
   // box that the same keystroke mounted — the exact bug "r" caused on the
   // review pane.
-  assert.match(frame, /open ▸\s*$/m);
+  // Anchored on the frame's own right border, not on end-of-line: the
+  // query row lives inside the box now, so the line never ends at the query.
+  assert.match(frame, /open ▸ *│/);
   assert.match(frame, /widget\.ts/);
 });
 

@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import React from "react";
+import { Box } from "ink";
 import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
-import { RepoMap, type MapEntry } from "../src/cockpit.js";
+import { PlanBar, RepoMap, type MapEntry } from "../src/cockpit.js";
 import { git } from "../src/git.js";
 import type { Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
@@ -210,4 +211,82 @@ test("git blame failing leaves the file readable rather than blanking the view",
   stdin.write("\r");
   await settle(400);
   assert.match(lastFrame() ?? "", /line/, `file content lost:\n${lastFrame()}`);
+});
+
+test("exactly one pane says it has the keyboard, and tab moves which one", async (t) => {
+  const repo = await newRepo(t);
+  const worktree = { path: repo, repo, diff: async () => "" } as unknown as Worktree;
+  const bridge = new EventEmitter();
+  const { stdin, lastFrame, unmount } = renderApp(worktree, bridge);
+  t.after(() => unmount());
+  await settle(80);
+  bridge.emit("update", { kind: "tool_call", toolCallId: "1", toolKind: "read", toolPath: "a.ts", raw: {} });
+  await settle(150);
+
+  // Two panes both claiming focus, or neither claiming it, is worse than no
+  // marker at all: the reader would have to press a key to find out.
+  const marked = (frame: string): string[] =>
+    (frame.match(/\b(REPO|AGENT) ▸/g) ?? []).map((m) => m.split(" ")[0]!);
+
+  assert.deepEqual(marked(lastFrame() ?? ""), ["AGENT"], lastFrame() ?? "");
+  stdin.write("\t");
+  await settle(120);
+  assert.deepEqual(marked(lastFrame() ?? ""), ["REPO"], lastFrame() ?? "");
+  stdin.write("\t");
+  await settle(120);
+  assert.deepEqual(marked(lastFrame() ?? ""), ["AGENT"], lastFrame() ?? "");
+});
+
+test("the prompt and the key hints sit inside the frame, not under it", async (t) => {
+  const repo = await newRepo(t);
+  const worktree = { path: repo, repo, diff: async () => "" } as unknown as Worktree;
+  const { stdin, lastFrame, unmount } = renderApp(worktree, new EventEmitter());
+  t.after(() => unmount());
+  await settle(80);
+  stdin.write("hello");
+  await settle(120);
+
+  const rows = (lastFrame() ?? "").split("\n");
+  // The line you type into is part of the cockpit. Rendered below the closing
+  // border it reads as shell output that happens to be underneath.
+  assert.match(rows[rows.length - 1]!, /^╰─+╯$/, `frame does not end at its own border:\n${lastFrame()}`);
+  const prompt = rows.find((r) => r.includes("> hello"));
+  assert.ok(prompt, `prompt missing:\n${lastFrame()}`);
+  assert.match(prompt, /^│.*│$/, `prompt is outside the border:\n${prompt}`);
+  const hint = rows.find((r) => r.includes("[tab] repo map"))!;
+  assert.match(hint, /^│.*│$/, `key hints are outside the border:\n${hint}`);
+});
+
+test("the plan renders in the sidebar column, not across the whole width", async (t) => {
+  const repo = await newRepo(t);
+  const worktree = { path: repo, repo, diff: async () => "" } as unknown as Worktree;
+  const bridge = new EventEmitter();
+  const { lastFrame, unmount } = renderApp(worktree, bridge);
+  t.after(() => unmount());
+  await settle(80);
+  bridge.emit("update", {
+    kind: "plan",
+    raw: { entries: [{ content: "fix the off-by-one", status: "in_progress" }] },
+  });
+  await settle(150);
+
+  const row = (lastFrame() ?? "").split("\n").find((r) => r.includes("fix the off-by-one"))!;
+  assert.ok(row, `plan not rendered:\n${lastFrame()}`);
+  // The sidebar is 30 wide including its border, so a plan row that belongs
+  // to it closes before column 32. Full-width means it fell back to the
+  // bottom stack, under the token gauge, where it used to be buried.
+  assert.ok(row.indexOf("fix the off-by-one") < 30, `plan is not in the sidebar:\n${row}`);
+});
+
+test("a plan step too long for its pane wraps under its own text", () => {
+  const { lastFrame } = render(
+    <Box width={20}>
+      <PlanBar entries={[{ content: "add a regression test for the expiry boundary", status: "pending" }]} />
+    </Box>,
+  );
+  const rows = (lastFrame() ?? "").split("\n");
+  const first = rows.findIndex((r) => r.includes("add a"));
+  const cont = rows[first + 1]!;
+  // Wrapped back to column zero, a continuation reads as another step.
+  assert.equal(cont.indexOf(cont.trim()), rows[first]!.indexOf("add a"), `continuation lost its indent:\n${lastFrame()}`);
 });
