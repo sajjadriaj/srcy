@@ -160,7 +160,17 @@ export function RepoMap({
           // right rather than being truncated, since the path is what
           // identifies the file.
           const label = `${indent}${row.name}`;
-          const stat = entry.touch === "wrote" ? `${label.padEnd(NAME_WIDTH)} +${entry.added} -${entry.removed}` : label;
+          // A failing file spends its count column on the failures rather
+          // than the churn: "this one is broken in two places" is what the
+          // reader does something about, and "+1 -1" is not. It also makes
+          // the pane below a detail view of this number instead of a second
+          // copy of it.
+          const stat =
+            entry.problems > 0
+              ? `${label.padEnd(NAME_WIDTH)} ✖${entry.problems}`
+              : entry.touch === "wrote"
+                ? `${label.padEnd(NAME_WIDTH)} +${entry.added} -${entry.removed}`
+                : label;
           // A file with failing checks reads as broken first and changed
           // second: the marker and the whole row go red, because "this one
           // does not compile" outranks "this one grew by 12 lines".
@@ -293,9 +303,12 @@ const PROBLEMS_SHOWN = 4;
 export function ChecksPane({
   result,
   running,
+  focus,
 }: {
   result: CheckResult | null | undefined;
   running: boolean;
+  // The path the repo map's cursor is on, when the map has the keyboard.
+  focus?: string;
 }): React.JSX.Element | null {
   if (running) {
     return <Text dimColor>{"CHECKS  running…"}</Text>;
@@ -311,6 +324,23 @@ export function ChecksPane({
   }
   if (result.ok) {
     return <Text color="green">{`CHECKS  ${result.command}  ✔ passing`}</Text>;
+  }
+  // Walking the cursor onto a failing file turns this pane into that file's
+  // failures — all of them, since there is only one file's worth. It is also
+  // the way out of "…and N more": the truncated list below is capped, and
+  // moving the cursor is how a reader reaches what it cut.
+  const scoped = focus === undefined ? [] : result.problems.filter((p) => p.path === focus);
+  if (scoped.length > 0) {
+    return (
+      <Box flexDirection="column">
+        <Text color="red">{`CHECKS  ${focus}  ✖ ${scoped.length}`}</Text>
+        {scoped.map((problem, i) => (
+          <Text key={i} color="red">
+            {`  ✖ line ${problem.line}  ${problem.message}`}
+          </Text>
+        ))}
+      </Box>
+    );
   }
   const shown = result.problems.slice(0, PROBLEMS_SHOWN);
   const rest = result.problems.length - shown.length;
@@ -394,11 +424,12 @@ export function outline(f: FileDiff): OutlineEntry[] {
   return [...byFunc.values()];
 }
 
-// ponytail: this ramp is Ambiguous-width (see MARK) — no eight-level
-// Neutral ramp exists. Unlike the gauge the bar has a fixed bucket count,
-// so it widens uniformly rather than tearing; swap to an ASCII ramp if a
-// double-width terminal ever pushes the OUTLINE line past the frame.
-const BLOCKS = " ▁▂▃▄▅▆▇█";
+// Braille, not the eighth-blocks ramp: every braille pattern is Neutral
+// (see MARK) where ▁▂▃…█ are Ambiguous, and mixing a Neutral empty bucket
+// with Ambiguous filled ones tears the bar the same way it tore the gauge.
+// Four levels instead of eight — the bar answers "where are the edits",
+// which four buckets of height say as well as eight.
+const BLOCKS = " ⣀⣤⣶⣿";
 
 // densityBar is the minimap: whereabouts in the file the edits landed. One
 // scattered change across a 900-line file and one concentrated rewrite of

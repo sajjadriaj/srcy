@@ -5,7 +5,7 @@ import React from "react";
 import { eastAsianWidth } from "get-east-asian-width";
 import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
-import { ChecksPane, dur, gauge, money, tokens, UsageBar } from "../src/cockpit.js";
+import { ChecksPane, densityBar, dur, gauge, money, Outline, tokens, UsageBar } from "../src/cockpit.js";
 import { RepoMap } from "../src/cockpit.js";
 import type { Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
@@ -99,6 +99,17 @@ test("every glyph the panes draw is one cell wide in every terminal", () => {
       />,
     ).lastFrame(),
     render(<UsageBar usage={{ used: 104_800, size: 200_000 }} />).lastFrame(),
+    // The density ramp was the last Ambiguous run left: ▁▂▃…█ mixed with a
+    // Neutral empty bucket tears the bar the same way it tore the gauge.
+    render(
+      <Outline entries={[{ func: "verify()", added: 2, removed: 1 }]} bar={densityBar([2, 3, 9], 12, 8)} />,
+    ).lastFrame(),
+    render(
+      <ChecksPane
+        result={{ ok: false, command: "npm test", problems: [{ path: "a.ts", line: 4, message: "boom" }], tail: "" }}
+        running={false}
+      />,
+    ).lastFrame(),
   ];
   for (const frame of frames) {
     for (const ch of frame ?? "") {
@@ -210,4 +221,52 @@ test("the context gauge appears in the cockpit only after a usage update arrives
   assert.match(frame, /25%/);
   // No cost was reported, so none is invented.
   assert.doesNotMatch(frame, /\$/);
+});
+
+test("a failing file spends its count column on the failures, not the churn", () => {
+  const frame =
+    render(
+      <RepoMap entries={[{ path: "token.ts", touch: "wrote", added: 1, removed: 1, problems: 2 }]} />,
+    ).lastFrame() ?? "";
+  // "+1 -1" is not what a reader does anything about when the file no longer
+  // compiles, and the count is what makes the pane below a detail view
+  // rather than a second copy of this row.
+  assert.match(frame, /✖ {2}token\.ts.*✖2/, frame);
+  assert.doesNotMatch(frame, /\+1 -1/, frame);
+});
+
+test("CHECKS scopes to the file the map cursor is on, past the global cap", () => {
+  const problems = Array.from({ length: 6 }, (_, i) => ({
+    path: i % 2 === 0 ? "a.ts" : "b.ts",
+    line: i + 1,
+    message: `problem ${i + 1}`,
+  }));
+  const result = { ok: false, command: "npm test", problems, tail: "" };
+
+  const global = render(<ChecksPane result={result} running={false} />).lastFrame() ?? "";
+  // The global list is capped, so some failures are unreachable from it.
+  assert.match(global, /…and 2 more/, global);
+  assert.doesNotMatch(global, /problem 6/, global);
+
+  const scoped = render(<ChecksPane result={result} running={false} focus="b.ts" />).lastFrame() ?? "";
+  assert.match(scoped, /CHECKS {2}b\.ts {2}✖ 3/, scoped);
+  // Every one of that file's failures, including the ones the cap cut —
+  // moving the cursor is the way out of "…and N more".
+  assert.match(scoped, /problem 6/, scoped);
+  assert.doesNotMatch(scoped, /problem 1$/m, scoped);
+  // The path is in the header, so the rows do not repeat it.
+  assert.doesNotMatch(scoped, /✖ b\.ts:/, scoped);
+});
+
+test("a cursor on a file with nothing wrong leaves the global list alone", () => {
+  // Scoping to an empty result would blank the pane and hide failures that
+  // are still there — the cursor moved, the build did not get better.
+  const result = {
+    ok: false,
+    command: "npm test",
+    problems: [{ path: "a.ts", line: 1, message: "boom" }],
+    tail: "",
+  };
+  const frame = render(<ChecksPane result={result} running={false} focus="clean.ts" />).lastFrame() ?? "";
+  assert.match(frame, /a\.ts:1 {2}boom/, frame);
 });

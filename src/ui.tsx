@@ -1474,7 +1474,7 @@ export function App({
           </Box>
           {/* Checks first: "it no longer compiles" is something to act on,
               and the token gauge is not. */}
-          <ChecksPane result={checks} running={checksRunning} />
+          <ChecksPane result={checks} running={checksRunning} focus={mapFocus ? (mapPath ?? undefined) : undefined} />
           <UsageBar usage={usage} />
           {overlays}
           {notice && <Text color="yellow">{notice}</Text>}

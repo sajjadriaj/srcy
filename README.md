@@ -95,6 +95,8 @@ are the only bold lines in the transcript, so a turn boundary is findable
 without reading. Every glyph on screen is one cell wide in every terminal:
 the obvious markers (`●` `○` `▶` `█`) are East-Asian *ambiguous* and render
 two cells under some terminal settings, which would tear a fixed-width box.
+The density bar is braille (`⣀⣤⣶⣿`) for the same reason — the eighth-block
+ramp `▁▂▃…█` is ambiguous where braille is not.
 
 `CONTEXT` is how full the agent's window is, and what the session has cost.
 It appears only if the agent reports it — ACP's usage update is optional and
@@ -113,7 +115,7 @@ watch turn red but cannot open is a picture, not an instrument.
 │   src/                     │
 │     auth/                  │
 │▪      session.ts    +2 -0  │
-│✖►     token.ts      +1 -1  │
+│✖►     token.ts      ✖1     │
 │▪ wrote  ✖ failing          │
 │                            │
 │PLAN                        │
@@ -123,6 +125,21 @@ watch turn red but cannot open is a picture, not an instrument.
 │  ☐ add a regression test   │
 ╰────────────────────────────╯
 ```
+
+A red row carries how many failures are in it, not how much it changed —
+`+1 -1` is not what you do something about when the file no longer builds.
+Walk the cursor onto that row and `CHECKS` becomes that file's failures:
+
+```
+│✖►     token.ts      ✖1     │
+╰────────────────────────────╯
+│CHECKS  src/auth/token.ts  ✖ 1
+│  ✖ line 41  error TS2532: Object is possibly undefined.
+```
+
+That is also the way out of `…and N more` — the project-wide list is capped,
+and moving the cursor is how you reach what it cut. Hand the keyboard back to
+the prompt and the pane goes back to the whole project.
 
 `npm run preview` paints these frames from fixture data — no agent, no git —
 which is how to iterate on the layout without waiting on a real turn. It
@@ -144,7 +161,7 @@ Inside review, `tab` switches the patch and file views instead.
 ### What review shows you
 
 ```
-OUTLINE   ▁▁▃█▁▁▁▁▁▂▁▁          which functions changed, and where in
+OUTLINE   ⣀⣀⣤⣿⣀⣀⣀⣀⣀⣀⣀⣀          which functions changed, and where in
   verify()          +1 -1       the file the edits landed
   Session.renew()   +2 -0
 
@@ -156,8 +173,9 @@ OUTLINE   ▁▁▃█▁▁▁▁▁▂▁▁          which functions changed,
 
 `CHECKS` runs the project's own checker in the worktree after each turn.
 `.ctui/check` (executable) if you have one, otherwise your `typecheck` or
-`build` npm script. Failing files turn red in the repo map, and the count
-sits directly above the accept key — accept is informed, never blocked.
+`build` npm script. Failing files turn red in the repo map and carry their
+failure count, and the count sits directly above the accept key — accept is
+informed, never blocked.
 
 `a` stays disabled until the agent has answered what changed, what could
 break, and what it did not test. `A` accepts anyway and records

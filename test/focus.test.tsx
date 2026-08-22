@@ -9,6 +9,8 @@ import { PlanBar, RepoMap, type MapEntry } from "../src/cockpit.js";
 import { git } from "../src/git.js";
 import type { Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
+import { chmod } from "node:fs/promises";
+import { join } from "node:path";
 import { newRepo, write } from "./helpers.js";
 
 function entry(path: string, over: Partial<MapEntry> = {}): MapEntry {
@@ -289,4 +291,47 @@ test("a plan step too long for its pane wraps under its own text", () => {
   const cont = rows[first + 1]!;
   // Wrapped back to column zero, a continuation reads as another step.
   assert.equal(cont.indexOf(cont.trim()), rows[first]!.indexOf("add a"), `continuation lost its indent:\n${lastFrame()}`);
+});
+
+test("walking the map cursor moves CHECKS onto the file under it", async (t) => {
+  const repo = await newRepo(t);
+  await write(
+    repo,
+    ".ctui-check.sh",
+    ["#!/bin/sh", 'echo "aa.ts(1,1): error TS1: boom aa"', 'echo "zz.ts(2,1): error TS2: boom zz two"', 'echo "zz.ts(3,1): error TS3: boom zz three"', "exit 1", ""].join("\n"),
+  );
+  await chmod(join(repo, ".ctui-check.sh"), 0o755);
+  await write(repo, "package.json", JSON.stringify({ scripts: { typecheck: "./.ctui-check.sh" } }));
+  const worktree = { path: repo, repo, diff: async () => "" } as unknown as Worktree;
+  const { stdin, lastFrame, unmount } = renderApp(worktree, new EventEmitter());
+  t.after(() => unmount());
+  await settle(80);
+
+  // Checks run when a turn ends, so a turn has to end.
+  stdin.write("go");
+  await settle(80);
+  stdin.write("\r");
+  await settle(600);
+  assert.match(lastFrame() ?? "", /aa\.ts:1 {2}error TS1/, `checks never ran:\n${lastFrame()}`);
+
+  // Focus alone scopes to the first row; the cursor is what steers it after
+  // that, and a pane wired to a constant would pass the first assertion.
+  stdin.write("\t");
+  await settle(150);
+  assert.match(lastFrame() ?? "", /CHECKS {2}aa\.ts {2}✖ 1/, `checks did not follow focus:\n${lastFrame()}`);
+  stdin.write("j");
+  await settle(150);
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /CHECKS {2}zz\.ts {2}✖ 2/, `checks did not follow the cursor:\n${frame}`);
+  assert.match(frame, /line 3 {2}error TS3/, frame);
+  assert.doesNotMatch(frame, /boom aa/, `other files' failures still listed:\n${frame}`);
+
+  // Handing the keyboard back to the prompt hands the pane back to the whole
+  // project. Left scoped, it would hide every other file's failures behind a
+  // cursor the reader is no longer looking at.
+  stdin.write("\t");
+  await settle(150);
+  const back = lastFrame() ?? "";
+  assert.match(back, /boom aa/, `checks stayed scoped after focus left the map:\n${back}`);
+  assert.doesNotMatch(back, /CHECKS {2}zz\.ts/, back);
 });
