@@ -39,18 +39,22 @@ The session screen is a cockpit, not a scrolling log:
 
 ```
 ╭──────────────────────────────────────────────────────────────────────────╮
-│ctui/auth · default mode · idle · worktree discarded on exit              │
-│REPO                           ▸ Read  src/auth/session.ts                │
-│   src/                        ▸ Read  src/auth/token.ts                  │
+│ctui/auth · default mode · running 2.0s · worktree discarded on exit      │
+│REPO                           > fix the token expiry off-by-one          │
+│   src/                        ▸ Read  src/auth/session.ts                │
 │     auth/                     Off-by-one in verify(): `<` lets a token   │
 │●      session.ts    +2 -0     that expired this millisecond through.     │
 │●      token.ts      +1 -1     ▸ Edit  src/auth/token.ts                  │
-│● wrote  ○ read                                                           │
+│● wrote  ○ read                ✖ Execute  npm test  1.4s                  │
+│                               ⟳ Execute  npm run typecheck  6.2s         │
 │                               src/auth/token.ts:38                       │
 │                                 40                                       │
 │                                 41 -   if (exp < now())                  │
 │                                 41 +   if (exp <= now())                 │
 │                                 42       return null                     │
+│CONTEXT ████████░░░░░░░░  52%  105k/200k  $0.41                           │
+│CHECKS  .ctui/check  ✖ failing                                            │
+│  ✖ src/auth/token.ts:41  error TS2532: Object is possibly undefined.     │
 │PLAN                                                                      │
 │  ✔ find the expiry comparison                                            │
 │  ▸ fix the off-by-one                                                    │
@@ -63,8 +67,20 @@ with how much of each changed. Right: what the agent is saying, and under it
 the file it is editing *as it edits it*. Bottom: the agent's own plan as a
 live checklist.
 
+Every tool line carries its own clock. `⟳` is still running, `▸` finished,
+`✖` failed — an agent thrashing through failing commands should not look
+like one making progress. Anything slower than ten seconds stops rendering
+dim, so scanning the column answers "where did the two minutes go".
+
+`CONTEXT` is how full the agent's window is, and what the session has cost.
+It appears only if the agent reports it — ACP's usage update is optional and
+several adapters never send one. An unmeasured window is left blank rather
+than drawn empty.
+
 `npm run preview` paints that frame from fixture data — no agent, no git —
-which is how to iterate on the layout without waiting on a real turn.
+which is how to iterate on the layout without waiting on a real turn. It
+prints two frames, mid-turn and finished, because the cockpit spends most of
+its life in the first one.
 
 Keys:
 
