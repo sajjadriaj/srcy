@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import React from "react";
+import { eastAsianWidth } from "get-east-asian-width";
 import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
 import { ChecksPane, dur, gauge, money, tokens, UsageBar } from "../src/cockpit.js";
@@ -27,11 +28,11 @@ test("dur keeps a decimal where it changes the meaning and drops it where it doe
 test("gauge never shows a used window as empty or an unfull one as full", () => {
   // Both ends are decisions the reader acts on: "nothing used yet" and
   // "no room left" must never appear when neither is true.
-  assert.equal(gauge(0, 200_000, 10), "░".repeat(10));
-  assert.equal(gauge(1, 200_000, 10), "█" + "░".repeat(9));
-  assert.equal(gauge(199_999, 200_000, 10), "█".repeat(9) + "░");
-  assert.equal(gauge(200_000, 200_000, 10), "█".repeat(10));
-  assert.equal(gauge(100_000, 200_000, 10), "█".repeat(5) + "░".repeat(5));
+  assert.equal(gauge(0, 200_000, 10), "▯".repeat(10));
+  assert.equal(gauge(1, 200_000, 10), "▮" + "▯".repeat(9));
+  assert.equal(gauge(199_999, 200_000, 10), "▮".repeat(9) + "▯");
+  assert.equal(gauge(200_000, 200_000, 10), "▮".repeat(10));
+  assert.equal(gauge(100_000, 200_000, 10), "▮".repeat(5) + "▯".repeat(5));
   // A size we were never told is not a full window and not an empty one.
   assert.equal(gauge(10, 0, 10), "");
 });
@@ -67,16 +68,44 @@ test("the repo map legend names only markers that are on screen", () => {
   const wroteOnly = render(
     <RepoMap entries={[{ path: "a.ts", touch: "wrote", added: 1, removed: 0, problems: 0 }]} />,
   ).lastFrame();
-  assert.match(wroteOnly ?? "", /● wrote/);
+  assert.match(wroteOnly ?? "", /▪ wrote/);
   // Nothing is failing, so a "✖ failing" key teaches the reader to hunt for
   // a marker that isn't there.
   assert.doesNotMatch(wroteOnly ?? "", /failing/);
-  assert.doesNotMatch(wroteOnly ?? "", /○ read/);
+  assert.doesNotMatch(wroteOnly ?? "", /▫ read/);
 
   const failing = render(
     <RepoMap entries={[{ path: "a.ts", touch: "wrote", added: 1, removed: 0, problems: 2 }]} />,
   ).lastFrame();
   assert.match(failing ?? "", /✖ failing/);
+});
+
+test("every glyph the panes draw is one cell wide in every terminal", () => {
+  // ● ○ ▶ █ are East-Asian *Ambiguous*: a terminal configured
+  // ambiguous-width=double renders them two cells. ✖ is Neutral, so mixing
+  // the two in one column puts a failing row a cell off from every other
+  // row — inside a fixed-width box, which tears the border. The gauge is
+  // worse: mixing an Ambiguous fill with a Neutral empty changes the bar's
+  // length as it fills, sliding the percentage beside it.
+  const frames = [
+    render(
+      <RepoMap
+        entries={[
+          { path: "a.ts", touch: "wrote", added: 1, removed: 0, problems: 0 },
+          { path: "b.ts", touch: "read", added: 0, removed: 0, problems: 0 },
+          { path: "c.ts", touch: "wrote", added: 1, removed: 1, problems: 2 },
+        ]}
+        cursor={0}
+      />,
+    ).lastFrame(),
+    render(<UsageBar usage={{ used: 104_800, size: 200_000 }} />).lastFrame(),
+  ];
+  for (const frame of frames) {
+    for (const ch of frame ?? "") {
+      const width = eastAsianWidth(ch.codePointAt(0)!, { ambiguousAsWide: true });
+      assert.equal(width, 1, `${JSON.stringify(ch)} (U+${ch.codePointAt(0)!.toString(16)}) is not one cell wide:\n${frame}`);
+    }
+  }
 });
 
 test("CHECKS says nothing before it has run, and speaks up once it has", () => {

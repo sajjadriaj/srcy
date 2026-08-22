@@ -102,7 +102,13 @@ export function buildTree(entries: MapEntry[]): TreeRow[] {
   return rows;
 }
 
-const MARK: Record<Touch, string> = { wrote: "●", read: "○" };
+// Every glyph this file prints is East-Asian *Neutral*, which is one cell
+// in every terminal. The obvious markers — ● ○ ▶ █ — are Ambiguous: a
+// terminal set to ambiguous-width=double renders them two cells wide, and
+// since ✖ is Neutral, one failing row would then sit a column off from
+// every other row inside a fixed-width box. Check any replacement with
+// `unicodedata.east_asian_width` before using it.
+const MARK: Record<Touch, string> = { wrote: "▪", read: "▫" };
 
 // Column the +/- counts line up in, measured from the start of the name.
 const NAME_WIDTH = 17;
@@ -138,7 +144,7 @@ export function RepoMap({
           }
           fileIndex++;
           const at = fileIndex === cursor;
-          const caret = at ? "▶" : " ";
+          const caret = at ? "►" : " ";
           const entry = row.entry!;
           // Counts share a column so the eye can compare sizes down the
           // list; a name long enough to overflow it pushes its own counts
@@ -178,8 +184,8 @@ export function RepoMap({
 
 function legend(entries: MapEntry[]): string {
   const parts: string[] = [];
-  if (entries.some((e) => e.touch === "wrote")) parts.push("● wrote");
-  if (entries.some((e) => e.touch === "read")) parts.push("○ read");
+  if (entries.some((e) => e.touch === "wrote")) parts.push("▪ wrote");
+  if (entries.some((e) => e.touch === "read")) parts.push("▫ read");
   if (entries.some((e) => e.problems > 0)) parts.push("✖ failing");
   return parts.join("  ");
 }
@@ -370,6 +376,10 @@ export function outline(f: FileDiff): OutlineEntry[] {
   return [...byFunc.values()];
 }
 
+// ponytail: this ramp is Ambiguous-width (see MARK) — no eight-level
+// Neutral ramp exists. Unlike the gauge the bar has a fixed bucket count,
+// so it widens uniformly rather than tearing; swap to an ASCII ramp if a
+// double-width terminal ever pushes the OUTLINE line past the frame.
 const BLOCKS = " ▁▂▃▄▅▆▇█";
 
 // densityBar is the minimap: whereabouts in the file the edits landed. One
@@ -481,6 +491,12 @@ export function dur(ms: number): string {
 
 const GAUGE_WIDTH = 16;
 
+// Filled and empty segment. Both Neutral, for the reason MARK explains —
+// mixing █ (Ambiguous) with ░ (Neutral) makes the bar change length as it
+// fills, which would slide the percentage beside it sideways.
+const FULL = "▮";
+const EMPTY = "▯";
+
 // gauge is a plain fill bar: how much of the context window is spoken for.
 // Deliberately not the BLOCKS ramp densityBar uses — that one encodes
 // "how much" per column, this one encodes "how far along", and reusing the
@@ -493,7 +509,7 @@ export function gauge(used: number, size: number, width = GAUGE_WIDTH): string {
   let filled = Math.round(frac * width);
   if (used > 0 && filled === 0) filled = 1;
   if (frac < 1 && filled === width) filled = width - 1;
-  return "█".repeat(filled) + "░".repeat(width - filled);
+  return FULL.repeat(filled) + EMPTY.repeat(width - filled);
 }
 
 // tokens abbreviates a count to the precision anyone actually reads.
@@ -530,8 +546,12 @@ export function UsageBar({ usage }: { usage: Usage | null }): React.JSX.Element 
   const frac = usage.used / usage.size;
   const pct = Math.round(frac * 100);
   const cost = usage.cost ? `  ${money(usage.cost.amount, usage.cost.currency)}` : "";
+  // Colour by pressure rather than one flat dim: the gauge is the only
+  // widget read at a glance, and rendering it in the least visible colour
+  // the terminal has defeats the point of drawing a bar at all.
+  const color = frac >= CONTEXT_WARN ? "red" : frac >= 0.6 ? "yellow" : "green";
   return (
-    <Text color={frac >= CONTEXT_WARN ? "yellow" : undefined} dimColor={frac < CONTEXT_WARN}>
+    <Text color={color}>
       {`CONTEXT ${gauge(usage.used, usage.size)} ${String(pct).padStart(3)}%  ${tokens(usage.used)}/${tokens(usage.size)}${cost}`}
     </Text>
   );

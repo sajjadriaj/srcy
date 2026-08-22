@@ -48,9 +48,9 @@ The session screen is a cockpit, not a scrolling log:
 ││REPO                        │ ▸ Read  src/auth/session.ts                                        │
 ││   src/                     │ ▸ Read  src/auth/token.ts                                          │
 ││     auth/                  │ expiry check is exclusive; a token expiring this exact ms is still │
-││●      session.ts    +2 -0  │ accepted                                                           │
-││●      token.ts      +1 -1  │ Off-by-one in verify(): `<` lets a token that expired this         │
-││● wrote                     │ millisecond through. Changing to `<=`.                             │
+││▪      session.ts    +2 -0  │ accepted                                                           │
+││▪      token.ts      +1 -1  │ Off-by-one in verify(): `<` lets a token that expired this         │
+││▪ wrote                     │ millisecond through. Changing to `<=`.                             │
 ││                            │ ▸ Edit  src/auth/token.ts                                          │
 ││                            │ ▸ Edit  src/auth/session.ts                                        │
 ││                            │ ✖ Execute  npm test  1.4s                                          │
@@ -61,7 +61,7 @@ The session screen is a cockpit, not a scrolling log:
 ││                            │   13 +   private renewals = 0                                      │
 ││                            │   14 +   renew() { this.renewals++ }                               │
 │╰────────────────────────────╯   15   }                                                           │
-│CONTEXT ████████░░░░░░░░  52%  105k/200k  $0.41                                                   │
+│CONTEXT ▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯  52%  105k/200k  $0.41                                                   │
 │PLAN                                                                                              │
 │  ✔ find the expiry comparison                                                                    │
 │  ▸ fix the off-by-one                                                                            │
@@ -79,6 +79,15 @@ Every tool line carries its own clock. `⟳` is still running, `▸` finished,
 like one making progress. Anything slower than ten seconds stops rendering
 dim, so scanning the column answers "where did the two minutes go".
 
+Colour is an encoding, not decoration. Grey is background you may skip:
+reads, thoughts, anything that finished fast. Yellow is a write — the agent
+changed a file of yours. Red failed. Cyan is happening right now, which is
+also why the top edge turns cyan for the length of a turn. Your own prompts
+are the only bold lines in the transcript, so a turn boundary is findable
+without reading. Every glyph on screen is one cell wide in every terminal:
+the obvious markers (`●` `○` `▶` `█`) are East-Asian *ambiguous* and render
+two cells under some terminal settings, which would tear a fixed-width box.
+
 `CONTEXT` is how full the agent's window is, and what the session has cost.
 It appears only if the agent reports it — ACP's usage update is optional and
 several adapters never send one. An unmeasured window is left blank rather
@@ -94,9 +103,9 @@ watch turn red but cannot open is a picture, not an instrument.
 │REPO ▸                      │
 │   src/                     │
 │     auth/                  │
-│●      session.ts    +2 -0  │
-│✖▶     token.ts      +1 -1  │
-│● wrote  ✖ failing          │
+│▪      session.ts    +2 -0  │
+│✖►     token.ts      +1 -1  │
+│▪ wrote  ✖ failing          │
 ╰────────────────────────────╯
 ```
 

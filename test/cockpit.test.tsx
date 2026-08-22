@@ -123,8 +123,8 @@ test("RepoMap shows what was written, what was read, and the counts", () => {
   const { lastFrame } = render(<RepoMap entries={mapEntries(files(), ["src/auth/session.ts"])} />);
   const frame = lastFrame() ?? "";
   assert.match(frame, /token\.ts.*\+1 -1/);
-  assert.match(frame, /●/);
-  assert.match(frame, /○/);
+  assert.match(frame, /▪/);
+  assert.match(frame, /▫/);
   // Directories appear once, not once per file beneath them.
   assert.equal(frame.split("\n").filter((l) => l.trim() === "src/").length, 1);
 });
@@ -212,7 +212,7 @@ test("RepoMap marks a failing file as broken rather than merely changed", () => 
   const tokenRow = frame.split("\n").find((l) => l.includes("token.ts"))!;
   assert.match(tokenRow, /^✖/);
   // README.md changed and still builds, so it keeps the ordinary marker.
-  assert.match(frame.split("\n").find((l) => l.includes("README.md"))!, /^●/);
+  assert.match(frame.split("\n").find((l) => l.includes("README.md"))!, /^▪/);
 });
 
 test("ChecksPane never renders 'no check configured' the same as 'passing'", () => {

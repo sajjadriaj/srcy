@@ -60,6 +60,13 @@ function leadingWords(title: string): string {
   return lead.join(" ") || title;
 }
 
+// Verbs that change files in the worktree. These are the lines a reader
+// scanning a finished turn is actually looking for, so they do not render
+// in the dim used for reads — "the agent touched my code" has to be
+// visible without reading the column. Values are what toolVerb produces:
+// titleCase of ACP's tool kind.
+const MUTATING = new Set(["Edit", "Write", "Create", "Delete", "Move"]);
+
 // The verb for a tool line: the tool call's `kind` (a short enum — never a
 // path) when present, else the leading words of its title. Undefined when
 // this particular update carries neither, so an in-place merge doesn't blank
@@ -1264,6 +1271,8 @@ export function App({
   // `git push`, or write outside the worktree, during either kind of
   // session. A wrong claim about what's contained is the same defect class
   // as everything else fixed this pass.
+  // Rendered in both views with its colour driven by `running`, so a glance
+  // at the top edge answers "is the agent working" without reading a word.
   const statusLine = explain
     ? `${branch} · explain · worktree discarded on exit`
     : `${branch} · ${modeWord} · ${statusWord} · worktree discarded on exit`;
@@ -1279,7 +1288,9 @@ export function App({
     return (
       <Box flexDirection="column">
         <Box flexDirection="column" borderStyle="round">
-          <Text>{statusLine}</Text>
+          <Text color={running ? "cyan" : undefined} dimColor={!running}>
+            {statusLine}
+          </Text>
           {openPath !== null ? (
             <Box flexDirection="column">
               <Text dimColor>{openPath}</Text>
@@ -1340,7 +1351,9 @@ export function App({
         />
       ) : (
         <Box flexDirection="column" borderStyle="round">
-          <Text>{statusLine}</Text>
+          <Text color={running ? "cyan" : undefined} dimColor={!running}>
+            {statusLine}
+          </Text>
           <Box>
             {/* The border is always drawn, only its colour changes, so
                 taking focus never shifts the rows beside it by a line. */}
@@ -1375,11 +1388,15 @@ export function App({
                   // whether the agent is working or wedged.
                   const inFlight = entry.end === undefined && running;
                   const took = inFlight || ms >= 1000 ? `  ${dur(ms)}` : "";
+                  const mutating = entry.verb !== undefined && MUTATING.has(entry.verb);
                   return (
                     <Text
                       key={i}
-                      color={failed ? "red" : inFlight ? "cyan" : undefined}
-                      dimColor={!failed && !inFlight && ms < SLOW_MS}
+                      color={failed ? "red" : inFlight ? "cyan" : mutating ? "yellow" : undefined}
+                      // Reads and commands still dim when they were fast, so the slow
+                      // ones stand out. A write is never dim: what it costs the reader
+                      // has nothing to do with how long it took.
+                      dimColor={!failed && !inFlight && !mutating && ms < SLOW_MS}
                     >
                       {`${failed ? "✖" : inFlight ? "⟳" : "▸"} ${line}${took}`}
                     </Text>
@@ -1393,7 +1410,11 @@ export function App({
                   );
                 }
                 if (entry.kind === "user") {
-                  return <Text key={i}>{`> ${entry.text}`}</Text>;
+                  // The only turn boundary the transcript has. Bold rather than
+                  // coloured: cyan already means "in flight" here and "this pane has
+                  // the keyboard" next door, and a third meaning would empty it of
+                  // all of them.
+                  return <Text key={i} bold>{`> ${entry.text}`}</Text>;
                 }
                 return <Text key={i}>{entry.text}</Text>;
               })}

@@ -19,7 +19,7 @@ test("an unfocused repo map carries no cursor at all", () => {
   const frame = lastFrame() ?? "";
   // A caret with no keyboard behind it is an invitation to press keys that
   // do nothing.
-  assert.doesNotMatch(frame, /▶/, frame);
+  assert.doesNotMatch(frame, /►/, frame);
   assert.match(frame, /^REPO$/m, frame);
 });
 
@@ -29,8 +29,8 @@ test("the cursor counts file rows, not screen rows — directory headers are not
   const entries = [entry("src/a.ts"), entry("src/b.ts"), entry("lib/c.ts")];
   const { lastFrame } = render(<RepoMap entries={entries} cursor={2} />);
   const frame = lastFrame() ?? "";
-  assert.match(frame, /▶.*c\.ts/, frame);
-  assert.doesNotMatch(frame, /▶.*(a\.ts|b\.ts|\/$)/, frame);
+  assert.match(frame, /►.*c\.ts/, frame);
+  assert.doesNotMatch(frame, /►.*(a\.ts|b\.ts|\/$)/, frame);
   // Focus is announced, so it is clear which pane the keyboard is in.
   assert.match(frame, /REPO ▸/, frame);
 });
@@ -104,17 +104,17 @@ test("tab focuses the map, j moves, enter opens the file at what this session ch
   bridge.emit("update", { kind: "tool_call", toolCallId: "2", toolKind: "edit", toolPath: "a.txt", raw: {} });
   await settle(250);
 
-  assert.doesNotMatch(lastFrame() ?? "", /▶/, "cursor showing before the pane was focused");
+  assert.doesNotMatch(lastFrame() ?? "", /►/, "cursor showing before the pane was focused");
   stdin.write("\t");
   await settle(120);
-  assert.match(lastFrame() ?? "", /▶.*a\.txt/, `tab did not focus the map:\n${lastFrame()}`);
+  assert.match(lastFrame() ?? "", /►.*a\.txt/, `tab did not focus the map:\n${lastFrame()}`);
 
   stdin.write("j");
   await settle(120);
-  assert.match(lastFrame() ?? "", /▶.*zz\.txt/, `j did not move the cursor:\n${lastFrame()}`);
+  assert.match(lastFrame() ?? "", /►.*zz\.txt/, `j did not move the cursor:\n${lastFrame()}`);
   stdin.write("k");
   await settle(120);
-  assert.match(lastFrame() ?? "", /▶.*a\.txt/, `k did not move the cursor back:\n${lastFrame()}`);
+  assert.match(lastFrame() ?? "", /►.*a\.txt/, `k did not move the cursor back:\n${lastFrame()}`);
   // The keys that steer a focused pane must not also land in the prompt —
   // the same leak ctrl-p had when it opened the picker.
   assert.doesNotMatch(lastFrame() ?? "", /> *[jk]/, `navigation keys leaked into the prompt:\n${lastFrame()}`);
@@ -160,7 +160,7 @@ test("the cursor stays on the file it was on when the agent writes one that sort
   await settle(120);
   stdin.write("j");
   await settle(150);
-  assert.match(lastFrame() ?? "", /▶.*z\.ts/, `cursor not on z.ts:\n${lastFrame()}`);
+  assert.match(lastFrame() ?? "", /►.*z\.ts/, `cursor not on z.ts:\n${lastFrame()}`);
 
   // The agent reads a file that sorts first. An index-based cursor would
   // now be pointing at m.ts — the selection would have slid onto a
@@ -168,8 +168,8 @@ test("the cursor stays on the file it was on when the agent writes one that sort
   read("src/a.ts", "3");
   await settle(150);
   const frame = lastFrame() ?? "";
-  assert.match(frame, /▶.*z\.ts/, `cursor slid to another file:\n${frame}`);
-  assert.doesNotMatch(frame, /▶.*(a\.ts|m\.ts)/, frame);
+  assert.match(frame, /►.*z\.ts/, `cursor slid to another file:\n${frame}`);
+  assert.doesNotMatch(frame, /►.*(a\.ts|m\.ts)/, frame);
 });
 
 test("tab is inert while the map is empty, so the prompt keeps the keyboard", async (t) => {
