@@ -41,23 +41,39 @@ export function installSignalCleanup(
   proc.once("SIGHUP", handler);
 }
 
-function parseArgs(argv: string[]): { name: string; explain: boolean } {
+// Which adapter `--agent <name>` spawns. Both speak ACP, so nothing
+// downstream of startSession cares which one is running.
+const AGENTS: Record<string, string[]> = {
+  claude: ["npx", "-y", "@zed-industries/claude-code-acp"],
+  codex: ["npx", "-y", "@zed-industries/codex-acp"],
+};
+
+// Throws on bad usage rather than exiting, so main() prints one line and
+// the parser stays testable.
+export function parseArgs(argv: string[]): { name: string; explain: boolean; agentArgv: string[] } {
   let name = "s1";
   let explain = false;
+  let agent = "claude";
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--name") {
+    if (argv[i] === "--name" || argv[i] === "--agent") {
+      const flag = argv[i]!;
       const value = argv[i + 1];
-      if (value === undefined) {
-        console.error("ctui: --name requires a value");
-        process.exit(1);
-      }
-      name = value;
+      if (value === undefined) throw new Error(`${flag} requires a value`);
+      if (flag === "--name") name = value;
+      else agent = value;
       i++;
     } else if (argv[i] === "--explain") {
       explain = true;
     }
   }
-  return { name, explain };
+  const agentArgv = AGENTS[agent];
+  // An unknown name must not fall back to claude: someone who typed
+  // `--agent codx` would get a working session driven by the wrong agent
+  // and no sign of it.
+  if (agentArgv === undefined) {
+    throw new Error(`unknown --agent ${JSON.stringify(agent)} (known: ${Object.keys(AGENTS).join(", ")})`);
+  }
+  return { name, explain, agentArgv };
 }
 
 // Attempts to pin the session to "default" mode, per the invariant that
@@ -129,7 +145,13 @@ async function main(): Promise<void> {
     await whyCmd(argv[1]);
     return;
   }
-  const { name, explain } = parseArgs(argv);
+  let name: string, explain: boolean, agentArgv: string[];
+  try {
+    ({ name, explain, agentArgv } = parseArgs(argv));
+  } catch (err) {
+    console.error(`ctui: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
 
   let repo: string;
   try {
@@ -147,6 +169,7 @@ async function main(): Promise<void> {
   try {
     session = await startSession({
       cwd: worktree.path,
+      argv: agentArgv,
       onUpdate: (u: AgentUpdate) => bridge.emit("update", u),
       onPermission: (req: PermissionRequest) =>
         new Promise<string | null>((resolve) => bridge.emit("permission", req, resolve)),

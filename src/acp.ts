@@ -90,10 +90,10 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
 // Promise.race attaches its own handler to every promise it's given,
 // including the one that loses — this never produces an unhandled
 // rejection either, so there's no need to cancel it explicitly.
-function startupTimeout(ms: number): Promise<never> {
+function startupTimeout(ms: number, label: string): Promise<never> {
   return new Promise((_resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`claude-code-acp did not respond within ${ms}ms of starting`));
+      reject(new Error(`${label} did not respond within ${ms}ms of starting`));
     }, ms);
     timer.unref();
   });
@@ -171,6 +171,10 @@ function toUpdate(cwd: string, n: SessionNotification): AgentUpdate {
 // (the read loop, the write queue, request/response correlation) is its job.
 export async function startSession(opts: SessionOptions): Promise<AgentSession> {
   const argv = opts.argv ?? DEFAULT_ARGV;
+  // argv is commonly ["npx", "-y", pkg]; the package is what a reader needs
+  // to see in a failure, not "npx". Now that --agent can point this at a
+  // different adapter, a hardcoded name in these errors would be a lie.
+  const label = argv[argv.length - 1] ?? argv[0]!;
 
   // claude-code-acp refuses to start under these: "Claude Code cannot be
   // launched inside another Claude Code session."
@@ -209,10 +213,10 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
   // process instead of failing this session cleanly.
   const childClosed = new Promise<never>((_resolve, reject) => {
     child.once("close", (code, signal) => {
-      reject(new Error(`claude-code-acp exited (code=${code} signal=${signal}): ${stderrTail.trim()}`));
+      reject(new Error(`${label} exited (code=${code} signal=${signal}): ${stderrTail.trim()}`));
     });
     child.once("error", (err) => {
-      reject(new Error(`failed to launch claude-code-acp: ${err.message}`));
+      reject(new Error(`failed to launch ${label}: ${err.message}`));
     });
   });
   childClosed.catch(() => {}); // don't warn if nothing ever awaits this
@@ -341,7 +345,7 @@ export async function startSession(opts: SessionOptions): Promise<AgentSession> 
     const result = await Promise.race([
       initFlow,
       childClosed,
-      startupTimeout(opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS),
+      startupTimeout(opts.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS, label),
     ]);
     sessionId = result.sessionId;
     modes = result.modes ?? null;

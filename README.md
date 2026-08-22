@@ -20,8 +20,11 @@ npm link             # puts `ctui` on your PATH
 `npm link` is reversible with `npm unlink -g ctui`. To skip it, run
 `node /path/to/code-tui/dist/src/index.js` instead of `ctui`.
 
-The agent adapter (`@zed-industries/claude-code-acp`) is fetched by `npx` on
-first run — nothing to install.
+The agent adapter is fetched by `npx` on first run — nothing to install.
+`--agent claude` (the default) uses `@zed-industries/claude-code-acp`,
+`--agent codex` uses `@zed-industries/codex-acp`. Both speak ACP, so nothing
+above the transport changes; an adapter that does not report a `default` mode
+shows up as a degraded mode in the header rather than being assumed safe.
 
 ## Use
 
@@ -30,6 +33,7 @@ Run inside any git repo:
 ```bash
 ctui                       # a session: prompt, watch, review, accept
 ctui --name auth           # name the session (worktree + branch suffix)
+ctui --agent codex         # drive Codex instead of Claude Code
 ctui --explain             # read-only: ask questions, nothing is kept
 ctui why src/tts.ts:18     # which prompt produced this line, and what the
                            # agent warned about at the time

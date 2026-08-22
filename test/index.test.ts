@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { git } from "../src/git.js";
-import { installSignalCleanup } from "../src/index.js";
+import { installSignalCleanup, parseArgs } from "../src/index.js";
 import { newRepo } from "./helpers.js";
 
 // I10: closing the terminal (SIGHUP) or a plain SIGTERM must close the
@@ -119,4 +119,22 @@ test("runs when invoked through a symlink, as an install does", async (t) => {
   });
 
   assert.ok(out.includes(introduced), `expected provenance for ${introduced}, got ${JSON.stringify(out)}`);
+});
+
+test("--agent picks the adapter, and an unknown one is refused rather than silently claude", () => {
+  assert.deepEqual(parseArgs([]).agentArgv, ["npx", "-y", "@zed-industries/claude-code-acp"]);
+  assert.deepEqual(parseArgs(["--agent", "codex"]).agentArgv, ["npx", "-y", "@zed-industries/codex-acp"]);
+  // Falling back to claude here would hand someone a working session driven
+  // by an agent they did not ask for, with nothing on screen saying so.
+  assert.throws(() => parseArgs(["--agent", "codx"]), /unknown --agent "codx"/);
+  assert.throws(() => parseArgs(["--agent"]), /--agent requires a value/);
+});
+
+test("--name and --explain still parse alongside --agent", () => {
+  const a = parseArgs(["--agent", "codex", "--name", "auth", "--explain"]);
+  assert.equal(a.name, "auth");
+  assert.equal(a.explain, true);
+  assert.deepEqual(a.agentArgv, ["npx", "-y", "@zed-industries/codex-acp"]);
+  // "--name --explain" must not eat the next flag as the name.
+  assert.throws(() => parseArgs(["--name"]), /--name requires a value/);
 });
