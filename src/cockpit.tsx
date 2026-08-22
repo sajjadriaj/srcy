@@ -110,11 +110,22 @@ const NAME_WIDTH = 17;
 // RepoMap is the left column: where in the tree this session has been
 // working, and how much of each file it changed. The marker sits in its own
 // gutter so nesting stays readable no matter how deep the path goes.
-export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element {
+// `cursor` indexes `entries` — file rows appear in that same order, since
+// buildTree only interleaves directory headers between them. -1 means the
+// pane is not focused. The caret sits in a column that is a blank space
+// otherwise, so focusing never reflows the rows beside it.
+export function RepoMap({
+  entries,
+  cursor = -1,
+}: {
+  entries: MapEntry[];
+  cursor?: number;
+}): React.JSX.Element {
   const rows = buildTree(entries);
+  let fileIndex = -1;
   return (
     <Box flexDirection="column">
-      <Text dimColor>REPO</Text>
+      {cursor >= 0 ? <Text color="cyan">{"REPO ▸"}</Text> : <Text dimColor>REPO</Text>}
       {rows.length === 0 ? (
         <Text dimColor>{"   (nothing touched yet)"}</Text>
       ) : (
@@ -125,6 +136,9 @@ export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element
               <Text key={i} dimColor>{`   ${indent}${row.name}`}</Text>
             );
           }
+          fileIndex++;
+          const at = fileIndex === cursor;
+          const caret = at ? "▶" : " ";
           const entry = row.entry!;
           // Counts share a column so the eye can compare sizes down the
           // list; a name long enough to overflow it pushes its own counts
@@ -137,14 +151,19 @@ export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element
           // does not compile" outranks "this one grew by 12 lines".
           if (entry.problems > 0) {
             return (
-              <Text key={i} color="red">
-                {`✖  ${stat}`}
+              <Text key={i} color="red" inverse={at}>
+                {`✖${caret} ${stat}`}
               </Text>
             );
           }
           return (
-            <Text key={i} color={entry.touch === "wrote" ? "green" : undefined} dimColor={entry.touch === "read"}>
-              {`${MARK[entry.touch]}  ${stat}`}
+            <Text
+              key={i}
+              color={entry.touch === "wrote" ? "green" : undefined}
+              dimColor={entry.touch === "read" && !at}
+              inverse={at}
+            >
+              {`${MARK[entry.touch]}${caret} ${stat}`}
             </Text>
           );
         })

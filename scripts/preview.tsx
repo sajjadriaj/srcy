@@ -14,7 +14,7 @@ import { join } from "node:path";
 import React from "react";
 import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
-import type { Worktree } from "../src/git.js";
+import { git, type Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
 
 const DIFF = [
@@ -42,9 +42,67 @@ const DIFF = [
   "",
 ].join("\n");
 
+// The file behind the diff above, so opening it from the repo map shows
+// real content with the changed line marked, not a read error.
+const TOKEN_TS = `import { createHmac } from "node:crypto"
+import { decode, encode } from "./jwt.js"
+import { session } from "./session.js"
+
+const TTL_MS = 15 * 60 * 1000
+const SKEW_MS = 30_000
+
+export function now(): number {
+  return Date.now()
+}
+
+export function issue(userId: string): string {
+  return encode({
+    sub: userId,
+    iat: now(),
+    exp: now() + TTL_MS,
+  })
+}
+
+export function renewable(t: string): boolean {
+  const { exp } = decode(t)
+  return exp + SKEW_MS > now()
+}
+
+function sign(payload: string): string {
+  return createHmac("sha256", secret())
+    .update(payload)
+    .digest("base64url")
+}
+
+function secret(): string {
+  const s = process.env.TOKEN_SECRET
+  if (!s) throw new Error("TOKEN_SECRET is not set")
+  return s
+}
+
+// Returns null for an expired token, the live session otherwise.
+export function verify(t: string) {
+  const exp = decode(t).exp
+
+  if (exp <= now())
+    return null
+  return session
+}
+`;
+
 // A repo whose check fails the way a real typecheck would.
 const repo = await mkdtemp(join(tmpdir(), "ctui-preview-"));
 await mkdir(join(repo, ".ctui"), { recursive: true });
+await mkdir(join(repo, "src", "auth"), { recursive: true });
+// A real commit behind the file, so the provenance gutter has something
+// true to say: everything but the edited line traces to it.
+await writeFile(join(repo, "src", "auth", "token.ts"), TOKEN_TS.replace("exp <= now()", "exp < now()"));
+await git(repo, "init", "-q");
+await git(repo, "config", "user.email", "preview@example.com");
+await git(repo, "config", "user.name", "preview");
+await git(repo, "add", "-A");
+await git(repo, "commit", "-qm", "add token verification");
+await writeFile(join(repo, "src", "auth", "token.ts"), TOKEN_TS);
 const check = join(repo, ".ctui", "check");
 await writeFile(check, '#!/bin/sh\necho "src/auth/token.ts(41,5): error TS2532: Object is possibly undefined."\nexit 1\n');
 await chmod(check, 0o755);
@@ -127,5 +185,35 @@ await settle(900);
 const midTurn = lastFrame() ?? "";
 
 await settle(TURN_MS);
-process.stdout.write("--- mid-turn ---\n" + midTurn + "\n\n--- turn finished ---\n" + (lastFrame() ?? "") + "\n");
+const finished = lastFrame() ?? "";
+
+// tab moves the keyboard into the repo map; j walks the cursor down to the
+// file the checker is failing on.
+stdin.write("\t");
+await settle(80);
+stdin.write("j");
+await settle(80);
+const focused = lastFrame() ?? "";
+
+// Enter opens it, positioned on the line this session changed.
+stdin.write("\r");
+await settle(250);
+const opened = lastFrame() ?? "";
+
+process.stdout.write(
+  [
+    "--- mid-turn ---",
+    midTurn,
+    "",
+    "--- turn finished ---",
+    finished,
+    "",
+    "--- repo map focused (tab, then j) ---",
+    focused,
+    "",
+    "--- enter on the failing file ---",
+    opened,
+    "",
+  ].join("\n"),
+);
 process.exit(0);

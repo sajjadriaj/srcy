@@ -42,28 +42,31 @@ ctui why src/tts.ts:18     # which prompt produced this line, and what the
 The session screen is a cockpit, not a scrolling log:
 
 ```
-╭──────────────────────────────────────────────────────────────────────────╮
-│ctui/auth · default mode · running 2.0s · worktree discarded on exit      │
-│REPO                           > fix the token expiry off-by-one          │
-│   src/                        ▸ Read  src/auth/session.ts                │
-│     auth/                     Off-by-one in verify(): `<` lets a token   │
-│●      session.ts    +2 -0     that expired this millisecond through.     │
-│●      token.ts      +1 -1     ▸ Edit  src/auth/token.ts                  │
-│● wrote  ○ read                ✖ Execute  npm test  1.4s                  │
-│                               ⟳ Execute  npm run typecheck  6.2s         │
-│                               src/auth/token.ts:38                       │
-│                                 40                                       │
-│                                 41 -   if (exp < now())                  │
-│                                 41 +   if (exp <= now())                 │
-│                                 42       return null                     │
-│CONTEXT ████████░░░░░░░░  52%  105k/200k  $0.41                           │
-│CHECKS  .ctui/check  ✖ failing                                            │
-│  ✖ src/auth/token.ts:41  error TS2532: Object is possibly undefined.     │
-│PLAN                                                                      │
-│  ✔ find the expiry comparison                                            │
-│  ▸ fix the off-by-one                                                    │
-│  ☐ add a regression test                                                 │
-╰──────────────────────────────────────────────────────────────────────────╯
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ctui/auth · default mode · running 2.0s · worktree discarded on exit                              │
+│╭────────────────────────────╮ > fix the token expiry off-by-one                                  │
+││REPO                        │ ▸ Read  src/auth/session.ts                                        │
+││   src/                     │ ▸ Read  src/auth/token.ts                                          │
+││     auth/                  │ expiry check is exclusive; a token expiring this exact ms is still │
+││●      session.ts    +2 -0  │ accepted                                                           │
+││●      token.ts      +1 -1  │ Off-by-one in verify(): `<` lets a token that expired this         │
+││● wrote                     │ millisecond through. Changing to `<=`.                             │
+││                            │ ▸ Edit  src/auth/token.ts                                          │
+││                            │ ▸ Edit  src/auth/session.ts                                        │
+││                            │ ✖ Execute  npm test  1.4s                                          │
+││                            │ ⟳ Execute  npm run typecheck  0.6s                                 │
+││                            │                                                                    │
+││                            │ src/auth/session.ts:12                                             │
+││                            │   12   export class Session {                                      │
+││                            │   13 +   private renewals = 0                                      │
+││                            │   14 +   renew() { this.renewals++ }                               │
+│╰────────────────────────────╯   15   }                                                           │
+│CONTEXT ████████░░░░░░░░  52%  105k/200k  $0.41                                                   │
+│PLAN                                                                                              │
+│  ✔ find the expiry comparison                                                                    │
+│  ▸ fix the off-by-one                                                                            │
+│  ☐ add a regression test                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 Left: every file this session has touched, nested as it sits in the repo,
@@ -81,19 +84,38 @@ It appears only if the agent reports it — ACP's usage update is optional and
 several adapters never send one. An unmeasured window is left blank rather
 than drawn empty.
 
-`npm run preview` paints that frame from fixture data — no agent, no git —
+`tab` moves the keyboard into the repo map. `j`/`k` walk the cursor, `⏎`
+opens that file — positioned on what this session changed, with the
+provenance gutter saying where every other line came from. A map row you can
+watch turn red but cannot open is a picture, not an instrument.
+
+```
+╭────────────────────────────╮
+│REPO ▸                      │
+│   src/                     │
+│     auth/                  │
+│●      session.ts    +2 -0  │
+│✖▶     token.ts      +1 -1  │
+│● wrote  ✖ failing          │
+╰────────────────────────────╯
+```
+
+`npm run preview` paints these frames from fixture data — no agent, no git —
 which is how to iterate on the layout without waiting on a real turn. It
-prints two frames, mid-turn and finished, because the cockpit spends most of
-its life in the first one.
+prints four: mid-turn, finished, the map focused, and the file that opens
+from it.
 
 Keys:
 
 ```
-r        open review          space   select hunk / file
-tab      patch <-> file view  a       accept selected
-A        accept unexplained   esc     interrupt the agent
-ctrl-p   open any file        j/k     move / scroll
+tab      focus repo map / back  space   select hunk / file
+j/k      move / scroll          a       accept selected
+⏎        open the file          A       accept unexplained
+r        open review            esc     interrupt the agent
+ctrl-p   open any file
 ```
+
+Inside review, `tab` switches the patch and file views instead.
 
 ### What review shows you
 

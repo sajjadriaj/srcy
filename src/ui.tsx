@@ -462,6 +462,19 @@ export function App({
   const [checks, setChecks] = useState<CheckResult | null | undefined>(undefined);
   const [checksRunning, setChecksRunning] = useState(false);
 
+  // Which pane owns the keyboard. The repo map is the only pane with
+  // anything to activate, so this is a toggle rather than a cycle — the
+  // transcript has no scrollback to move through and the plan has nothing
+  // to open. ponytail: make it a cycle when either of those gains one.
+  const [mapFocus, setMapFocus] = useState(false);
+  // The cursor is remembered by path, not index: the agent writes files
+  // mid-turn, and a new one sorting above the selection would otherwise
+  // slide the cursor onto a different file under the reader's hands.
+  const [mapPath, setMapPath] = useState<string | null>(null);
+  // Where the file view was entered from, so escape backs out to the place
+  // the reader came from instead of dropping them in an empty picker.
+  const [openFrom, setOpenFrom] = useState<"picker" | "map">("picker");
+
   // ctrl-P: open any file in the tree, not just the ones the agent touched.
   // `openPath` non-null means a file is being read; otherwise the picker
   // itself is up. Both live under viewMode "open".
@@ -469,6 +482,9 @@ export function App({
   const [openQuery, setOpenQuery] = useState("");
   const [openIndex, setOpenIndex] = useState(0);
   const [openPath, setOpenPath] = useState<string | null>(null);
+  // The new-side lines this session changed in the open file, so a file
+  // reached from the repo map arrives with its changes already marked.
+  const [openChanged, setOpenChanged] = useState<Set<number>>(new Set());
   const [openContent, setOpenContent] = useState<string | null>(null);
   const [openLine, setOpenLine] = useState(1);
   // Which prompt produced each line of the file currently in file view.
@@ -931,6 +947,31 @@ export function App({
     }
   }
 
+  // The repo map's rows, computed once per render: the key handler steers
+  // the same list the pane draws, and two derivations of it would drift.
+  const mapRows = mapEntries(diffFiles, readPathsRef.current, checks?.problems ?? []);
+  const mapIndex = Math.max(0, mapRows.findIndex((e) => e.path === mapPath));
+
+  function moveMap(delta: number): void {
+    const entry = mapRows[Math.min(mapRows.length - 1, Math.max(0, mapIndex + delta))];
+    if (entry) setMapPath(entry.path);
+  }
+
+  // Enter on a row: the file itself, with this session's changes marked and
+  // the view already sitting on the first of them — the reason to open the
+  // file is what changed in it. A row you can watch turn red but cannot
+  // open is a picture, not an instrument.
+  async function openFromMap(path: string): Promise<void> {
+    const file = diffFiles.find((f) => f.path === path);
+    const changed = file ? changedLines(file) : new Set<number>();
+    setOpenFrom("map");
+    setOpenChanged(changed);
+    setMapFocus(false);
+    setViewMode("open");
+    await openFile(path);
+    if (changed.size > 0) setOpenLine(Math.min(...changed));
+  }
+
   useInput((char, key) => {
     if (key.ctrl && char === "c") {
       if (confirmingExit) {
@@ -994,7 +1035,7 @@ export function App({
         // Escape backs out one level at a time — out of the file to the
         // list, out of the list to the session — rather than dropping the
         // reader all the way back on a mistyped query.
-        if (openPath !== null) closeOpenFile();
+        if (openPath !== null && openFrom === "picker") closeOpenFile();
         else closePicker();
         return;
       }
@@ -1016,6 +1057,41 @@ export function App({
       // printable key, so j/k cannot be used here — they are text.
       if (key.downArrow) setOpenIndex((i) => Math.min(matches.length - 1, i + 1));
       else if (key.upArrow) setOpenIndex((i) => Math.max(0, i - 1));
+      return;
+    }
+
+    if (viewMode === "chat" && mapFocus) {
+      if (key.tab) {
+        setMapFocus(false);
+        return;
+      }
+      if (char === "j" || key.downArrow) {
+        moveMap(1);
+        return;
+      }
+      if (char === "k" || key.upArrow) {
+        moveMap(-1);
+        return;
+      }
+      if (key.return) {
+        const entry = mapRows[mapIndex];
+        if (entry) void openFromMap(entry.path);
+        return;
+      }
+      // Escape stays the interrupt everywhere. It must not quietly become
+      // "unfocus" just because the cursor happens to be in a pane — the key
+      // that stops a runaway agent cannot depend on where focus is.
+      if (key.escape && running) session.cancel().catch(() => {});
+      return;
+    }
+
+    if (viewMode === "chat" && key.tab) {
+      // An empty map has nothing to steer, so focus stays in the prompt
+      // rather than moving somewhere with no cursor and no keys.
+      if (mapRows.length > 0) {
+        setMapFocus(true);
+        if (mapPath === null) setMapPath(mapRows[0]!.path);
+      }
       return;
     }
 
@@ -1110,6 +1186,8 @@ export function App({
   // creates files mid-session, and a picker that cannot open the file the
   // agent just wrote is the one case that matters most.
   async function openPicker(): Promise<void> {
+    setOpenFrom("picker");
+    setOpenChanged(new Set());
     setOpenQuery("");
     setOpenIndex(0);
     setOpenPath(null);
@@ -1123,14 +1201,28 @@ export function App({
   }
 
   function closePicker(): void {
+    setOpenPath(null);
+    setOpenContent(null);
     setViewMode("chat");
   }
 
   async function openFile(path: string): Promise<void> {
     setOpenPath(path);
     setOpenLine(1);
+    setOrigins(null);
     try {
-      setOpenContent(await readFile(join(worktree.path, path), "utf8"));
+      const content = await readFile(join(worktree.path, path), "utf8");
+      setOpenContent(content);
+      // The gutter, on any file opened here — not only inside review. It is
+      // also what makes the change marks exact: without provenance the view
+      // can only mark the hunk's whole span, so a one-line fix inside a
+      // six-line hunk reads as six lines changed.
+      try {
+        const file = diffFiles.find((f) => f.path === path);
+        setOrigins(await lineOrigins(worktree.repo, path, content.split("\n").length, file));
+      } catch {
+        // No provenance is a coarser view, not a broken one.
+      }
     } catch (err) {
       // A directory, a broken symlink, a binary the reader would not want
       // painted into their terminal anyway — say which and stay open.
@@ -1175,7 +1267,7 @@ export function App({
   const statusLine = explain
     ? `${branch} · explain · worktree discarded on exit`
     : `${branch} · ${modeWord} · ${statusWord} · worktree discarded on exit`;
-  const inputEnabled = !running && !permission && !agentDied && viewMode === "chat";
+  const inputEnabled = !running && !permission && !agentDied && viewMode === "chat" && !mapFocus;
   // The file the live diff pane shows: the one the agent touched most
   // recently, falling back to whatever changed last so the pane still says
   // something useful when a write arrived without a path.
@@ -1194,7 +1286,12 @@ export function App({
               {openContent === null ? (
                 <Text dimColor>(loading...)</Text>
               ) : (
-                <FileWindow content={openContent} changed={new Set()} centerLine={openLine} />
+                <FileWindow
+                  content={openContent}
+                  changed={openChanged}
+                  centerLine={openLine}
+                  origins={origins ?? undefined}
+                />
               )}
             </Box>
           ) : (
@@ -1202,7 +1299,9 @@ export function App({
           )}
         </Box>
         {openPath !== null ? (
-          <Text dimColor>{"  [j/k] scroll  [u/d] page  [esc] back to list"}</Text>
+          <Text dimColor>
+            {`  [j/k] scroll  [u/d] page  [esc] ${openFrom === "map" ? "back to the session" : "back to the list"}`}
+          </Text>
         ) : (
           <Box>
             <Text>{"open ▸ "}</Text>
@@ -1243,8 +1342,17 @@ export function App({
         <Box flexDirection="column" borderStyle="round">
           <Text>{statusLine}</Text>
           <Box>
-            <Box width={30} flexShrink={0} flexDirection="column">
-              <RepoMap entries={mapEntries(diffFiles, readPathsRef.current, checks?.problems ?? [])} />
+            {/* The border is always drawn, only its colour changes, so
+                taking focus never shifts the rows beside it by a line. */}
+            <Box
+              width={30}
+              flexShrink={0}
+              flexDirection="column"
+              borderStyle="round"
+              borderColor={mapFocus ? "cyan" : undefined}
+              borderDimColor={!mapFocus}
+            >
+              <RepoMap entries={mapRows} cursor={mapFocus ? mapIndex : -1} />
             </Box>
             <Box flexDirection="column" flexGrow={1} paddingLeft={1}>
               {/* The transcript is windowed to its tail so it can't push the
@@ -1334,7 +1442,11 @@ export function App({
       ) : (
         <>
           {notice && <Text color="yellow">{notice}</Text>}
-          <Text dimColor>{"  [r] review  [ctrl-p] open any file"}</Text>
+          <Text dimColor>
+            {mapFocus
+              ? "  [j/k] move  [⏎] open the file  [tab] back to the prompt"
+              : "  [tab] repo map  [r] review  [ctrl-p] open any file"}
+          </Text>
           <Box>
             <Text>{"> "}</Text>
             <TextInput value={input} onChange={inputEnabled ? setInput : () => {}} onSubmit={submit} focus={inputEnabled} />
