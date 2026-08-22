@@ -149,9 +149,20 @@ export function RepoMap({ entries }: { entries: MapEntry[] }): React.JSX.Element
           );
         })
       )}
-      <Text dimColor>{"● wrote  ○ read  ✖ failing"}</Text>
+      {/* A legend for markers that aren't on screen teaches the reader to
+          look for something that isn't there — "✖ failing" while nothing is
+          failing reads as a warning. */}
+      <Text dimColor>{legend(entries)}</Text>
     </Box>
   );
+}
+
+function legend(entries: MapEntry[]): string {
+  const parts: string[] = [];
+  if (entries.some((e) => e.touch === "wrote")) parts.push("● wrote");
+  if (entries.some((e) => e.touch === "read")) parts.push("○ read");
+  if (entries.some((e) => e.problems > 0)) parts.push("✖ failing");
+  return parts.join("  ");
 }
 
 interface DiffLine {
@@ -240,12 +251,16 @@ export function ChecksPane({
   result,
   running,
 }: {
-  result: CheckResult | null;
+  result: CheckResult | null | undefined;
   running: boolean;
 }): React.JSX.Element | null {
   if (running) {
     return <Text dimColor>{"CHECKS  running…"}</Text>;
   }
+  // Undefined is "we have not looked yet" — distinct from null, which is
+  // "we looked and there is nothing to run". Claiming a project has no
+  // checker before ever asking is the same class of lie as showing a pass.
+  if (result === undefined) return null;
   if (result === null) {
     // Deliberately not silent: a project with no check configured should
     // learn that it could have one, exactly when it would have mattered.
@@ -425,5 +440,80 @@ export function FilePicker({
         ))
       )}
     </Box>
+  );
+}
+
+// A tool that takes this long is worth noticing on the way past. Anything
+// under it renders dim; anything over it renders plain, so scanning the
+// transcript answers "where did the two minutes go" without reading it.
+export const SLOW_MS = 10_000;
+
+// dur formats an elapsed time for a cockpit rather than a log: sub-ten-second
+// work keeps a decimal because the difference between 0.2s and 4s is the
+// difference between a cache hit and a real call, and anything past a minute
+// drops to m/s because by then the seconds no longer matter.
+export function dur(ms: number): string {
+  if (ms < 0) return "0.0s";
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+}
+
+const GAUGE_WIDTH = 16;
+
+// gauge is a plain fill bar: how much of the context window is spoken for.
+// Deliberately not the BLOCKS ramp densityBar uses — that one encodes
+// "how much" per column, this one encodes "how far along", and reusing the
+// glyphs would make two different quantities look like the same thing.
+export function gauge(used: number, size: number, width = GAUGE_WIDTH): string {
+  if (size <= 0) return "";
+  const frac = Math.min(1, Math.max(0, used / size));
+  // A window with anything in it never reads as empty, and one with room
+  // left never reads as full — the two states the reader acts on.
+  let filled = Math.round(frac * width);
+  if (used > 0 && filled === 0) filled = 1;
+  if (frac < 1 && filled === width) filled = width - 1;
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+// tokens abbreviates a count to the precision anyone actually reads.
+export function tokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+// money renders a cost the agent reported. The currency is whatever the
+// adapter said it was — never assumed to be dollars.
+export function money(amount: number, currency: string): string {
+  const symbol = currency === "USD" ? "$" : `${currency} `;
+  // Two decimals is what a cost is read at; a session still under a cent
+  // gets a third so it doesn't render as free.
+  return `${symbol}${amount < 0.1 ? amount.toFixed(3) : amount.toFixed(2)}`;
+}
+
+export interface Usage {
+  used: number;
+  size: number;
+  cost?: { amount: number; currency: string };
+}
+
+// Above 80% of the window, a compaction is close enough that it changes what
+// a reader should do next — finish the thought, or start a fresh session.
+const CONTEXT_WARN = 0.8;
+
+// The context gauge. Renders nothing at all when the adapter never sent a
+// usage update: a window we cannot measure must not be drawn as an empty
+// one, which would read as "plenty of room left".
+export function UsageBar({ usage }: { usage: Usage | null }): React.JSX.Element | null {
+  if (usage === null) return null;
+  const frac = usage.used / usage.size;
+  const pct = Math.round(frac * 100);
+  const cost = usage.cost ? `  ${money(usage.cost.amount, usage.cost.currency)}` : "";
+  return (
+    <Text color={frac >= CONTEXT_WARN ? "yellow" : undefined} dimColor={frac < CONTEXT_WARN}>
+      {`CONTEXT ${gauge(usage.used, usage.size)} ${String(pct).padStart(3)}%  ${tokens(usage.used)}/${tokens(usage.size)}${cost}`}
+    </Text>
   );
 }

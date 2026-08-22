@@ -10,6 +10,10 @@ import { runChecks, type CheckResult } from "./checks.js";
 import {
   ChecksPane,
   densityBar,
+  dur,
+  SLOW_MS,
+  UsageBar,
+  type Usage,
   LiveDiff,
   mapEntries,
   outline,
@@ -38,7 +42,7 @@ type TranscriptEntry =
   | { kind: "user"; text: string }
   | { kind: "agent"; text: string }
   | { kind: "thought"; text: string }
-  | { kind: "tool"; id: string; verb?: string; path?: string };
+  | { kind: "tool"; id: string; verb?: string; path?: string; at: number; end?: number; status?: string };
 
 // "edit" -> "Edit", "switch_mode" -> "Switch Mode".
 function titleCase(kind: string): string {
@@ -419,6 +423,14 @@ export function App({
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
   const [mode, setMode] = useState(initialMode);
   const [running, setRunning] = useState(false);
+  // The turn clock. `now` only advances while a turn is in flight, so when
+  // one ends every duration on screen freezes at its last reading instead
+  // of a stopped agent appearing to still be working.
+  const [turnStart, setTurnStart] = useState(0);
+  const [now, setNow] = useState(0);
+  // What the agent says it has spent. Null until an adapter sends a usage
+  // update — and many never will, so null must render as nothing.
+  const [usage, setUsage] = useState<Usage | null>(null);
   const [input, setInput] = useState("");
   const [permission, setPermission] = useState<{ req: PermissionRequest; respond: (id: string | null) => void } | null>(
     null,
@@ -447,7 +459,7 @@ export function App({
   // Whether the project's own checker passed on what the agent wrote.
   // `null` after a run means "no check is configured", which the pane must
   // render differently from "checked and clean" — see ChecksPane.
-  const [checks, setChecks] = useState<CheckResult | null>(null);
+  const [checks, setChecks] = useState<CheckResult | null | undefined>(undefined);
   const [checksRunning, setChecksRunning] = useState(false);
 
   // ctrl-P: open any file in the tree, not just the ones the agent touched.
@@ -502,6 +514,18 @@ export function App({
   // once per review and read only inside an effect keyed off reviewVersion.
   const fileSnapshotRef = useRef<Map<string, string>>(new Map());
 
+  // One second is the right resolution for "is this stuck": fast enough to
+  // read as motion, slow enough that the terminal isn't repainting for the
+  // sake of it. The interval exists only while a turn does.
+  useEffect(() => {
+    if (!running) return;
+    const start = Date.now();
+    setTurnStart(start);
+    setNow(start);
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [running]);
+
   function append(entry: TranscriptEntry): void {
     setTranscript((prev) => {
       const last = prev[prev.length - 1];
@@ -519,13 +543,18 @@ export function App({
   // operation; update the existing line in place instead of adding another.
   // ACP updates are patches — verb/path stay undefined here when this
   // particular update didn't carry them, so a prior known value survives.
-  function upsertTool(id: string, patch: { verb?: string; path?: string }): void {
+  function upsertTool(id: string, patch: { verb?: string; path?: string; status?: string }): void {
+    const t = Date.now();
+    // A terminal status stops this line's clock. Anything else leaves it
+    // running, so a tool the agent never reports finishing keeps ticking
+    // rather than silently reading as instant.
+    const stop = patch.status === "completed" || patch.status === "failed" ? { end: t } : {};
     setTranscript((prev) => {
       const idx = prev.findIndex((e) => e.kind === "tool" && e.id === id);
       if (idx === -1) {
-        return [...prev, { kind: "tool", id, ...patch }];
+        return [...prev, { kind: "tool", id, at: t, ...patch, ...stop }];
       }
-      const merged = { ...prev[idx], ...patch };
+      const merged = { ...prev[idx], ...patch, ...stop };
       return [...prev.slice(0, idx), merged, ...prev.slice(idx + 1)];
     });
   }
@@ -574,9 +603,10 @@ export function App({
         case "tool_call_update": {
           if (u.toolCallId) {
             const verb = toolVerb(u.toolKind, u.toolTitle);
-            const patch: { verb?: string; path?: string } = {};
+            const patch: { verb?: string; path?: string; status?: string } = {};
             if (verb !== undefined) patch.verb = verb;
             if (u.toolPath !== undefined) patch.path = u.toolPath;
+            if (u.toolStatus !== undefined) patch.status = u.toolStatus;
             upsertTool(u.toolCallId, patch);
           }
           // Blast radius asks "did the agent read this file", not "did it
@@ -597,6 +627,9 @@ export function App({
         }
         case "plan":
           setPlan(planFrom(u.raw));
+          break;
+        case "usage_update":
+          if (u.usage) setUsage(u.usage);
           break;
         case "current_mode_update":
           if (u.modeId != null) setMode(u.modeId);
@@ -1126,7 +1159,13 @@ export function App({
     }
   }
 
-  const statusWord = agentDied ? "agent exited" : running ? "running" : "idle";
+  // How long the agent has been on this turn, in the header, because the
+  // one question a watcher actually has is whether it is still moving.
+  const statusWord = agentDied
+    ? "agent exited"
+    : running
+      ? `running ${dur(now - turnStart)}`
+      : "idle";
   const modeWord = modeDegraded ? `${mode} mode (gate degraded)` : `${mode} mode`;
   // "worktree discarded on exit", not "nothing is kept"/unqualified: the
   // guarantee is only that the worktree goes away — the agent can still run
@@ -1215,9 +1254,26 @@ export function App({
               {transcript.slice(-TRANSCRIPT_WINDOW).map((entry, i) => {
                 if (entry.kind === "tool") {
                   const line = [entry.verb, entry.path].filter(Boolean).join("  ");
+                  // A tool still running is measured against the ticking
+                  // clock; a finished one against the moment it finished.
+                  const ms = (entry.end ?? now) - entry.at;
+                  // Sub-second work gets no number — every Read the agent
+                  // does would otherwise carry one, and none of them matter.
+                  const failed = entry.status === "failed";
+                  // The one line on screen that is still happening gets its
+                  // own marker and its clock always visible. Without that it
+                  // is indistinguishable from the finished lines above it,
+                  // which is exactly the moment a reader wants to know
+                  // whether the agent is working or wedged.
+                  const inFlight = entry.end === undefined && running;
+                  const took = inFlight || ms >= 1000 ? `  ${dur(ms)}` : "";
                   return (
-                    <Text key={i} dimColor>
-                      {`▸ ${line}`}
+                    <Text
+                      key={i}
+                      color={failed ? "red" : inFlight ? "cyan" : undefined}
+                      dimColor={!failed && !inFlight && ms < SLOW_MS}
+                    >
+                      {`${failed ? "✖" : inFlight ? "⟳" : "▸"} ${line}${took}`}
                     </Text>
                   );
                 }
@@ -1238,6 +1294,7 @@ export function App({
               </Box>
             </Box>
           </Box>
+          <UsageBar usage={usage} />
           <ChecksPane result={checks} running={checksRunning} />
           <PlanBar entries={plan} />
         </Box>

@@ -36,7 +36,7 @@ test("prompt round-trips and streams updates in order; tool_call locations relat
   assert.equal(stopReason, "end_turn");
   assert.deepEqual(
     updates.map((u) => u.kind),
-    ["agent_message_chunk", "agent_message_chunk", "tool_call", "tool_call"],
+    ["agent_message_chunk", "agent_message_chunk", "tool_call", "tool_call", "usage_update"],
   );
   assert.equal(updates[0].text, "Hello ");
   assert.equal(updates[1].text, "world");
@@ -49,6 +49,14 @@ test("prompt round-trips and streams updates in order; tool_call locations relat
   const outsideAbs = join(dirname(cwd), "outside.txt");
   assert.equal(updates[3].toolPath, outsideAbs);
   assert.ok(!updates[3].toolPath?.startsWith(".."));
+
+  // A tool's outcome reaches the UI: without it a failing command renders
+  // exactly like a working one.
+  assert.equal(updates[2].toolStatus, undefined);
+  assert.equal(updates[3].toolStatus, "failed");
+
+  // Context fill and cost, when the adapter reports them at all.
+  assert.deepEqual(updates[4].usage, { used: 1234, size: 200000, cost: { amount: 0.5, currency: "USD" } });
 
   // cancel() is a plain notification; must not throw even post-turn.
   await session.cancel();

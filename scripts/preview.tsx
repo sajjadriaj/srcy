@@ -50,9 +50,17 @@ await writeFile(check, '#!/bin/sh\necho "src/auth/token.ts(41,5): error TS2532: 
 await chmod(check, 0o755);
 
 const bridge = new EventEmitter();
+const TURN_MS = 2600;
+const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
 const session = {
   sessionId: "s1",
-  prompt: async () => "",
+  // A turn that actually takes time, so the preview can paint the cockpit
+  // while the agent is still working — the state it spends most of its life in.
+  prompt: async () => {
+    await settle(TURN_MS);
+    return "";
+  },
   cancel: async () => {},
   close: async () => {},
 } as AgentSession;
@@ -76,7 +84,11 @@ const { lastFrame, stdin } = render(
 );
 
 const up = (u: Record<string, unknown>): boolean => bridge.emit("update", { raw: u, ...u });
-const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+await settle(50);
+stdin.write("fix the token expiry off-by-one");
+await settle(50);
+stdin.write("\r");
 
 up({
   kind: "plan",
@@ -88,6 +100,8 @@ up({
 });
 up({ kind: "tool_call", toolCallId: "1", toolKind: "read", toolTitle: "Read", toolPath: "src/auth/session.ts" });
 up({ kind: "tool_call", toolCallId: "2", toolKind: "read", toolTitle: "Read", toolPath: "src/auth/token.ts" });
+up({ kind: "tool_call_update", toolCallId: "1", toolStatus: "completed" });
+up({ kind: "tool_call_update", toolCallId: "2", toolStatus: "completed" });
 up({
   kind: "agent_thought_chunk",
   text: "expiry check is exclusive; a token expiring this exact ms is still accepted",
@@ -98,18 +112,20 @@ up({
 });
 up({ kind: "tool_call", toolCallId: "3", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/token.ts" });
 up({ kind: "tool_call", toolCallId: "4", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/session.ts" });
+up({ kind: "tool_call_update", toolCallId: "3", toolStatus: "completed" });
+up({ kind: "tool_call_update", toolCallId: "4", toolStatus: "completed" });
+up({ kind: "usage_update", usage: { used: 104_800, size: 200_000, cost: { amount: 0.41, currency: "USD" } } });
 
-// Submitting is what ends a turn, and the end of a turn is what refreshes
-// the map and runs the checks — so the frame below is the one a real
-// session paints, not a hand-assembled approximation of it.
-await settle(50);
-// Typing and submitting are separate writes: delivered as one chunk, the
-// carriage return is just another character in the inserted text and the
-// prompt is never submitted at all.
-stdin.write("fix the token expiry off-by-one");
-await settle(50);
-stdin.write("\r");
-await settle(800);
+// A command that fails, and one that is still going when we paint: the two
+// states the transcript has to tell apart at a glance.
+up({ kind: "tool_call", toolCallId: "5", toolKind: "execute", toolTitle: "Bash", toolPath: "npm test" });
+await settle(1400);
+up({ kind: "tool_call_update", toolCallId: "5", toolStatus: "failed" });
+up({ kind: "tool_call", toolCallId: "6", toolKind: "execute", toolTitle: "Bash", toolPath: "npm run typecheck" });
 
-process.stdout.write((lastFrame() ?? "") + "\n");
+await settle(900);
+const midTurn = lastFrame() ?? "";
+
+await settle(TURN_MS);
+process.stdout.write("--- mid-turn ---\n" + midTurn + "\n\n--- turn finished ---\n" + (lastFrame() ?? "") + "\n");
 process.exit(0);

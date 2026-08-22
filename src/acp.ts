@@ -30,9 +30,19 @@ export interface AgentUpdate {
   toolTitle?: string;
   toolKind?: string;
   toolPath?: string;
+  // "pending" | "in_progress" | "completed" | "failed". A tool that failed
+  // renders differently from one that worked, so this is not cosmetic: an
+  // agent thrashing through failing commands looks identical to one making
+  // progress without it.
+  toolStatus?: string;
   // Set when kind is "current_mode_update": the agent switched modes on its
   // own. The UI must reflect this rather than keep showing a stale mode.
   modeId?: string;
+  // Set when kind is "usage_update": how full the agent's context window is
+  // and what the session has cost so far. ACP marks this update UNSTABLE and
+  // adapters may never send it, so everything downstream must treat its
+  // absence as "unknown" and show nothing — never a zero.
+  usage?: { used: number; size: number; cost?: { amount: number; currency: string } };
   raw: SessionUpdate;
 }
 
@@ -138,12 +148,19 @@ function toUpdate(cwd: string, n: SessionNotification): AgentUpdate {
       out.toolCallId = u.toolCallId;
       if (u.title != null) out.toolTitle = u.title;
       if (u.kind != null) out.toolKind = u.kind;
+      if (u.status != null) out.toolStatus = u.status;
       if (u.locations && u.locations.length > 0) {
         out.toolPath = relativizePath(cwd, u.locations[0].path);
       }
       break;
     case "current_mode_update":
       out.modeId = u.currentModeId;
+      break;
+    case "usage_update":
+      if (typeof u.used === "number" && typeof u.size === "number" && u.size > 0) {
+        out.usage = { used: u.used, size: u.size };
+        if (u.cost != null) out.usage.cost = { amount: u.cost.amount, currency: u.cost.currency };
+      }
       break;
   }
   return out;

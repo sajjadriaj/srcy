@@ -149,7 +149,17 @@ function makeAgent(conn: AgentSideConnection): Agent {
           toolCallId: "tc-out",
           title: "Reading outside file",
           kind: "read",
+          status: "failed",
           locations: [{ path: join(dirname(cwd), "outside.txt") }],
+        },
+      });
+      await conn.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: "usage_update",
+          used: 1234,
+          size: 200000,
+          cost: { amount: 0.5, currency: "USD" },
         },
       });
       return { stopReason: "end_turn" };
