@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import React from "react";
@@ -7,10 +8,11 @@ import { render } from "ink-testing-library";
 import { LiveDiff, RepoMap } from "../src/cockpit.js";
 import { splitDiff } from "../src/diff.js";
 import { git } from "../src/git.js";
-import { NarrowChecks, NarrowUsage, activityTitle, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
+import { parseShell, sessionName } from "../src/index.js";
+import { NarrowChecks, NarrowUsage, activityTitle, checkStep, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
 import { repoState } from "../src/repo.js";
 import { cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
-import { parseState } from "../src/transcript.js";
+import { advance, newReader, parseState, parseUsage, stateOf, usageOf } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,8 @@ function user(blocks: unknown[]): string {
   return JSON.stringify({ type: "user", message: { role: "user", content: blocks } });
 }
 const todo = (content: string, status: string): unknown => ({ content, status, activeForm: content });
+const record = (usage: Record<string, number>): string =>
+  JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-opus-5", usage } });
 
 test("the plan on screen is the latest one the agent wrote, not every one it ever wrote", () => {
   const text = [
@@ -379,4 +383,138 @@ test("the budget counts what the fixed sections actually draw", () => {
   assert.equal(usageRows(full), count(<NarrowUsage usage={full} width={30} />));
   // And the map never gets a negative or absurd budget out of a tiny pane.
   assert.ok(mapBudget(6, 5, 4, 3) >= 3);
+});
+
+// ---------------------------------------------------------------------------
+// Reading the transcript without re-reading it
+
+test("folding in an append gives the same answer as parsing the whole file", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ctui-fold-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "s.jsonl");
+
+  const first = [
+    record({ input_tokens: 4, cache_creation_input_tokens: 100, cache_read_input_tokens: 0, output_tokens: 10 }),
+    assistant([{ type: "tool_use", id: "a", name: "TodoWrite", input: { todos: [todo("one", "pending")] } }]),
+    assistant([{ type: "tool_use", id: "t", name: "Edit", input: { file_path: "/r/a.ts" } }]),
+  ].join("\n");
+  await writeFile(path, `${first}\n`);
+
+  const r = newReader(path);
+  await advance(r, path);
+
+  // What the agent writes next, including a result that closes the call the
+  // first chunk left open — the case a tail-only reader gets wrong.
+  const second = [
+    user([{ type: "tool_result", tool_use_id: "t", content: "ok" }]),
+    record({ input_tokens: 2, cache_creation_input_tokens: 50, cache_read_input_tokens: 900, output_tokens: 30 }),
+    assistant([{ type: "tool_use", id: "b", name: "TodoWrite", input: { todos: [todo("one", "completed"), todo("two", "in_progress")] } }]),
+  ].join("\n");
+  await writeFile(path, `${first}\n${second}\n`);
+  const fold = await advance(r, path);
+
+  const whole = await readFile(path, "utf8");
+  assert.deepEqual(stateOf(fold), parseState(whole));
+  assert.deepEqual(usageOf(fold), parseUsage(whole));
+  // And the totals really did accumulate across both chunks.
+  assert.equal(usageOf(fold)?.output, 40);
+  // The Edit the first chunk left open was closed by a result in the second —
+  // the case a reader that only ever looks at the tail gets wrong.
+  assert.notEqual(stateOf(fold).activity?.tool, "Edit");
+});
+
+test("a line still being written is folded in once, when it is finished", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ctui-partial-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "s.jsonl");
+
+  const line = assistant([{ type: "tool_use", id: "a", name: "TodoWrite", input: { todos: [todo("only once", "pending")] } }]);
+  // Caught mid-write, with no trailing newline.
+  await writeFile(path, line.slice(0, 40));
+  const r = newReader(path);
+  assert.deepEqual(stateOf(await advance(r, path)).plan, []);
+
+  await writeFile(path, `${line}\n`);
+  const fold = await advance(r, path);
+  // Parsed exactly once: a reader that dropped the partial tail would lose
+  // it, and one that re-read from the old offset would double it.
+  assert.deepEqual(
+    stateOf(fold).plan.map((e) => e.content),
+    ["only once"],
+  );
+});
+
+test("a replaced or truncated transcript starts over instead of folding onto a stranger", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "ctui-reset-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const a = join(dir, "a.jsonl");
+  const b = join(dir, "b.jsonl");
+  await writeFile(a, `${record({ input_tokens: 0, cache_creation_input_tokens: 5_000, cache_read_input_tokens: 0, output_tokens: 700 })}\n`);
+  const r = newReader(a);
+  assert.equal(usageOf(await advance(r, a))?.output, 700);
+
+  // A new session in the same directory. Its numbers are its own.
+  await writeFile(b, `${record({ input_tokens: 0, cache_creation_input_tokens: 1_000, cache_read_input_tokens: 0, output_tokens: 9 })}\n`);
+  assert.equal(usageOf(await advance(r, b))?.output, 9);
+
+  // And a file that shrank cannot be resumed from an offset past its end.
+  await writeFile(b, `${record({ input_tokens: 0, cache_creation_input_tokens: 7, cache_read_input_tokens: 0, output_tokens: 1 })}\n`);
+  assert.equal(usageOf(await advance(r, b))?.output, 1);
+});
+
+// ---------------------------------------------------------------------------
+// When the checker runs
+
+test("a tree that was already clean still gets checked", () => {
+  // The bug: a clean tree fingerprints to "", so a mark starting at "" reads
+  // as "nothing changed" and the checker never runs at all.
+  const first = checkStep("", null, 0, 1_000, false);
+  assert.equal(first.run, false, "nothing runs on the first sighting");
+  assert.equal(first.quietSince, 1_000, "but the clock starts");
+  assert.equal(checkStep("", first.mark, first.quietSince, 5_000, false).run, true);
+});
+
+test("the checker waits for the tree to stop moving, then runs once", () => {
+  let step = checkStep("a.ts:1:0", null, 0, 0, false);
+  // Still being edited: the clock restarts, nothing runs.
+  step = checkStep("a.ts:2:0", step.mark, step.quietSince, 1_000, false);
+  assert.equal(step.run, false);
+  assert.equal(step.quietSince, 1_000);
+  // Quiet, but not long enough yet.
+  assert.equal(checkStep("a.ts:2:0", step.mark, step.quietSince, 2_000, false).run, false);
+  // Quiet long enough.
+  const ran = checkStep("a.ts:2:0", step.mark, step.quietSince, 9_000, false);
+  assert.equal(ran.run, true);
+  // And not again on the same tree, or the rail would re-run a ten-second
+  // typecheck once a second forever.
+  assert.equal(checkStep("a.ts:2:0", ran.mark, ran.quietSince, 20_000, false).run, false);
+  // Nor while one is already in flight.
+  assert.equal(checkStep("a.ts:2:0", step.mark, step.quietSince, 9_000, true).run, false);
+});
+
+// ---------------------------------------------------------------------------
+// Naming the session, and reading the command line
+
+test("two repos with the same basename get different sessions", () => {
+  // Otherwise `ctui` in ~/side/api re-attaches to the agent working in
+  // ~/work/api: the reader types at an agent editing a repo they are not
+  // looking at, beside a rail describing the other one.
+  assert.notEqual(sessionName("/home/u/work/api"), sessionName("/home/u/side/api"));
+  // Same path, same session — that is what makes re-attaching work at all.
+  assert.equal(sessionName("/home/u/work/api"), sessionName("/home/u/work/api"));
+  // --name still separates two sessions on one repo.
+  assert.notEqual(sessionName("/home/u/work/api"), sessionName("/home/u/work/api", "review"));
+  // tmux reads . and : as target syntax, so neither may appear in a name.
+  assert.doesNotMatch(sessionName("/home/u/my.repo", "a:b"), /[.:]/);
+});
+
+test("a mistyped flag is refused, not ignored", () => {
+  // The failure this prevents: `--agnet codex` silently starting the default
+  // agent, giving a working session driven by the wrong one.
+  assert.throws(() => parseShell(["--agnet", "codex"]), /unknown option/);
+  assert.throws(() => parseShell(["--agent"]), /requires a value/);
+  assert.deepEqual(parseShell([]).agent, ["claude"]);
+  assert.deepEqual(parseShell(["--agent", "codex"]).agent, ["codex"]);
+  assert.deepEqual(parseShell(["--", "claude", "--model", "opus"]).agent, ["claude", "--model", "opus"]);
+  assert.equal(parseShell(["--name", "review"]).name, "review");
 });

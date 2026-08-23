@@ -81,11 +81,49 @@ export function fingerprint(s: RepoState): string {
   return s.files.map((f) => `${f.path}:${f.added}:${f.removed}`).join("|");
 }
 
-function useWatch(cwd: string, withChecks: boolean): Watched {
+// When to run the project's checker. Pure, because the decision has three
+// conditions and one of them already hid a bug: a clean tree fingerprints to
+// the empty string, so a `mark` starting at "" read as "nothing changed" and
+// the checker never ran at all on a repo that was already clean when ctui
+// opened. `mark` is null until the first observation for exactly that reason.
+//
+// The wait exists because an agent mid-edit produces a broken tree on
+// purpose: a rail that goes red between two halves of one edit is noise.
+export interface CheckStep {
+  mark: string;
+  quietSince: number;
+  run: boolean;
+}
+
+export function checkStep(
+  fp: string,
+  mark: string | null,
+  quietSince: number,
+  now: number,
+  busy: boolean,
+): CheckStep {
+  // Still moving: restart the clock, and never run on a tree the agent is
+  // partway through rewriting.
+  if (fp !== mark) return { mark: fp, quietSince: now, run: false };
+  // Already ran for this fingerprint, or a run is in flight.
+  if (quietSince === 0 || busy) return { mark, quietSince, run: false };
+  if (now - quietSince < CHECK_QUIET_MS) return { mark, quietSince, run: false };
+  // Zeroed so the same quiet tree is not checked once a second forever.
+  return { mark, quietSince: 0, run: true };
+}
+
+// `rail` is the pane that shows everything. The dock shows one diff, so it
+// neither runs the project's checker nor opens the transcript — work whose
+// result it would never draw.
+function useWatch(cwd: string, rail: boolean): Watched {
   const [state, setState] = useState<Watched>(EMPTY);
   // Refs, not state: these drive when work happens, and re-rendering because
   // a fingerprint changed would be a render per poll forever.
-  const mark = useRef("");
+  //
+  // null, not "": a clean tree fingerprints to the empty string, so starting
+  // this at "" makes the first tick look like "nothing changed" and the
+  // checker never runs at all on a repo that was already clean.
+  const mark = useRef<string | null>(null);
   const quietSince = useRef(0);
   const checking = useRef(false);
   const problems = useRef<CheckResult | null | undefined>(undefined);
@@ -97,7 +135,7 @@ function useWatch(cwd: string, withChecks: boolean): Watched {
     const tick = async (): Promise<void> => {
       try {
         const repo = await repoState(cwd, problems.current?.problems ?? []);
-        const t = await readTranscript(cwd);
+        const t = rail ? await readTranscript(cwd) : null;
         if (!live) return;
         setState({
           repo,
@@ -107,17 +145,11 @@ function useWatch(cwd: string, withChecks: boolean): Watched {
           checks: problems.current,
         });
 
-        if (withChecks) {
-          const fp = fingerprint(repo);
-          if (fp !== mark.current) {
-            mark.current = fp;
-            quietSince.current = Date.now();
-          } else if (
-            quietSince.current !== 0 &&
-            Date.now() - quietSince.current >= CHECK_QUIET_MS &&
-            !checking.current
-          ) {
-            quietSince.current = 0;
+        if (rail) {
+          const step = checkStep(fingerprint(repo), mark.current, quietSince.current, Date.now(), checking.current);
+          mark.current = step.mark;
+          quietSince.current = step.quietSince;
+          if (step.run) {
             checking.current = true;
             // Deliberately not awaited inside the tick: a typecheck can take
             // ten seconds, and the rail must keep updating while it runs.
@@ -144,7 +176,7 @@ function useWatch(cwd: string, withChecks: boolean): Watched {
       live = false;
       clearTimeout(timer);
     };
-  }, [cwd, withChecks]);
+  }, [cwd, rail]);
 
   return state;
 }

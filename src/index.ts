@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { EventEmitter } from "node:events";
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { relative, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -247,7 +248,13 @@ export function sessionName(repo: string, name?: string): string {
   const base = repo.split("/").filter(Boolean).pop() ?? "repo";
   // tmux treats . and : as target syntax, so they cannot appear in a name.
   const safe = (s: string): string => s.replace(/[.:\s]/g, "-");
-  return name === undefined ? `ctui-${safe(base)}` : `ctui-${safe(base)}-${safe(name)}`;
+  // The basename alone is not the repo: ~/work/api and ~/side/api are both
+  // "api", and re-attaching by name would put the reader in front of an
+  // agent working in the other one — with a rail describing a repo they are
+  // not looking at. The suffix is what makes the name identify the path.
+  const id = createHash("sha1").update(repo).digest("hex").slice(0, 6);
+  const tail = name === undefined ? "" : `-${safe(name)}`;
+  return `ctui-${safe(base)}${tail}-${id}`;
 }
 
 // The agent name IS the command. There is no adapter to pick and no
@@ -270,9 +277,14 @@ export function parseShell(argv: string[]): { agent: string[]; name?: string } {
       // untouched: `ctui -- claude --model opus --resume`.
       agent = argv.slice(i + 1);
       break;
+    } else {
+      // Never ignored: a mistyped `--agnet codex` that silently starts the
+      // default agent gives a working session driven by the wrong one, and
+      // nothing on screen says so.
+      throw new Error(`unknown option ${JSON.stringify(flag!)}`);
     }
   }
-  if (agent.length === 0) throw new Error("--agent requires a command");
+  if (agent.length === 0) throw new Error("no agent command given");
   return { agent, name };
 }
 
