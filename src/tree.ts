@@ -93,11 +93,39 @@ export function window(total: number, cursor: number, height: number): { start: 
   return { start, end: start + height };
 }
 
-// toggle opens a closed directory or closes an open one, returning a new set
-// rather than mutating: the caller holds it in React state.
-export function toggle(open: Set<string>, path: string): Set<string> {
-  const next = new Set(open);
-  if (next.has(path)) next.delete(path);
-  else next.add(path);
-  return next;
+// What the reader has opened and closed by hand, on top of what the work
+// opens by itself.
+//
+// A single "manual overrides everything" set was wrong: touching one
+// directory froze the view, so a change the agent made somewhere else after
+// that stayed hidden behind a closed folder. These are overrides, and
+// everything not overridden still follows the work.
+export interface Manual {
+  opened: Set<string>;
+  closed: Set<string>;
+}
+
+export const NOTHING: Manual = { opened: new Set(), closed: new Set() };
+
+export function openSet(auto: Set<string>, manual: Manual): Set<string> {
+  const open = new Set(auto);
+  for (const p of manual.opened) open.add(p);
+  for (const p of manual.closed) open.delete(p);
+  return open;
+}
+
+// toggle records the override rather than the resulting state, so a
+// directory the reader closed stays closed when the agent edits inside it —
+// and one they opened stays open when it no longer holds a change.
+export function toggle(manual: Manual, path: string, isOpen: boolean): Manual {
+  const opened = new Set(manual.opened);
+  const closed = new Set(manual.closed);
+  if (isOpen) {
+    opened.delete(path);
+    closed.add(path);
+  } else {
+    closed.delete(path);
+    opened.add(path);
+  }
+  return { opened, closed };
 }

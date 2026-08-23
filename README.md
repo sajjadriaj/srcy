@@ -11,7 +11,7 @@ agent's plan, whether the code still builds, how full its context window is,
 and the file being edited as it is edited.
 
 ```
-──  ⟳ Bash Typecheck the wor──┬──  ✳ Claude Code  ──────────────────────────────────────────────────
+──  ⟳ 52s Bash Typecheck th…──┬──  ✳ Claude Code  ──────────────────────────────────────────────────
 REPO                          │> fix the token expiry off-by-one
 ▸  .ctui/                     │
 ▾  src/                       │● Read  src/auth/token.ts
@@ -123,6 +123,12 @@ j / k  ↓ / ↑   move the cursor
 ⏎ or space     open or close a directory; on a file, pin the dock to it
 ```
 
+The cursor holds a file, not a row number — the agent creates and deletes
+files while you are reading, and a row number silently means a different file
+every time the list shifts. Directories you open or close by hand are
+remembered as overrides: everything you have not touched still opens itself
+for a change, so poking one folder never freezes the rest of the view.
+
 The agent keeps every keystroke otherwise — the rail is inert until you move
 the keyboard to it, which is the point.
 
@@ -147,7 +153,9 @@ already scoped to exactly the right thing.
 `typecheck` or `build` npm script. It runs when the diff stops moving, not on
 every keystroke: an agent mid-edit produces a broken tree on purpose, and a
 rail that goes red between two halves of one edit is noise. Nothing is ever
-reported as passing before it has run.
+reported as passing before it has run — and once the code has moved on, the
+verdict says `code moved since` and stops being drawn as current. A stale
+green reads exactly like a fresh one, and only one of them is worth trusting.
 
 `CONTEXT` is how full the window is, how much the agent has written, and how
 much of its last request came from cache. Occupancy is the last request's,
@@ -158,8 +166,12 @@ every turn shows it collapsing, a healthy one sits near 99% after the first
 request. ctui adds nothing to that window; every token in there is the
 agent's. An unmeasured window is left blank rather than drawn empty.
 
-The rail's own border says what the agent is doing right now — the one fact
-that belongs where the eye already is rather than in a row you have to find.
+The rail's own border says what the agent is doing right now, and for how
+long: `⟳ 52s Bash npm test`. That clock is the difference between an agent
+working and an agent wedged, and it is the one thing the agent's own pane
+cannot tell you — a still picture of "running npm test" looks the same at two
+seconds and at four minutes. The age leads the title because tmux cuts a
+border to the pane, so anything at the end is the first thing lost.
 The agents name their own panes, which is why the big border reads
 `✳ Claude Code` or `π` without ctui writing a character of it.
 

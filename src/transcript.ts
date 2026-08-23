@@ -47,6 +47,15 @@ interface Line {
   message?: { usage?: Record<string, unknown> };
 }
 
+// Record timestamps are ISO strings. Undefined rather than a guess when one
+// is missing or unparseable: an elapsed time counted from the wrong epoch is
+// worse than no elapsed time.
+export function when(v: unknown): number | undefined {
+  if (typeof v !== "string") return undefined;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
 function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
@@ -86,6 +95,7 @@ interface Block {
 
 interface Entry {
   isSidechain?: boolean;
+  timestamp?: unknown;
   message?: { content?: unknown };
 }
 
@@ -95,6 +105,11 @@ interface Entry {
 export interface Activity {
   tool: string;
   target: string;
+  // When the call started, from the record's own timestamp. The rail shows
+  // how long it has been running, which is the difference between an agent
+  // working and an agent wedged — and the one thing a still picture of
+  // "running npm test" cannot tell you.
+  since?: number;
 }
 
 export interface State {
@@ -178,6 +193,7 @@ export function foldLine(f: Fold, line: string): void {
   } catch {
     return; // a half-written last line is normal: the agent is still going
   }
+  const at = when(rec.timestamp);
 
   const u = rec.message?.usage;
   if (u !== undefined) {
@@ -211,7 +227,7 @@ export function foldLine(f: Fold, line: string): void {
         }
       }
       if (typeof b.id === "string") {
-        f.open.set(b.id, { tool: typeof b.name === "string" ? b.name : "?", target: targetOf(b.input) });
+        f.open.set(b.id, { tool: typeof b.name === "string" ? b.name : "?", target: targetOf(b.input), since: at });
       }
     } else if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
       f.open.delete(b.tool_use_id);

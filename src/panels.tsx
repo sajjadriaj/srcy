@@ -6,7 +6,7 @@ import { LiveDiff, PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./
 import type { FileDiff } from "./diff.js";
 import { runChecks, type CheckResult } from "./checks.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
-import { openForChanges, rows as treeRows, toggle, window as treeWindow, type Row } from "./tree.js";
+import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { publishSelection, readSelection } from "./tmux.js";
 import { CLAUDE, readSession, type Activity, type Source } from "./transcript.js";
 import { CODEX } from "./codex.js";
@@ -34,6 +34,9 @@ const CHECK_QUIET_MS = 2500;
 // the border format prints. So the border can say which file the dock is
 // showing without ctui drawing a single border character itself.
 function setPaneTitle(title: string): void {
+  // Only to a real terminal. Anywhere else — a pipe, a test — this is an
+  // escape sequence printed into somebody's output as literal text.
+  if (process.stdout.isTTY !== true) return;
   process.stdout.write(`\u001b]2;${title}\u0007`);
 }
 
@@ -41,6 +44,22 @@ function setPaneTitle(title: string): void {
 // and the rail clips its rows to fit. Reading the size once at startup means
 // the first row scrolls off the top the first time anyone drags a window
 // edge, which is exactly when a file list is least useful.
+// Elapsed time has to advance while the transcript sits still — a wedged
+// tool writes nothing, which is exactly when the number matters.
+export function useNow(active: boolean): number {
+  const [now, setNow] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setNow(0);
+      return;
+    }
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+  return now;
+}
+
 export function useSize(): { cols: number; rows: number } {
   const read = (): { cols: number; rows: number } => ({
     cols: process.stdout.columns ?? 80,
@@ -66,6 +85,11 @@ interface Watched {
   usage: Usage | null;
   activity: Activity | null;
   checks: CheckResult | null | undefined;
+  // The tree has moved since that check ran, so its verdict describes code
+  // that no longer exists. A red CHECKS from thirty seconds ago reads
+  // exactly like a red CHECKS from now, and only one of them is worth
+  // interrupting the agent over.
+  stale: boolean;
 }
 
 const EMPTY: Watched = {
@@ -74,6 +98,7 @@ const EMPTY: Watched = {
   usage: null,
   activity: null,
   checks: undefined,
+  stale: false,
 };
 
 // A cheap identity for "has the working tree changed" — path plus churn per
@@ -130,6 +155,8 @@ function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
   const quietSince = useRef(0);
   const checking = useRef(false);
   const problems = useRef<CheckResult | null | undefined>(undefined);
+  // The fingerprint the current result was measured against.
+  const checkedFor = useRef<string | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -140,25 +167,29 @@ function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
         const repo = await repoState(cwd, problems.current?.problems ?? []);
         const t = rail && source !== null ? await readSession(cwd, source) : null;
         if (!live) return;
+        const fp = fingerprint(repo);
         setState({
           repo,
           plan: t?.plan ?? [],
           usage: t?.usage ?? null,
           activity: t?.activity ?? null,
           checks: problems.current,
+          stale: problems.current !== undefined && checkedFor.current !== null && checkedFor.current !== fp,
         });
 
         if (rail) {
-          const step = checkStep(fingerprint(repo), mark.current, quietSince.current, Date.now(), checking.current);
+          const step = checkStep(fp, mark.current, quietSince.current, Date.now(), checking.current);
           mark.current = step.mark;
           quietSince.current = step.quietSince;
           if (step.run) {
             checking.current = true;
             // Deliberately not awaited inside the tick: a typecheck can take
             // ten seconds, and the rail must keep updating while it runs.
+            const ranFor = step.mark;
             void runChecks(cwd, cwd)
               .then((r) => {
                 problems.current = r;
+                checkedFor.current = ranFor;
               })
               .catch(() => {})
               .finally(() => {
@@ -198,18 +229,31 @@ const RAIL_PROBLEMS = 3;
 export function NarrowChecks({
   result,
   width,
+  stale = false,
 }: {
   result: CheckResult | null | undefined;
   width: number;
+  // The code moved since this ran. Said out loud rather than shown as a
+  // current verdict, because acting on a stale pass is the expensive mistake.
+  stale?: boolean;
 }): React.JSX.Element {
   if (result === undefined) return <Text dimColor>{"  not run yet"}</Text>;
   if (result === null) return <Text dimColor>{"  none configured"}</Text>;
-  if (result.ok) return <Text color="green">{`  ✔ ${result.command}`.slice(0, width)}</Text>;
+  const age = stale ? " · code moved since" : "";
+  if (result.ok) {
+    return stale ? (
+      <Text dimColor>{`  ✔ ${result.command}${age}`.slice(0, width)}</Text>
+    ) : (
+      <Text color="green">{`  ✔ ${result.command}`.slice(0, width)}</Text>
+    );
+  }
   const shown = result.problems.slice(0, RAIL_PROBLEMS);
   const files = new Set(result.problems.map((p) => p.path)).size;
   return (
     <Box flexDirection="column">
-      <Text color="red">{`  ✖ ${result.problems.length} in ${files} file${files === 1 ? "" : "s"}`}</Text>
+      <Text color={stale ? undefined : "red"} dimColor={stale}>
+        {`  ✖ ${result.problems.length} in ${files} file${files === 1 ? "" : "s"}${age}`.slice(0, width)}
+      </Text>
       {shown.map((p, i) => (
         // Truncated rather than wrapped: a TypeScript message is longer than
         // this column and wrapping one costs four rows that the next failure
@@ -259,15 +303,31 @@ export function PlanBody({ entries }: { entries: PlanEntry[] }): React.JSX.Eleme
 // belongs where the eye already is rather than in a row it has to find.
 export const TITLE_MAX = 28;
 
-export function activityTitle(a: Activity | null): string {
+// Coarse on purpose. Under ten seconds the decimal is the whole signal —
+// 0.2s is a cache hit, 4.1s is a real call — and past a minute nobody reads
+// the seconds, they read "this has been going for four minutes".
+export function elapsed(ms: number): string {
+  if (ms < 0) return "0s";
+  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)}s`;
+  const m = Math.floor(ms / 60_000);
+  return `${m}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}s`;
+}
+
+export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX): string {
   if (a === null) return " idle ";
   // A path gets its basename — the directory is already on screen in the
   // rail. A command keeps its head: `npm run build` identifies itself in
   // its first words, where a pipeline's tail identifies nothing.
   const looksLikePath = a.target.includes("/") && !a.target.includes(" ");
   const short = looksLikePath ? (a.target.split("/").pop() ?? "") : a.target;
-  const text = `⟳ ${a.tool}${short === "" ? "" : ` ${short}`}`;
-  return ` ${text.length <= TITLE_MAX ? text : `${text.slice(0, TITLE_MAX - 1)}…`} `;
+  // The age leads. tmux truncates a pane border to the pane's width and the
+  // rail is narrow, so anything at the end is the first thing cut — and how
+  // long this has been running is the one part you cannot get by looking at
+  // the agent's own pane.
+  const age = a.since === undefined || now === 0 ? "" : `${elapsed(now - a.since)} `;
+  const body = `⟳ ${age}${a.tool}${short === "" ? "" : ` ${short}`}`;
+  return ` ${body.length <= width ? body : `${body.slice(0, Math.max(1, width - 1))}…`} `;
 }
 
 // How many lines each fixed section will occupy. Exported and used by the
@@ -314,6 +374,22 @@ function useTree(cwd: string): string[] {
   return paths;
 }
 
+// Where the cursor sits, given the row the reader picked.
+//
+// A path, not a row number: the agent adds and removes files while you are
+// reading, and an index silently means a different file every time the list
+// shifts under it. Falling back also covers a picked row that went away — a
+// file the agent deleted, or one hidden when a directory closed — and an
+// untouched cursor, which starts on the session's work rather than on
+// whichever dotfile directory sorts first.
+export function cursorAt(visible: Row[], picked: string | null): number {
+  if (picked !== null) {
+    const found = visible.findIndex((r) => r.path === picked);
+    if (found >= 0) return found;
+  }
+  return Math.max(0, visible.findIndex((r) => r.entry !== undefined));
+}
+
 export function Rail({
   cwd,
   width,
@@ -336,25 +412,22 @@ export function Rail({
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
 
-  // Directories the reader has opened or closed by hand. Null until they
-  // touch one, so until then the view follows the work: everything on the
-  // path to a change is open and nothing else is.
-  const [manual, setManual] = useState<Set<string> | null>(null);
+  // Directories the reader opened or closed by hand, layered over the ones
+  // the work opens by itself.
+  const [manual, setManual] = useState<Manual>(NOTHING);
   const auto = useMemo(() => openForChanges(changed.keys()), [changed]);
-  const open = manual ?? auto;
+  const open = useMemo(() => openSet(auto, manual), [auto, manual]);
 
   const visible = useMemo(() => treeRows(paths, open, changed), [paths, open, changed]);
-  const [cursor, setCursor] = useState(-1);
 
-  // Until the reader moves it, the cursor sits on the first changed file
-  // rather than on row zero — which is whichever dotfile directory sorts
-  // first, and never what anyone opened the rail to look at.
-  const firstChange = visible.findIndex((r) => r.entry !== undefined);
-  const at = cursor >= 0 ? Math.min(cursor, Math.max(0, visible.length - 1)) : Math.max(0, firstChange);
+  const [picked, setPicked] = useState<string | null>(null);
+  const at = cursorAt(visible, picked);
 
+  const now = useNow(s.activity !== null);
   useEffect(() => {
-    setPaneTitle(activityTitle(s.activity));
-  }, [s.activity?.tool, s.activity?.target]);
+    // Sized to the pane, minus the corners and padding tmux draws around it.
+    setPaneTitle(activityTitle(s.activity, now, Math.max(8, width - 6)));
+  }, [s.activity?.tool, s.activity?.target, now, width]);
 
   // tmux only delivers keystrokes to the focused pane, so this is inert
   // until the reader moves the keyboard here — the agent keeps every key
@@ -363,16 +436,20 @@ export function Rail({
     (input, key) => {
       if (visible.length === 0) return;
       const row = visible[at];
-      if (input === "j" || key.downArrow) setCursor(Math.min(at + 1, visible.length - 1));
-      else if (input === "k" || key.upArrow) setCursor(Math.max(at - 1, 0));
+      const go = (i: number): void => setPicked(visible[Math.max(0, Math.min(i, visible.length - 1))]?.path ?? null);
+      if (input === "j" || key.downArrow) go(at + 1);
+      else if (input === "k" || key.upArrow) go(at - 1);
       else if (row !== undefined && (key.return || input === " ")) {
-        if (row.dir) setManual(toggle(open, row.path));
+        if (row.dir) setManual(toggle(manual, row.path, open.has(row.path)));
         // A file the reader picked outranks the file the agent wrote last:
         // they are looking at something on purpose.
         else if (session !== "") publishSelection(session, row.path);
       }
     },
-    { isActive: interactive },
+    // Ink turns on raw mode to read keys, which a pane that is not a
+    // terminal cannot do. Guarded so the rail still renders there — under a
+    // pipe, or in a test — instead of throwing on mount.
+    { isActive: interactive && process.stdin.isTTY === true },
   );
 
   const budget = height === undefined ? undefined : mapBudget(height, s.plan.length, checksRows(s.checks), usageRows(s.usage));
@@ -391,7 +468,7 @@ export function Rail({
       <Rule label="PLAN" width={width} />
       <PlanBody entries={s.plan} />
       <Rule label="CHECKS" width={width} />
-      <NarrowChecks result={s.checks} width={width} />
+      <NarrowChecks result={s.checks} width={width} stale={s.stale} />
       {/* Pushes CONTEXT to the bottom edge, so the gauge is in the same
           place whether the session has touched two files or twenty. A
           number you have to hunt for is a number you stop reading. */}

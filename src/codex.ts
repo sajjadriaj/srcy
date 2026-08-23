@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { Fold, Source } from "./transcript.js";
+import { when, type Fold, type Source } from "./transcript.js";
 
 // Reading Codex's session log.
 //
@@ -140,8 +140,11 @@ function targetOf(payload: Payload): string {
 export function foldLine(f: Fold, line: string): void {
   if (!line.includes('"token_count"') && !line.includes('"call_id"')) return;
   let p: Payload;
+  let at: number | undefined;
   try {
-    p = ((JSON.parse(line) as { payload?: Payload }).payload ?? {}) as Payload;
+    const rec = JSON.parse(line) as { payload?: Payload; timestamp?: unknown };
+    p = (rec.payload ?? {}) as Payload;
+    at = when(rec.timestamp);
   } catch {
     return; // a half-written last line is normal: the agent is still going
   }
@@ -180,7 +183,7 @@ export function foldLine(f: Fold, line: string): void {
         }
       }
     }
-    f.open.set(id, { tool: typeof p.name === "string" ? p.name : "?", target: targetOf(p) });
+    f.open.set(id, { tool: typeof p.name === "string" ? p.name : "?", target: targetOf(p), since: at });
   } else if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
     f.open.delete(id);
   }

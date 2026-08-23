@@ -7,10 +7,11 @@ import React from "react";
 import { render } from "ink-testing-library";
 import { LiveDiff } from "../src/cockpit.js";
 import { splitDiff } from "../src/diff.js";
-import { ancestors, openForChanges, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
+import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
-import { NarrowChecks, NarrowUsage, TreeLine, activityTitle, checkStep, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
+import { projectDir } from "../src/transcript.js";
+import { NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, mapBudget, newest, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
@@ -134,7 +135,7 @@ test("the plan on screen is the latest one the agent wrote, not every one it eve
 test("a tool call is in flight until its result lands, and then it is not", () => {
   const started = assistant([{ type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/r/src/token.ts" } }]);
   const running = parseState(started);
-  assert.deepEqual(running.activity, { tool: "Edit", target: "/r/src/token.ts" });
+  assert.deepEqual(running.activity, { tool: "Edit", target: "/r/src/token.ts", since: undefined });
 
   // The only liveness signal a file can carry: the result the agent writes
   // when the call returns. Without this the rail says "running" forever.
@@ -178,7 +179,7 @@ test("a Bash call reports what it is for, not the head of its pipeline", () => {
       input: { command: 'AGENT="x" bash shot.sh 2>&1 | tail -45', description: "Capture the layout" },
     },
   ]);
-  assert.deepEqual(parseState(text).activity, { tool: "Bash", target: "Capture the layout" });
+  assert.deepEqual(parseState(text).activity, { tool: "Bash", target: "Capture the layout", since: undefined });
 });
 
 test("a half-written last line is not an error — the agent is still writing it", () => {
@@ -561,7 +562,7 @@ test("codex occupancy is the last request's, against the window codex itself rec
 
 test("a codex call is in flight until its output lands", () => {
   const running = cxFold([cxCall("call_1", "shell", { command: ["npm", "test"] })]);
-  assert.deepEqual(stateOf(running).activity, { tool: "shell", target: "npm test" });
+  assert.deepEqual(stateOf(running).activity, { tool: "shell", target: "npm test", since: undefined });
   assert.equal(stateOf(cxFold([cxCall("call_1", "shell", { command: ["npm", "test"] }), cxDone("call_1")])).activity, null);
 });
 
@@ -639,8 +640,24 @@ test("the tree draws directories before files, each alphabetically", () => {
 test("ancestors names every directory on the way down, and toggle flips one", () => {
   assert.deepEqual(ancestors("a/b/c.ts"), ["a", "a/b"]);
   assert.deepEqual(ancestors("top.ts"), []);
-  assert.deepEqual([...toggle(new Set(["a"]), "b")].sort(), ["a", "b"]);
-  assert.deepEqual([...toggle(new Set(["a", "b"]), "a")], ["b"]);
+});
+
+test("opening one directory by hand does not freeze the rest of the view", () => {
+  // The bug: a single "manual wins" set meant that touching one folder
+  // stopped every other folder from opening for a change, so work the agent
+  // did next stayed hidden behind a closed directory.
+  const auto = new Set(["src"]);
+  const opened = toggle(NOTHING, "docs", false);
+  assert.deepEqual([...openSet(auto, opened)].sort(), ["docs", "src"]);
+
+  // A directory closed by hand stays closed even once it holds a change,
+  // and everything else still follows the work.
+  const closed = toggle(NOTHING, "src", true);
+  assert.deepEqual([...openSet(new Set(["src", "lib"]), closed)].sort(), ["lib"]);
+
+  // And the override is remembered as an override: reopening it by hand
+  // does not need the change to go away first.
+  assert.deepEqual([...openSet(new Set(["src"]), toggle(closed, "src", false))].sort(), ["src"]);
 });
 
 test("the viewport keeps the cursor on screen without scrolling past the ends", () => {
@@ -689,4 +706,113 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
       assert.equal(w, 1, `${JSON.stringify(ch)} (U+${ch.codePointAt(0)!.toString(16)}) is not one cell:\n${frame}`);
     }
   }
+});
+
+test("the cursor follows a file, not a row number", () => {
+  // The agent creates files while you are reading. Held as an index, the
+  // cursor points at a different file every time the list shifts under it.
+  const before = treeRows(["src/b.ts", "src/c.ts"], new Set(["src"]));
+  const after = treeRows(["src/a.ts", "src/b.ts", "src/c.ts"], new Set(["src"]));
+  const was = cursorAt(before, "src/b.ts");
+  assert.equal(before[was]?.path, "src/b.ts");
+  assert.equal(after[was]?.path, "src/a.ts", "fixture no longer shifts; the test proves nothing");
+  // Same file, wherever it moved to.
+  assert.equal(after[cursorAt(after, "src/b.ts")]?.path, "src/b.ts");
+
+  // A picked row that vanished — deleted, or hidden by a directory closing —
+  // falls back to the session's work rather than to nothing.
+  const changed = new Map([["src/c.ts", { path: "src/c.ts", touch: "wrote" as const, added: 1, removed: 0, problems: 0 }]]);
+  const withChange = treeRows(["src/b.ts", "src/c.ts"], new Set(["src"]), changed);
+  assert.equal(withChange[cursorAt(withChange, "src/gone.ts")]?.path, "src/c.ts");
+  // And an untouched cursor starts on the work, not on row zero.
+  assert.equal(withChange[cursorAt(withChange, null)]?.path, "src/c.ts");
+  // With nothing changed and nothing picked, the top is the only answer.
+  assert.equal(cursorAt(treeRows(["a.ts"], new Set()), null), 0);
+});
+
+test("elapsed time is coarse where coarse is what gets read", () => {
+  assert.equal(elapsed(180), "0.2s");
+  assert.equal(elapsed(4100), "4.1s");
+  assert.equal(elapsed(12_400), "12s");
+  assert.equal(elapsed(63_000), "1m03s");
+  assert.equal(elapsed(605_000), "10m05s");
+  // A clock that has not started must not render a negative age.
+  assert.equal(elapsed(-5000), "0s");
+});
+
+test("the border says how long the current call has been running", () => {
+  // A still picture of "running npm test" cannot tell you whether the agent
+  // is working or wedged. The clock is what does.
+  const a = { tool: "Bash", target: "npm test", since: 1_000 };
+  assert.match(activityTitle(a, 48_000), /⟳ 47s Bash npm test/);
+  // Without a clock reading, or without a start time, the title is just the
+  // call — never a made-up duration.
+  assert.doesNotMatch(activityTitle(a, 0), /s\s*$/);
+  assert.doesNotMatch(activityTitle({ tool: "Bash", target: "x" }, 48_000), /47/);
+  // The age survives truncation of a long target, at every width tmux might
+  // hand a narrow rail — it is the part you cannot get by looking at the
+  // agent's own pane, so it must never be what gets cut.
+  for (const w of [10, 16, 24, 40]) {
+    assert.match(activityTitle({ tool: "Bash", target: "y".repeat(200), since: 0 }, 90_000, w), /1m30s/, `width ${w}`);
+  }
+});
+
+test("the rail draws the project, the plan and the gauge from what is on disk", async (t) => {
+  // The one test that runs the rail end to end: a real repo, a real
+  // transcript in the place the reader's agent would write it, and the
+  // panel's own polling. Every other rail test checks a piece.
+  const repo = await newRepo(t);
+  await mkdir(join(repo, "src", "auth"), { recursive: true });
+  await writeFile(join(repo, "src/auth/token.ts"), "a\n");
+  await writeFile(join(repo, "docs.md"), "unrelated\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-m", "base");
+  await writeFile(join(repo, "src/auth/token.ts"), "a\nb\n");
+
+  const dir = projectDir(repo);
+  await mkdir(dir, { recursive: true });
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(
+    join(dir, "s.jsonl"),
+    [
+      record({ input_tokens: 2, cache_creation_input_tokens: 600, cache_read_input_tokens: 94_000, output_tokens: 1_200 }),
+      assistant([{ type: "tool_use", id: "p", name: "TodoWrite", input: { todos: [todo("fix the expiry", "in_progress")] } }]),
+      "",
+    ].join("\n"),
+  );
+
+  const { lastFrame, unmount } = render(<Rail cwd={repo} width={34} interactive={false} source={CLAUDE} />);
+  t.after(() => unmount());
+  await new Promise((r) => setTimeout(r, 900));
+  const frame = lastFrame() ?? "";
+
+  // The tree, opened to the work and closed elsewhere.
+  assert.match(frame, /src\//, frame);
+  assert.match(frame, /auth\//, frame);
+  assert.match(frame, /token\.ts\s+\+1 -0/, frame);
+  // The plan and the gauge, read from the transcript.
+  assert.match(frame, /fix the expiry/, frame);
+  assert.match(frame, /CONTEXT/, frame);
+  assert.match(frame, /94\.6k|95k/, frame);
+  // And nothing wrapped past the pane it was given.
+  for (const line of frame.split("\n")) {
+    assert.ok(line.length <= 34, `rail row overflows: ${JSON.stringify(line)}`);
+  }
+});
+
+test("a check whose code has already moved says so instead of reading as current", () => {
+  // Acting on a stale pass is the expensive mistake: a green line from
+  // thirty seconds ago looks exactly like a green line from now.
+  const failing = { ok: false, command: "npm run typecheck", tail: "",
+    problems: [{ path: "src/a.ts", line: 1, message: "boom" }] };
+  const fresh = render(<NarrowChecks result={failing} width={40} />).lastFrame() ?? "";
+  const stale = render(<NarrowChecks result={failing} width={40} stale />).lastFrame() ?? "";
+  assert.doesNotMatch(fresh, /moved/);
+  assert.match(stale, /moved since/);
+  // A stale pass must not keep claiming the build is green.
+  const passing = { ...failing, ok: true, problems: [] };
+  assert.match(render(<NarrowChecks result={passing} width={40} stale />).lastFrame() ?? "", /moved since/);
+  assert.doesNotMatch(render(<NarrowChecks result={passing} width={40} />).lastFrame() ?? "", /moved/);
+  // Staleness is not a fourth state to confuse with the other three.
+  assert.match(render(<NarrowChecks result={undefined} width={40} stale />).lastFrame() ?? "", /not run yet/);
 });

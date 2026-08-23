@@ -68,8 +68,15 @@ const AGENT_SCRIPT = [
 const record = (usage: Record<string, number>): string =>
   JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-opus-5", usage } });
 
-const call = (id: string, name: string, input: unknown): string =>
-  JSON.stringify({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] } });
+const call = (id: string, name: string, input: unknown, agoMs = 0): string =>
+  JSON.stringify({
+    type: "assistant",
+    // The rail counts from this, so the in-flight call is dated relative to
+    // when the preview runs — otherwise the frame shows a call that started
+    // whenever this file was last edited.
+    timestamp: new Date(Date.now() - agoMs).toISOString(),
+    message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
+  });
 
 const result = (id: string): string =>
   JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
@@ -125,7 +132,7 @@ async function main(): Promise<void> {
         record({ input_tokens: 2, cache_creation_input_tokens: 1_200, cache_read_input_tokens: 103_598, output_tokens: 11_300 }),
         // Left open on purpose: an unanswered call is what the rail's border
         // reads as "running", which is the state worth photographing.
-        call("t2", "Bash", { command: "npm run typecheck", description: "Typecheck the worktree" }),
+        call("t2", "Bash", { command: "npm run typecheck", description: "Typecheck the worktree" }, 47_000),
         // Trailing newline, because the reader deliberately holds an
         // unterminated final line back as one the agent is still writing.
         "",
