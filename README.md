@@ -64,7 +64,7 @@ The session screen is a cockpit, not a scrolling log:
 ││                            │ │  14 +   renew() { this.renewals++ }                             ││
 ││                            │ │  15   }                                                         ││
 │╰────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────╯│
-│CONTEXT ▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯  52%  105k/200k  $0.41                                                   │
+│CONTEXT ▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯  52%  105k/200k  out 12k  cache 99%                                      │
 │  [tab] repo map  [r] review  [ctrl-p] open any file                                              │
 │>                                                                                                 │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
@@ -98,10 +98,21 @@ two cells under some terminal settings, which would tear a fixed-width box.
 The density bar is braille (`⣀⣤⣶⣿`) for the same reason — the eighth-block
 ramp `▁▂▃…█` is ambiguous where braille is not.
 
-`CONTEXT` is how full the agent's window is, and what the session has cost.
-It appears only if the agent reports it — ACP's usage update is optional and
-several adapters never send one. An unmeasured window is left blank rather
-than drawn empty.
+`CONTEXT` is how full the agent's window is, how much the agent has written,
+and how much of its last request came from cache. ACP has no field for the
+last two — its usage update carries `used`, `size` and an optional cost, and
+the default adapter never sends even that — so the numbers are read from the
+transcript Claude Code writes as it works. They update *during* a turn, not
+after it: "is this about to fill the window" has no useful answer that arrives
+once the turn is over.
+
+`cache` is the bloat reading. A session re-sending its whole context every
+turn shows it collapsing; a healthy one sits near 99% once past the first
+request. ctui itself adds nothing to that window — it sends your prompt text
+and `mcpServers: []`, so every token in there belongs to the agent. If an
+adapter does report its own usage, that number wins and keeps the row, since
+it is the window the agent is actually managing. An unmeasured window is left
+blank rather than drawn empty.
 
 `tab` moves the keyboard between the two panes — `AGENT ▸` and `REPO ▸`
 say which one has it. In the map, `j`/`k` walk the cursor and `⏎`

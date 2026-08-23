@@ -28,6 +28,7 @@ import {
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { filterFiles, listFiles } from "./files.js";
 import { lineOrigins, type LineOrigin } from "./provenance.js";
+import { transcriptUsage } from "./usage.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
 // How many transcript entries the cockpit's centre column keeps on screen.
@@ -439,6 +440,14 @@ export function App({
   // What the agent says it has spent. Null until an adapter sends a usage
   // update — and many never will, so null must render as nothing.
   const [usage, setUsage] = useState<Usage | null>(null);
+  // Whether that update ever arrived. The agent's own number is the better
+  // one — it is the window the agent is actually managing — so the local
+  // transcript is a fallback that stops the moment the agent speaks up, and
+  // never overwrites what it said.
+  const agentReportedUsage = useRef(false);
+  // When this run started, so a transcript left behind by an earlier session
+  // in the same directory is not mistaken for this one's.
+  const startedAt = useRef(Date.now());
   const [input, setInput] = useState("");
   const [permission, setPermission] = useState<{ req: PermissionRequest; respond: (id: string | null) => void } | null>(
     null,
@@ -550,6 +559,18 @@ export function App({
     return () => clearInterval(id);
   }, [running]);
 
+  // The transcript grows while the turn does, so the gauge moves during one
+  // rather than only between them — which is when the reader wants it. "Is
+  // this turn about to fill the window" has no useful answer that arrives
+  // after the turn is over. Slower than the clock because this one reads a
+  // file off disk, and a two-second-old token count reads the same as a
+  // live one.
+  useEffect(() => {
+    if (!running) return;
+    const id = setInterval(() => void readLocalUsage(), 2000);
+    return () => clearInterval(id);
+  }, [running]);
+
   function append(entry: TranscriptEntry): void {
     setTranscript((prev) => {
       const last = prev[prev.length - 1];
@@ -653,7 +674,10 @@ export function App({
           setPlan(planFrom(u.raw));
           break;
         case "usage_update":
-          if (u.usage) setUsage(u.usage);
+          if (u.usage) {
+            agentReportedUsage.current = true;
+            setUsage(u.usage);
+          }
           break;
         case "current_mode_update":
           if (u.modeId != null) setMode(u.modeId);
@@ -1187,6 +1211,7 @@ export function App({
       // halfway through a turn reports failures the agent was already on
       // its way to fixing, which trains the reader to ignore the pane.
       void runProjectChecks();
+      void readLocalUsage();
     }
   }
 
@@ -1256,6 +1281,21 @@ export function App({
       // display-only; see above
     } finally {
       setChecksRunning(false);
+    }
+  }
+
+  // Reads the token counts out of Claude Code's own session transcript, for
+  // the agents that never send a usage_update — which is all of them today,
+  // including the default one. Display-only, like the checks above: a
+  // missing or unreadable transcript leaves the gauge exactly as it was,
+  // which for an unmeasured session is blank.
+  async function readLocalUsage(): Promise<void> {
+    if (agentReportedUsage.current) return;
+    try {
+      const local = await transcriptUsage(worktree.path, startedAt.current);
+      if (local !== null) setUsage(local);
+    } catch {
+      // display-only; see above
     }
   }
 

@@ -8,7 +8,7 @@
 // the worktree are fakes — the layout, the panes and the wiring are the
 // ones that ship.
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import React from "react";
@@ -16,6 +16,7 @@ import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
 import { git, type Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
+import { projectDir } from "../src/usage.js";
 
 const DIFF = [
   "diff --git a/src/auth/token.ts b/src/auth/token.ts",
@@ -143,6 +144,21 @@ const { lastFrame, stdin } = render(
 
 const up = (u: Record<string, unknown>): boolean => bridge.emit("update", { raw: u, ...u });
 
+// The gauge's real source. claude-code-acp never sends a usage_update, so
+// faking one here would paint a row no default session ever shows; this is
+// the file Claude Code writes as it works, in the place it writes it.
+const transcript = projectDir(repo);
+await mkdir(transcript, { recursive: true });
+const record = (usage: Record<string, number>): string =>
+  JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-opus-5", usage } });
+await writeFile(
+  join(transcript, "s1.jsonl"),
+  [
+    record({ input_tokens: 4, cache_creation_input_tokens: 18_400, cache_read_input_tokens: 0, output_tokens: 923 }),
+    record({ input_tokens: 2, cache_creation_input_tokens: 1_200, cache_read_input_tokens: 103_598, output_tokens: 11_300 }),
+  ].join("\n"),
+);
+
 await settle(50);
 stdin.write("fix the token expiry off-by-one");
 await settle(50);
@@ -172,8 +188,6 @@ up({ kind: "tool_call", toolCallId: "3", toolKind: "edit", toolTitle: "Write", t
 up({ kind: "tool_call", toolCallId: "4", toolKind: "edit", toolTitle: "Write", toolPath: "src/auth/session.ts" });
 up({ kind: "tool_call_update", toolCallId: "3", toolStatus: "completed" });
 up({ kind: "tool_call_update", toolCallId: "4", toolStatus: "completed" });
-up({ kind: "usage_update", usage: { used: 104_800, size: 200_000, cost: { amount: 0.41, currency: "USD" } } });
-
 // A command that fails, and one that is still going when we paint: the two
 // states the transcript has to tell apart at a glance.
 up({ kind: "tool_call", toolCallId: "5", toolKind: "execute", toolTitle: "Bash", toolPath: "npm test" });
@@ -216,4 +230,5 @@ process.stdout.write(
     "",
   ].join("\n"),
 );
+await rm(transcript, { recursive: true, force: true });
 process.exit(0);

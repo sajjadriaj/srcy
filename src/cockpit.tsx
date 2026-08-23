@@ -581,6 +581,13 @@ export interface Usage {
   used: number;
   size: number;
   cost?: { amount: number; currency: string };
+  // Only the local transcript can supply these two: ACP's usage_update has
+  // no field for either, so they are absent whenever the numbers came from
+  // the agent. output is everything the agent has written this session;
+  // cached is the share of the last request that was served from cache,
+  // which is what says whether a session is re-sending the world each turn.
+  output?: number;
+  cached?: number;
 }
 
 // Above 80% of the window, a compaction is close enough that it changes what
@@ -595,13 +602,22 @@ export function UsageBar({ usage }: { usage: Usage | null }): React.JSX.Element 
   const frac = usage.used / usage.size;
   const pct = Math.round(frac * 100);
   const cost = usage.cost ? `  ${money(usage.cost.amount, usage.cost.currency)}` : "";
+  const out = usage.output === undefined ? "" : `  out ${tokens(usage.output)}`;
+  // Rendered plain, in the row's own colour. A cache share is only low in
+  // two situations — the session's first request, where it is always zero
+  // and means nothing, and a session re-sending its whole context, where it
+  // means a great deal — and nothing here can yet tell those apart. A red
+  // number on every session's first turn would teach the reader to ignore it.
+  // ponytail: colour it once there is a rule that fires on the second case
+  // and not the first.
+  const cached = usage.cached === undefined ? "" : `  cache ${Math.round(usage.cached * 100)}%`;
   // Colour by pressure rather than one flat dim: the gauge is the only
   // widget read at a glance, and rendering it in the least visible colour
   // the terminal has defeats the point of drawing a bar at all.
   const color = frac >= CONTEXT_WARN ? "red" : frac >= 0.6 ? "yellow" : "green";
   return (
     <Text color={color}>
-      {`CONTEXT ${gauge(usage.used, usage.size)} ${String(pct).padStart(3)}%  ${tokens(usage.used)}/${tokens(usage.size)}${cost}`}
+      {`CONTEXT ${gauge(usage.used, usage.size)} ${String(pct).padStart(3)}%  ${tokens(usage.used)}/${tokens(usage.size)}${cost}${out}${cached}`}
     </Text>
   );
 }
