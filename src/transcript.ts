@@ -63,46 +63,6 @@ export function parseUsage(text: string): Usage | null {
   return usageOf(foldAll(text));
 }
 
-// transcriptUsage finds the transcript for a session running in `cwd` and
-// reads its current totals. `since` is when this ctui run started: an older
-// transcript in the same directory belongs to some earlier session, and
-// reporting its totals would put a number on screen about work the reader
-// never started.
-//
-// Returns null for every failure — no directory, no transcript, unreadable
-// file — because the gauge's null state already means "not measured", and
-// that is the honest answer in all of those cases.
-// ponytail: re-reads the whole file each turn. A ctui session gets a fresh
-// transcript, so it stays small; track a byte offset if a long session ever
-// makes this show up.
-export async function transcriptUsage(cwd: string, since: number, dir = projectDir(cwd)): Promise<Usage | null> {
-  let names: string[];
-  try {
-    names = await readdir(dir);
-  } catch {
-    return null;
-  }
-  let newest: { path: string; at: number } | null = null;
-  for (const name of names) {
-    if (!name.endsWith(".jsonl")) continue;
-    const path = join(dir, name);
-    try {
-      const at = (await stat(path)).mtimeMs;
-      if (at < since - STALE_SLACK_MS) continue;
-      if (newest === null || at > newest.at) newest = { path, at };
-    } catch {
-      continue;
-    }
-  }
-  if (newest === null) return null;
-  try {
-    return parseUsage(await readFile(newest.path, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // The rest of the transcript: what the agent is doing, and what it plans to do.
 //
 // These come from the same file as the token counts, and for the same reason.

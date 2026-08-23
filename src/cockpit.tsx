@@ -418,45 +418,11 @@ export function planFrom(raw: unknown): PlanEntry[] {
   return out;
 }
 
-export interface OutlineEntry {
-  func: string; // enclosing function, from git's own xfuncname
-  added: number;
-  removed: number;
-}
 
 // The name shown for hunks git could not attribute to any enclosing
 // function — imports, module constants, a header comment.
 export const TOP_LEVEL = "(top level)";
 
-// outline answers "which functions did this touch", which is the question a
-// diff cannot answer on its own: a reader scrolling +40/-12 across four
-// hunks has no idea whether that is one function reworked or four grazed.
-//
-// Names come from git's `@@ ... @@ <func>` headers, which git computes with
-// xfuncname — no parser, no language configuration, and correct wherever
-// git's own diff headers are.
-//
-// ponytail: xfuncname is a per-language regex, so it names the enclosing
-// *declaration*, not a full symbol path — a nested closure reports its
-// outer function. Upgrade to tree-sitter if that ambiguity starts costing
-// real review time.
-export function outline(f: FileDiff): OutlineEntry[] {
-  const byFunc = new Map<string, OutlineEntry>();
-  for (const hunk of f.hunks) {
-    const name = hunk.func.trim() === "" ? TOP_LEVEL : hunk.func.trim();
-    const stats = hunkStats(hunk.body);
-    const existing = byFunc.get(name);
-    if (existing) {
-      existing.added += stats.added;
-      existing.removed += stats.removed;
-    } else {
-      byFunc.set(name, { func: name, added: stats.added, removed: stats.removed });
-    }
-  }
-  // Insertion order: functions appear as they appear in the file, which is
-  // the order the reviewer will meet them scrolling through it.
-  return [...byFunc.values()];
-}
 
 // Braille, not the eighth-blocks ramp: every braille pattern is Neutral
 // (see MARK) where ▁▂▃…█ are Ambiguous, and mixing a Neutral empty bucket
@@ -465,112 +431,17 @@ export function outline(f: FileDiff): OutlineEntry[] {
 // which four buckets of height say as well as eight.
 const BLOCKS = " ⣀⣤⣶⣿";
 
-// densityBar is the minimap: whereabouts in the file the edits landed. One
-// scattered change across a 900-line file and one concentrated rewrite of
-// forty lines both read as "+40" in a diff stat and mean very different
-// things to whoever has to maintain the result.
-//
-// Bars are scaled to the file's own busiest bucket, not to an absolute
-// count: the question is where the changes are relative to each other, and
-// an absolute scale renders every small edit as a flat line.
-export function densityBar(changed: Iterable<number>, totalLines: number, width: number): string {
-  if (totalLines <= 0 || width <= 0) return "";
-  const buckets = new Array<number>(width).fill(0);
-  for (const line of changed) {
-    if (line < 1 || line > totalLines) continue;
-    // line-1 so line 1 lands in bucket 0; min() keeps the last line of the
-    // file out of a bucket that does not exist.
-    const idx = Math.min(width - 1, Math.floor(((line - 1) / totalLines) * width));
-    buckets[idx]!++;
-  }
-  const peak = Math.max(...buckets);
-  if (peak === 0) return "";
-  return buckets
-    .map((count) => {
-      if (count === 0) return BLOCKS[0]!;
-      // At least one visible block for any bucket that has anything in it:
-      // a change that renders as blank is a change the reader cannot see.
-      const level = Math.max(1, Math.round((count / peak) * (BLOCKS.length - 1)));
-      return BLOCKS[level]!;
-    })
-    .join("");
-}
 
-// Outline is the review pane's header: what changed, by function, with the
-// minimap beside it.
-export function Outline({
-  entries,
-  bar,
-}: {
-  entries: OutlineEntry[];
-  bar: string;
-}): React.JSX.Element | null {
-  if (entries.length === 0) return null;
-  return (
-    <Box flexDirection="column">
-      <Box>
-        <Text dimColor>OUTLINE</Text>
-        {bar !== "" && <Text dimColor>{`  ${bar}`}</Text>}
-      </Box>
-      {entries.map((entry, i) => (
-        <Text key={i} color={entry.func === TOP_LEVEL ? undefined : "green"} dimColor={entry.func === TOP_LEVEL}>
-          {`  ${entry.func.padEnd(OUTLINE_WIDTH)} +${entry.added} -${entry.removed}`}
-        </Text>
-      ))}
-    </Box>
-  );
-}
 
 // Column the outline's counts line up in, as NAME_WIDTH does for the map.
 const OUTLINE_WIDTH = 34;
 
-// FilePicker is ctrl-P: open anything in the tree, not only what the agent
-// touched. "What does the caller look like" is the question review raises
-// most often, and until now it was the one question the pane could not
-// answer.
-export function FilePicker({
-  query,
-  matches,
-  index,
-  total,
-}: {
-  query: string;
-  matches: string[];
-  index: number;
-  total: number;
-}): React.JSX.Element {
-  return (
-    <Box flexDirection="column">
-      <Text dimColor>{`OPEN  ${total} files`}</Text>
-      {matches.length === 0 ? (
-        <Text dimColor>{query === "" ? "  (no files)" : "  no match"}</Text>
-      ) : (
-        matches.map((path, i) => (
-          <Text key={path} inverse={i === index}>
-            {`  ${path}`}
-          </Text>
-        ))
-      )}
-    </Box>
-  );
-}
 
 // A tool that takes this long is worth noticing on the way past. Anything
 // under it renders dim; anything over it renders plain, so scanning the
 // transcript answers "where did the two minutes go" without reading it.
 export const SLOW_MS = 10_000;
 
-// dur formats an elapsed time for a cockpit rather than a log: sub-ten-second
-// work keeps a decimal because the difference between 0.2s and 4s is the
-// difference between a cache hit and a real call, and anything past a minute
-// drops to m/s because by then the seconds no longer matter.
-export function dur(ms: number): string {
-  if (ms < 0) return "0.0s";
-  if (ms < 10_000) return `${(ms / 1000).toFixed(1)}s`;
-  const s = Math.round(ms / 1000);
-  if (s < 60) return `${s}s`;
-  return `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
-}
 
 const GAUGE_WIDTH = 16;
 
@@ -602,14 +473,6 @@ export function tokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-// money renders a cost the agent reported. The currency is whatever the
-// adapter said it was — never assumed to be dollars.
-export function money(amount: number, currency: string): string {
-  const symbol = currency === "USD" ? "$" : `${currency} `;
-  // Two decimals is what a cost is read at; a session still under a cent
-  // gets a third so it doesn't render as free.
-  return `${symbol}${amount < 0.1 ? amount.toFixed(3) : amount.toFixed(2)}`;
-}
 
 export interface Usage {
   used: number;
@@ -628,30 +491,3 @@ export interface Usage {
 // a reader should do next — finish the thought, or start a fresh session.
 const CONTEXT_WARN = 0.8;
 
-// The context gauge. Renders nothing at all when the adapter never sent a
-// usage update: a window we cannot measure must not be drawn as an empty
-// one, which would read as "plenty of room left".
-export function UsageBar({ usage }: { usage: Usage | null }): React.JSX.Element | null {
-  if (usage === null) return null;
-  const frac = usage.used / usage.size;
-  const pct = Math.round(frac * 100);
-  const cost = usage.cost ? `  ${money(usage.cost.amount, usage.cost.currency)}` : "";
-  const out = usage.output === undefined ? "" : `  out ${tokens(usage.output)}`;
-  // Rendered plain, in the row's own colour. A cache share is only low in
-  // two situations — the session's first request, where it is always zero
-  // and means nothing, and a session re-sending its whole context, where it
-  // means a great deal — and nothing here can yet tell those apart. A red
-  // number on every session's first turn would teach the reader to ignore it.
-  // ponytail: colour it once there is a rule that fires on the second case
-  // and not the first.
-  const cached = usage.cached === undefined ? "" : `  cache ${Math.round(usage.cached * 100)}%`;
-  // Colour by pressure rather than one flat dim: the gauge is the only
-  // widget read at a glance, and rendering it in the least visible colour
-  // the terminal has defeats the point of drawing a bar at all.
-  const color = frac >= CONTEXT_WARN ? "red" : frac >= 0.6 ? "yellow" : "green";
-  return (
-    <Text color={color}>
-      {`CONTEXT ${gauge(usage.used, usage.size)} ${String(pct).padStart(3)}%  ${tokens(usage.used)}/${tokens(usage.size)}${cost}${out}${cached}`}
-    </Text>
-  );
-}

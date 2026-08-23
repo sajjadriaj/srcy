@@ -2,21 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import {
-  buildTree,
-  ChecksPane,
-  densityBar,
-  diffStats,
-  hunkLines,
-  LiveDiff,
-  mapEntries,
-  PlanBar,
-  outline,
-  Outline,
-  planFrom,
-  RepoMap,
-  TOP_LEVEL,
-} from "../src/cockpit.js";
+import { buildTree, ChecksPane, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap,  } from "../src/cockpit.js";
 import { splitDiff, type FileDiff } from "../src/diff.js";
 
 // A real two-file diff, the shape splitDiff actually produces — writing the
@@ -260,76 +246,3 @@ test("ChecksPane says it is running rather than showing a stale verdict", () => 
   assert.doesNotMatch(frame, /✔ passing/);
 });
 
-test("outline groups hunks by their enclosing function", () => {
-  const file: FileDiff = {
-    path: "src/a.ts",
-    header: "",
-    binary: false,
-    hunks: [
-      { header: "@@ -1,2 +1,3 @@ function verify(", body: "+one\n someContext\n", func: "function verify(", newStart: 1, newCount: 3 },
-      { header: "@@ -40,2 +41,2 @@ function verify(", body: "-old\n+new\n", func: "function verify(", newStart: 41, newCount: 2 },
-      { header: "@@ -80,1 +81,2 @@ class Session {", body: "+added\n", func: "class Session {", newStart: 81, newCount: 2 },
-    ],
-  };
-  assert.deepEqual(outline(file), [
-    // Two hunks in one function sum, rather than reading as two separate
-    // things the reviewer has to hold in their head.
-    { func: "function verify(", added: 2, removed: 1 },
-    { func: "class Session {", added: 1, removed: 0 },
-  ]);
-});
-
-test("outline names hunks git could not attribute", () => {
-  const file: FileDiff = {
-    path: "src/a.ts",
-    header: "",
-    binary: false,
-    hunks: [{ header: "@@ -1,1 +1,2 @@", body: '+import x from "x"\n', func: "", newStart: 1, newCount: 2 }],
-  };
-  assert.deepEqual(outline(file), [{ func: TOP_LEVEL, added: 1, removed: 0 }]);
-});
-
-test("densityBar puts the blocks where the changes are", () => {
-  // Everything in the last tenth of a 100-line file.
-  const bar = densityBar([95, 96, 97], 100, 10);
-  assert.equal(bar.length, 10);
-  assert.equal(bar.slice(0, 9), " ".repeat(9));
-  assert.notEqual(bar[9], " ");
-});
-
-test("densityBar shows a lone change rather than rounding it away", () => {
-  // One changed line against a peak of twenty would round to zero on a
-  // linear scale, and a change that renders as blank is one the reader
-  // cannot see.
-  const busy = Array.from({ length: 20 }, (_, i) => i + 1);
-  const bar = densityBar([...busy, 90], 100, 10);
-  assert.notEqual(bar[8], " ");
-});
-
-test("densityBar is empty when there is nothing to draw", () => {
-  assert.equal(densityBar([], 100, 10), "");
-  assert.equal(densityBar([5], 0, 10), "");
-  assert.equal(densityBar([5], 100, 0), "");
-  // A line number past the end of the file is dropped, not clamped into
-  // the last bucket where it would claim a change that isn't there.
-  assert.equal(densityBar([500], 100, 10), "");
-});
-
-test("densityBar puts the file's last line inside the bar", () => {
-  const bar = densityBar([100], 100, 10);
-  assert.equal(bar.length, 10);
-  assert.notEqual(bar[9], " ");
-});
-
-test("Outline renders nothing when nothing changed", () => {
-  assert.equal(render(<Outline entries={[]} bar="" />).lastFrame(), "");
-});
-
-test("Outline shows each function with its counts and the minimap", () => {
-  const frame =
-    render(
-      <Outline entries={[{ func: "verify()", added: 2, removed: 1 }]} bar="▁▁█▁" />,
-    ).lastFrame() ?? "";
-  assert.match(frame, /OUTLINE.*▁▁█▁/);
-  assert.match(frame, /verify\(\).*\+2 -1/);
-});

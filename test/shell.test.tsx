@@ -11,7 +11,7 @@ import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { NarrowChecks, NarrowUsage, activityTitle, checkStep, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
 import { repoState } from "../src/repo.js";
-import { cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
+import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
 import { advance, newReader, parseState, parseUsage, stateOf, usageOf } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
 
@@ -56,7 +56,7 @@ test("quitting the agent ends the session, and only the agent does", () => {
   // tmux's pane-exited hook accepts `set-hook` and then never fires (3.4),
   // so teardown rides on the agent's own command line instead.
   const start = steps.find((s) => s[0] === "new-session")!;
-  assert.match(start.at(-1)!, /'claude';\s*tmux kill-session -t 'ctui-x'/);
+  assert.match(start.at(-1)!, /'claude';\s*tmux -L ctui kill-session -t 'ctui-x'/);
   // And only the agent's: a panel crashing must not take the session down
   // with an agent mid-turn.
   for (const split of steps.filter((s) => s[0] === "split-window")) {
@@ -517,4 +517,27 @@ test("a mistyped flag is refused, not ignored", () => {
   assert.deepEqual(parseShell(["--agent", "codex"]).agent, ["codex"]);
   assert.deepEqual(parseShell(["--", "claude", "--model", "opus"]).agent, ["claude", "--model", "opus"]);
   assert.equal(parseShell(["--name", "review"]).name, "review");
+});
+
+test("the layout turns on what the agents in the pane ask their terminal for", () => {
+  // Claude Code wants focus-events, pi wants extended-keys for shift+enter.
+  // Both are server-wide options, which is the whole reason ctui runs its own
+  // tmux server: setting them on the reader's would reach into every other
+  // session they have open and stay changed after ctui exits.
+  const opts = new Map(
+    plan(LAYOUT)
+      .filter((s) => s[0] === "set-option")
+      .map((s) => [s[3]!, s[4]!]),
+  );
+  assert.equal(opts.get("focus-events"), "on");
+  assert.equal(opts.get("extended-keys"), "on");
+});
+
+test("every teardown the agent's shell runs reaches ctui's own server", () => {
+  // A bare `tmux kill-session` from inside the pane talks to the default
+  // server, where this session does not exist — so nothing is torn down and
+  // the panels outlive the agent again.
+  const start = plan(LAYOUT).find((s) => s[0] === "new-session")!;
+  assert.match(start.at(-1)!, new RegExp(`${TMUX} kill-session`));
+  assert.equal(TMUX.includes("-L"), true);
 });

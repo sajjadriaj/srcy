@@ -15,7 +15,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { build } from "../src/tmux.js";
+import { SOCKET, build } from "../src/tmux.js";
 import { projectDir } from "../src/transcript.js";
 
 const SESSION = "ctui-preview";
@@ -28,8 +28,12 @@ const sh = (cmd: string, args: string[], cwd?: string): void => {
   const r = spawnSync(cmd, args, { cwd, encoding: "utf8" });
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")}\n${r.stderr ?? ""}`);
 };
-const tmux = (args: string[]): string => spawnSync("tmux", args, { encoding: "utf8" }).stdout?.trim() ?? "";
-const quiet = (args: string[]): void => void spawnSync("tmux", args, { stdio: "ignore" });
+// The camera is an ordinary tmux session on the default server; the layout
+// being photographed lives on ctui's own socket. Keeping the two straight is
+// the whole reason these are separate helpers.
+const cam = (args: string[]): string => spawnSync("tmux", args, { encoding: "utf8" }).stdout?.trim() ?? "";
+const camQuiet = (args: string[]): void => void spawnSync("tmux", args, { stdio: "ignore" });
+const ctuiQuiet = (args: string[]): void => void spawnSync("tmux", ["-L", SOCKET, ...args], { stdio: "ignore" });
 
 const BEFORE = [
   "export function verify(t: string) {",
@@ -128,7 +132,7 @@ async function main(): Promise<void> {
     const self = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tsx = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 
-    quiet(["kill-session", "-t", SESSION]);
+    ctuiQuiet(["kill-session", "-t", SESSION]);
     build(
       {
         session: SESSION,
@@ -145,26 +149,26 @@ async function main(): Promise<void> {
     // Photograph it from inside a second session sized exactly, so the pane
     // borders tmux draws are in the picture too. `env -u TMUX` is what lets
     // one tmux attach to another on the same server.
-    quiet(["kill-session", "-t", CAMERA]);
+    camQuiet(["kill-session", "-t", CAMERA]);
     sh("tmux", ["new-session", "-d", "-s", CAMERA, "-x", String(COLS), "-y", String(ROWS),
-      `env -u TMUX tmux attach -t ${SESSION}`]);
-    quiet(["set-option", "-t", CAMERA, "status", "off"]);
+      `env -u TMUX tmux -L ${SOCKET} attach -t ${SESSION}`]);
+    camQuiet(["set-option", "-t", CAMERA, "status", "off"]);
     // tmux's default `window-size latest` sizes every window to whichever
     // client on the server most recently did anything — so -x/-y at creation
     // is only a hint, and a preview would come out the size of whatever
     // terminal the user happens to have open elsewhere. Both sessions are
     // pinned so the frame is the size that was asked for. The real ctui
     // session leaves this alone: there, tracking the terminal is correct.
-    for (const s of [CAMERA, SESSION]) {
-      quiet(["set-option", "-t", s, "window-size", "manual"]);
-      quiet(["resize-window", "-t", s, "-x", String(COLS), "-y", String(ROWS)]);
-    }
+    camQuiet(["set-option", "-t", CAMERA, "window-size", "manual"]);
+    camQuiet(["resize-window", "-t", CAMERA, "-x", String(COLS), "-y", String(ROWS)]);
+    ctuiQuiet(["set-option", "-t", SESSION, "window-size", "manual"]);
+    ctuiQuiet(["resize-window", "-t", SESSION, "-x", String(COLS), "-y", String(ROWS)]);
     // Long enough for a poll, a debounce and a check run to have happened.
     await new Promise((r) => setTimeout(r, 6000));
-    console.log(tmux(["capture-pane", "-p", "-t", CAMERA]).replace(/\s+$/gm, ""));
+    console.log(cam(["capture-pane", "-p", "-t", CAMERA]).replace(/\s+$/gm, ""));
   } finally {
-    quiet(["kill-session", "-t", CAMERA]);
-    quiet(["kill-session", "-t", SESSION]);
+    camQuiet(["kill-session", "-t", CAMERA]);
+    ctuiQuiet(["kill-session", "-t", SESSION]);
     await rm(repo, { recursive: true, force: true });
     await rm(transcript, { recursive: true, force: true });
   }

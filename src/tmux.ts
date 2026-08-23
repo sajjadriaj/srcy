@@ -1,5 +1,23 @@
 import { spawn, spawnSync } from "node:child_process";
 
+// ctui runs its own tmux server, on its own socket.
+//
+// Two reasons, and the second is why it is not optional. Agents want terminal
+// features their host has to turn on — Claude Code asks for focus-events, pi
+// asks for extended-keys so shift+enter reaches it — and both of those are
+// server-wide in tmux. Setting them on a shared server would reach into every
+// other session the reader has open and stay changed after ctui exits.
+// On our own socket they are ours to set.
+//
+// The reader's ~/.tmux.conf still loads, so their prefix and keybinds are
+// unchanged. The cost is that ctui sessions do not appear in a bare
+// `tmux ls` — that is `tmux -L ctui ls`.
+export const SOCKET = "ctui";
+
+// The literal `tmux` a shell inside a pane must type to reach this server:
+// the teardown line sequenced onto the agent's command runs there, not here.
+export const TMUX = `tmux -L ${SOCKET}`;
+
 // ctui does not run the agent. tmux does.
 //
 // The agent in the big pane is the real `claude` / `codex` / `opencode`
@@ -59,7 +77,7 @@ export function plan(l: Layout): string[][] {
     // repo nobody was working on. `;` rather than `&&` — an agent that exits
     // non-zero has still exited.
     ["new-session", "-d", "-s", S, "-c", l.repo, "-x", String(l.cols), "-y", String(l.rows), "-P", "-F", "#{pane_id}",
-      `${cmdline(l.agent)}; tmux kill-session -t ${shq(S)}`],
+      `${cmdline(l.agent)}; ${TMUX} kill-session -t ${shq(S)}`],
     // Dock first, while the agent pane is still the whole window — splitting
     // it now is what makes the dock span the full width. Doing this after the
     // rail split would wedge the dock under the agent only.
@@ -74,6 +92,12 @@ export function plan(l: Layout): string[][] {
     // nothing this layout doesn't already say.
     ["set-option", "-t", S, "status", "off"],
     ["set-option", "-t", S, "mouse", "on"],
+    // What the agents in the pane ask their terminal for. Claude Code wants
+    // focus-events so it knows when you looked away; pi wants extended-keys
+    // so shift+enter arrives as shift+enter instead of a bare newline. Both
+    // are server-wide, which is exactly why ctui has a server of its own.
+    ["set-option", "-t", S, "focus-events", "on"],
+    ["set-option", "-t", S, "extended-keys", "on"],
     // The agent pane keeps the keyboard: it is the thing you type into.
     // Panels are read-only, and taking focus from the prompt to render a
     // file list would be the tail wagging the dog.
@@ -85,7 +109,7 @@ export function plan(l: Layout): string[][] {
 }
 
 function tmux(args: string[]): { status: number; out: string } {
-  const r = spawnSync("tmux", args, { encoding: "utf8" });
+  const r = spawnSync("tmux", ["-L", SOCKET, ...args], { encoding: "utf8" });
   return { status: r.status ?? 1, out: (r.stdout ?? "").trim() };
 }
 
@@ -94,7 +118,7 @@ export function have(bin: string): boolean {
 }
 
 export function sessionExists(name: string): boolean {
-  return spawnSync("tmux", ["has-session", "-t", `=${name}`], { stdio: "ignore" }).status === 0;
+  return spawnSync("tmux", ["-L", SOCKET, "has-session", "-t", `=${name}`], { stdio: "ignore" }).status === 0;
 }
 
 // build runs the plan and names the panes, leaving the session detached.
@@ -175,8 +199,12 @@ export function launch(l: Layout, titles: Record<string, string>): void {
 // Inside an existing tmux, attach-session refuses to nest. switch-client is
 // the same gesture from in there, and leaves the outer session alone.
 export function attach(session: string): void {
-  const inside = process.env.TMUX !== undefined && process.env.TMUX !== "";
-  const args = inside ? ["switch-client", "-t", session] : ["attach-session", "-t", session];
-  const r = spawn("tmux", args, { stdio: "inherit" });
+  // TMUX is dropped rather than switch-client'd: ctui's server is not the one
+  // the reader may already be sitting in, and tmux refuses to attach at all
+  // while that variable says it is already inside a session. Removing it is
+  // the standard way to nest, and leaves their outer session alone.
+  const env = { ...process.env };
+  delete env.TMUX;
+  const r = spawn("tmux", ["-L", SOCKET, "attach-session", "-t", session], { stdio: "inherit", env });
   r.on("exit", (code) => process.exit(code ?? 0));
 }
