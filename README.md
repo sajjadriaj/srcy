@@ -1,15 +1,72 @@
 # ctui
 
-A review gate between a coding agent and your codebase.
+An IDE around the coding agent you already use.
 
-The agent works in a throwaway git worktree. Nothing reaches your tree until
-you have read the diff and the agent has said, in its own words, what could
-break. What you accept is committed with your prompt as the subject, so
-`ctui why <file>:<line>` still answers "why does this exist" months later.
+The agent is not wrapped, driven, or reimplemented. `claude`, `codex`,
+`opencode`, `pi`, `aider` — whichever binary you name runs in the big pane
+exactly as it runs in a bare terminal, with its own slash commands, its own
+keybinds, its own scrollback and its own mouse selection. ctui is the panes
+around it: what changed, what it plans to do, whether the code still builds,
+and how full its context window is.
+
+```
+──  ⟳ Bash Typecheck the wor──┬──  ✳ Claude Code  ──────────────────────────────────────────────────
+REPO                          │> fix the token expiry off-by-one
+   src/                       │
+     auth/                    │● Read  src/auth/token.ts
+▪      expiry.test.ts +1 -0   │● Read  src/auth/session.ts
+✖      session.ts    ✖1       │
+▪      token.ts      +1 -1    │The expiry check is exclusive: a token that expires on this exact
+▪ wrote  ✖ failing            │millisecond is still accepted. Changing < to <= in verify().
+─ PLAN ───────────────────────│
+  ✔ find the expiry comparison│● Edit  src/auth/token.ts
+  ✔ fix the off-by-one        │● Edit  src/auth/session.ts
+  ▸ add a regression test     │● Bash  npm run typecheck
+─ CHECKS ─────────────────────│
+  ✖ 1 in 1 file               │❯
+  session.ts:3                │
+                              │
+                              │
+─ CONTEXT ────────────────────│
+▮▮▮▮▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯▯▯  52%   │
+  105k/200k                   │
+  out 12k  cache 99%          │
+──  DIFF  src/auth/session.ts  ─────────────────────────────────────────────────────────────────────
+src/auth/session.ts:1
+   1   export class Session {
+   2 +   private renewals = 0
+   3 +   renew() { this.renewals++ }
+   4   }
+```
+
+Left rail, top to bottom: every file this session touched with how much of
+each changed, the agent's own plan as a live checklist, what your project's
+checker says, and how full the window is. Bottom dock: the file being edited,
+as it is edited. Big pane: the agent, untouched.
+
+## How it works
+
+tmux hosts the layout. That is the whole trick, and it is why the agent stays
+native: tmux already solves the pty, the resize protocol, scrollback, mouse
+and copy-paste, and it solves them better than a reimplementation inside this
+repo would. The agent gets a real terminal because it *is* in a real terminal.
+
+The panels never speak to the agent. There is no protocol to intercept, no
+adapter to install, and nothing that has to be supported per-agent. They read:
+
+- **git**, for what changed and by how much — `REPO` and `DIFF`
+- **your project's own checker**, for whether it still builds — `CHECKS`
+- **Claude Code's session transcript**, for the plan and the token counts —
+  `PLAN` and `CONTEXT`
+
+The first two work for every agent, and for a person with an editor open. The
+last is Claude-Code-specific: under `--agent codex` the rail keeps `REPO`,
+`CHECKS` and `DIFF`, and leaves `PLAN` and `CONTEXT` blank rather than
+guessing at them.
 
 ## Install
 
-Needs Node 20+, git, and the `claude` CLI already logged in.
+Needs Node 20+, git, tmux, and whichever agent CLI you use, already logged in.
 
 ```bash
 git clone <this repo> && cd code-tui
@@ -17,182 +74,93 @@ npm install          # builds on install
 npm link             # puts `ctui` on your PATH
 ```
 
-`npm link` is reversible with `npm unlink -g ctui`. To skip it, run
-`node /path/to/code-tui/dist/src/index.js` instead of `ctui`.
-
-The agent adapter is fetched by `npx` on first run — nothing to install.
-`--agent claude` (the default) uses `@zed-industries/claude-code-acp`,
-`--agent codex` uses `@zed-industries/codex-acp`. Both speak ACP, so nothing
-above the transport changes; an adapter that does not report a `default` mode
-shows up as a degraded mode in the header rather than being assumed safe.
+`npm link` is reversible with `npm unlink -g ctui`.
 
 ## Use
 
 Run inside any git repo:
 
 ```bash
-ctui                       # a session: prompt, watch, review, accept
-ctui --name auth           # name the session (worktree + branch suffix)
-ctui --agent codex         # drive Codex instead of Claude Code
-ctui --explain             # read-only: ask questions, nothing is kept
-ctui why src/tts.ts:18     # which prompt produced this line, and what the
-                           # agent warned about at the time
+ctui                          # claude, in this repo
+ctui --agent codex            # or codex, opencode, pi, aider — the name is the command
+ctui -- claude --model opus   # everything after -- is the agent's own argv
+ctui --name review            # a second session on the same repo
+ctui why src/tts.ts:18        # which commit produced this line, and its message
 ```
 
-The session screen is a cockpit, not a scrolling log:
+Running `ctui` again from the same repo re-attaches to the session already
+working there instead of starting a second one beside it. `--name` is for
+wanting two on purpose. Quitting the agent ends the session; the panels do
+not keep it alive with nothing to watch.
+
+Keys are tmux's, because it is tmux:
 
 ```
-╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
-│ctui/auth · default mode · running 2.0s · worktree discarded on exit                              │
-│╭────────────────────────────╮ ╭─────────────────────────────────────────────────────────────────╮│
-││REPO                        │ │AGENT ▸                                                          ││
-││   src/                     │ │> fix the token expiry off-by-one                                ││
-││     auth/                  │ │▸ Read  src/auth/session.ts                                      ││
-││▪      session.ts    +2 -0  │ │▸ Read  src/auth/token.ts                                        ││
-││▪      token.ts      +1 -1  │ │expiry check is exclusive; a token expiring this exact ms is     ││
-││▪ wrote                     │ │still accepted                                                   ││
-││                            │ │Off-by-one in verify(): `<` lets a token that expired this       ││
-││PLAN                        │ │millisecond through. Changing to `<=`.                           ││
-││  ✔ find the expiry         │ │▸ Edit  src/auth/token.ts                                        ││
-││    comparison              │ │▸ Edit  src/auth/session.ts                                      ││
-││  ▸ fix the off-by-one      │ │✖ Execute  npm test  1.4s                                        ││
-││  ☐ add a regression test   │ │⟳ Execute  npm run typecheck  0.6s                               ││
-││                            │ │                                                                 ││
-││                            │ │src/auth/session.ts:12                                           ││
-││                            │ │  12   export class Session {                                    ││
-││                            │ │  13 +   private renewals = 0                                    ││
-││                            │ │  14 +   renew() { this.renewals++ }                             ││
-││                            │ │  15   }                                                         ││
-│╰────────────────────────────╯ ╰─────────────────────────────────────────────────────────────────╯│
-│CONTEXT ▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯  52%  105k/200k  out 12k  cache 99%                                      │
-│  [tab] repo map  [r] review  [ctrl-p] open any file                                              │
-│>                                                                                                 │
-╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+ctrl-b o    next pane          ctrl-b z    zoom a pane to full screen
+ctrl-b ←→   pane by direction  ctrl-b d    detach (the agent keeps working)
+mouse       click to focus, drag a border to resize, scroll to scroll back
 ```
 
-Left: every file this session has touched, nested as it sits in the repo,
-with how much of each changed, and under it the agent's own plan as a live
-checklist. Right: what the agent is saying, and under that the file it is
-editing *as it edits it*. Bottom: whether the code still builds, then how
-full the context window is — in that order, because one of them is
-something to act on and the other is a number.
+Detaching leaves the agent running. `ctui` from the same repo picks it back up.
 
-Both panes carry a label and a border, and the one with the keyboard is the
-one lit up. The prompt and the key hints live inside the frame too: a line
-you type into that renders below the closing border reads as shell output
-that happens to be nearby.
+## What the panels say
 
-Every tool line carries its own clock. `⟳` is still running, `▸` finished,
-`✖` failed — an agent thrashing through failing commands should not look
-like one making progress. Anything slower than ten seconds stops rendering
-dim, so scanning the column answers "where did the two minutes go".
+`REPO` is every file with changes against `HEAD`, staged or not — an agent
+that ran `git add` has not thereby shown you anything. New files count their
+whole length, because `+0 -0` on a file that did not exist an hour ago reads
+as "nothing happened here". A file whose checks fail turns red and spends its
+count column on the failure count rather than the churn: `+1 -1` is not what
+you act on when the file no longer compiles. A file that fails checks appears
+even if the agent never touched it — the question is what is broken, and
+git's answer to what moved does not contain it.
 
-Colour is an encoding, not decoration. Grey is background you may skip:
-reads, thoughts, anything that finished fast. Yellow is a write — the agent
-changed a file of yours. Red failed. Cyan is happening right now, which is
-also why the top edge turns cyan for the length of a turn. Your own prompts
-are the only bold lines in the transcript, so a turn boundary is findable
-without reading. Every glyph on screen is one cell wide in every terminal:
-the obvious markers (`●` `○` `▶` `█`) are East-Asian *ambiguous* and render
-two cells under some terminal settings, which would tear a fixed-width box.
-The density bar is braille (`⣀⣤⣶⣿`) for the same reason — the eighth-block
-ramp `▁▂▃…█` is ambiguous where braille is not.
+When the pane is too short for the tree, the nesting is what gets cut and the
+list goes flat, worst first. A truncated tree spends its few rows on
+directory headers and hides the files under them.
 
-`CONTEXT` is how full the agent's window is, how much the agent has written,
-and how much of its last request came from cache. ACP has no field for the
-last two — its usage update carries `used`, `size` and an optional cost, and
-the default adapter never sends even that — so the numbers are read from the
-transcript Claude Code writes as it works. They update *during* a turn, not
-after it: "is this about to fill the window" has no useful answer that arrives
-once the turn is over.
+`CHECKS` runs `.ctui/check` (executable) if you have one, otherwise your
+`typecheck` or `build` npm script. It runs when the diff stops moving, not on
+every keystroke: an agent mid-edit produces a broken tree on purpose, and a
+rail that goes red between two halves of one edit is noise. Nothing is ever
+reported as passing before it has run.
 
-`cache` is the bloat reading. A session re-sending its whole context every
-turn shows it collapsing; a healthy one sits near 99% once past the first
-request. ctui itself adds nothing to that window — it sends your prompt text
-and `mcpServers: []`, so every token in there belongs to the agent. If an
-adapter does report its own usage, that number wins and keeps the row, since
-it is the window the agent is actually managing. An unmeasured window is left
-blank rather than drawn empty.
+`CONTEXT` is how full the window is, how much the agent has written, and how
+much of its last request came from cache. The last two have no field in any
+agent protocol — they are read from the transcript Claude Code writes as it
+works. `cache` is the bloat reading: a session re-sending its whole context
+every turn shows it collapsing, a healthy one sits near 99% after the first
+request. ctui adds nothing to that window; every token in there is the
+agent's. An unmeasured window is left blank rather than drawn empty.
 
-`tab` moves the keyboard between the two panes — `AGENT ▸` and `REPO ▸`
-say which one has it. In the map, `j`/`k` walk the cursor and `⏎`
-opens that file — positioned on what this session changed, with the
-provenance gutter saying where every other line came from. A map row you can
-watch turn red but cannot open is a picture, not an instrument.
+The rail's own border says what the agent is doing right now — the one fact
+that belongs where the eye already is rather than in a row you have to find.
+Claude Code names its pane too, which is why the big pane's border reads
+`✳ Claude Code` without ctui writing a character of it.
 
+Colour is an encoding. Green wrote, red failed, dim is background you may
+skip. Every glyph is one cell wide in every terminal: the obvious markers
+(`●` `○` `▶` `█`) are East-Asian *ambiguous* and render two cells under some
+terminal settings, which tears a fixed-width column.
+
+`npm run preview` builds this layout over a fixture repo and prints a
+photograph of it — no agent, no waiting on a turn. `PREVIEW_COLS` and
+`PREVIEW_ROWS` set the size. That is how to iterate on the panes.
+
+## The review gate
+
+`ctui gate` is the earlier design, still here: ctui drives the agent over ACP
+in a throwaway worktree, and nothing reaches your tree until you have read the
+diff and the agent has said what could break. What you accept is committed
+with your prompt as the subject, which is what `ctui why` reads back.
+
+It is no longer the default, because an agent driven over a protocol loses its
+slash commands, its keybinds and its scrollback — the opposite of what the
+panels exist to preserve. `npm run preview:gate` paints its frames.
+
+```bash
+ctui gate                  # prompt, watch, review, accept
+ctui gate --explain        # read-only: ask questions, nothing is kept
 ```
-╭────────────────────────────╮
-│REPO ▸                      │
-│   src/                     │
-│     auth/                  │
-│▪      session.ts    +2 -0  │
-│✖►     token.ts      ✖1     │
-│▪ wrote  ✖ failing          │
-│                            │
-│PLAN                        │
-│  ✔ find the expiry         │
-│    comparison              │
-│  ▸ fix the off-by-one      │
-│  ☐ add a regression test   │
-╰────────────────────────────╯
-```
-
-A red row carries how many failures are in it, not how much it changed —
-`+1 -1` is not what you do something about when the file no longer builds.
-Walk the cursor onto that row and `CHECKS` becomes that file's failures:
-
-```
-│✖►     token.ts      ✖1     │
-╰────────────────────────────╯
-│CHECKS  src/auth/token.ts  ✖ 1
-│  ✖ line 41  error TS2532: Object is possibly undefined.
-```
-
-That is also the way out of `…and N more` — the project-wide list is capped,
-and moving the cursor is how you reach what it cut. Hand the keyboard back to
-the prompt and the pane goes back to the whole project.
-
-`npm run preview` paints these frames from fixture data — no agent, no git —
-which is how to iterate on the layout without waiting on a real turn. It
-prints four: mid-turn, finished, the map focused, and the file that opens
-from it.
-
-Keys:
-
-```
-tab      focus repo map / back  space   select hunk / file
-j/k      move / scroll          a       accept selected
-⏎        open the file          A       accept unexplained
-r        open review            esc     interrupt the agent
-ctrl-p   open any file
-```
-
-Inside review, `tab` switches the patch and file views instead.
-
-### What review shows you
-
-```
-OUTLINE   ⣀⣀⣤⣿⣀⣀⣀⣀⣀⣀⣀⣀          which functions changed, and where in
-  verify()          +1 -1       the file the edits landed
-  Session.renew()   +2 -0
-
-── 2026-06-02  a1b2c3d4  add token renewal      the prompt that produced
-      41   this.renewals++                     each run of lines, while
-── this session                                you read the file
-+     42   if (exp <= now())
-```
-
-`CHECKS` runs the project's own checker in the worktree after each turn.
-`.ctui/check` (executable) if you have one, otherwise your `typecheck` or
-`build` npm script. Failing files turn red in the repo map and carry their
-failure count, and the count sits directly above the accept key — accept is
-informed, never blocked.
-
-`a` stays disabled until the agent has answered what changed, what could
-break, and what it did not test. `A` accepts anyway and records
-`Ctui-Prompt: <none>` — an unexplained change is allowed, never invisible.
-
-## What it does to your repo
 
 - worktrees under `.ctui/wt/<name>`, branches `ctui/<name>`, both removed on exit
 - `.ctui/` added to `.git/info/exclude`, not your `.gitignore`
@@ -200,14 +168,12 @@ break, and what it did not test. `A` accepts anyway and records
   trailers; nothing is pushed
 - accepting into a file you have modified is refused, not merged
 
-If `.ctui/postcreate` exists and is executable, it runs after a worktree is
-created — that is where `npm install` for the fresh worktree goes.
-
 ## Development
 
 ```bash
 npm test        # node:test, no framework
 npm run typecheck
+npm run preview
 ```
 
 Design: `docs/superpowers/specs/2026-08-19-code-tui-design.md`

@@ -132,11 +132,40 @@ const NAME_WIDTH = 17;
 export function RepoMap({
   entries,
   cursor = -1,
+  width,
+  maxRows,
 }: {
   entries: MapEntry[];
   cursor?: number;
+  // Clip rows to this many columns. Unset means don't clip, which is right
+  // for the wide cockpit. In a narrow rail a row that overflows wraps to
+  // column zero and shifts every row under it, so there the path gets cut
+  // and the counts stay: which file it is, is already half-answered by the
+  // directory header above it.
+  width?: number;
+  // Total lines this pane may occupy, label and legend included. The file
+  // list is the elastic part of a rail — the plan, the failures and the
+  // context gauge each have a fixed job, and a list long enough to push
+  // them off the bottom has traded the answer for the inventory.
+  maxRows?: number;
 }): React.JSX.Element {
-  const rows = buildTree(entries);
+  const clip = (s: string): string => (width === undefined || s.length <= width ? s : `${s.slice(0, width - 1)}…`);
+  const tree = buildTree(entries);
+  // Three lines are spoken for: the label, the legend, and the "…and N more"
+  // this truncation itself needs.
+  const room = maxRows === undefined ? tree.length : Math.max(0, maxRows - 3);
+  // A truncated tree spends its few rows on directory headers and hides the
+  // files under them — the nesting is what got cut, so the rows that survive
+  // name no file at all. Below the fit, drop the nesting instead and give
+  // every row to a file, worst first: broken before merely large.
+  const flat = room < tree.length;
+  const rows: TreeRow[] = flat
+    ? [...entries]
+        .sort((a, b) => b.problems - a.problems || b.added + b.removed - (a.added + a.removed))
+        .slice(0, room)
+        .map((entry) => ({ name: entry.path, depth: 0, dir: false, entry }))
+    : tree;
+  const hidden = entries.length - rows.filter((r) => !r.dir).length;
   let fileIndex = -1;
   return (
     <Box flexDirection="column">
@@ -148,7 +177,7 @@ export function RepoMap({
           const indent = "  ".repeat(row.depth);
           if (row.dir) {
             return (
-              <Text key={i} dimColor>{`   ${indent}${row.name}`}</Text>
+              <Text key={i} dimColor>{clip(`   ${indent}${row.name}`)}</Text>
             );
           }
           fileIndex++;
@@ -177,7 +206,7 @@ export function RepoMap({
           if (entry.problems > 0) {
             return (
               <Text key={i} color="red" inverse={at}>
-                {`✖${caret} ${stat}`}
+                {clip(`✖${caret} ${stat}`)}
               </Text>
             );
           }
@@ -188,7 +217,7 @@ export function RepoMap({
               dimColor={entry.touch === "read" && !at}
               inverse={at}
             >
-              {`${MARK[entry.touch]}${caret} ${stat}`}
+              {clip(`${MARK[entry.touch]}${caret} ${stat}`)}
             </Text>
           );
         })
@@ -196,7 +225,8 @@ export function RepoMap({
       {/* A legend for markers that aren't on screen teaches the reader to
           look for something that isn't there — "✖ failing" while nothing is
           failing reads as a warning. */}
-      <Text dimColor>{legend(entries)}</Text>
+      {hidden > 0 ? <Text dimColor>{clip(`  …and ${hidden} more`)}</Text> : null}
+      <Text dimColor>{clip(legend(entries))}</Text>
     </Box>
   );
 }
@@ -251,9 +281,13 @@ export function LiveDiff({ file, maxLines = 12 }: { file?: FileDiff; maxLines?: 
     return <Text dimColor>{`${file.path} — metadata only`}</Text>;
   }
   const lines = hunkLines(hunk.body, hunk.newStart).slice(-maxLines);
+  // The heading names the first line actually on screen, not the hunk's
+  // start: with a hunk longer than the pane, slicing the tail leaves a
+  // heading pointing a hundred lines above anything the reader can see.
+  const first = lines.find((l) => l.num.trim() !== "")?.num.trim() ?? String(hunk.newStart);
   return (
     <Box flexDirection="column">
-      <Text dimColor>{`${file.path}:${hunk.newStart}`}</Text>
+      <Text dimColor>{`${file.path}:${first}`}</Text>
       {lines.map((line, i) => (
         <Text key={i} color={line.sign === "+" ? "green" : line.sign === "-" ? "red" : undefined}>
           {`${line.num.padStart(4)} ${line.sign} ${line.text}`}

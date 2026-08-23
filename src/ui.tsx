@@ -28,7 +28,7 @@ import {
 import { changedLines, patchPaths, Review, splitDiff, type FileDiff, type Hunk } from "./diff.js";
 import { filterFiles, listFiles } from "./files.js";
 import { lineOrigins, type LineOrigin } from "./provenance.js";
-import { transcriptUsage } from "./usage.js";
+import { transcriptUsage } from "./transcript.js";
 import { applyPatch, commitAccepted, dirtyPaths, type Worktree } from "./git.js";
 
 // How many transcript entries the cockpit's centre column keeps on screen.

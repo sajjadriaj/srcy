@@ -9,7 +9,7 @@ import type { AgentSession } from "../src/acp.js";
 import { UsageBar } from "../src/cockpit.js";
 import type { Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
-import { parseUsage, projectDir, transcriptUsage } from "../src/usage.js";
+import { parseUsage, projectDir, transcriptUsage } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
 
 // One assistant record, shaped the way Claude Code writes them.

@@ -8,6 +8,8 @@ import { render } from "ink";
 import { git, createWorktree, why, type Provenance } from "./git.js";
 import { startSession, type AgentSession, type AgentUpdate, type PermissionRequest } from "./acp.js";
 import { App } from "./ui.js";
+import { renderPanel } from "./panels.js";
+import { attach, have, launch, resize, sessionExists } from "./tmux.js";
 
 // installSignalCleanup makes closing the terminal (SIGHUP) or a plain
 // SIGTERM close the agent's own process group instead of orphaning it.
@@ -139,12 +141,13 @@ async function whyCmd(target: string | undefined): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  const argv = process.argv.slice(2);
-  if (argv[0] === "why") {
-    await whyCmd(argv[1]);
-    return;
-  }
+// The original review-gate cockpit: ctui drives the agent over ACP in a
+// worktree and renders its own chat. Kept reachable as `ctui gate` because
+// the accept/provenance flow has no equivalent yet in the panel layout, but
+// it is no longer the default — an agent puppeted over a protocol loses its
+// slash commands, its keybinds and its scrollback, which is the opposite of
+// what the panels exist to preserve.
+async function gateCmd(argv: string[]): Promise<void> {
   let name: string, explain: boolean, agentArgv: string[];
   try {
     ({ name, explain, agentArgv } = parseArgs(argv));
@@ -218,6 +221,110 @@ async function main(): Promise<void> {
     return;
   }
   await worktree.destroy();
+}
+
+// repoRoot resolves the repository ctui is being run from, or explains why
+// there isn't one. Every command needs it and none of them work without it.
+async function repoRoot(): Promise<string> {
+  try {
+    return await git(process.cwd(), "rev-parse", "--show-toplevel");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`ctui must be run inside a git repository. (${detail})`);
+    process.exit(1);
+  }
+}
+
+function die(msg: string): never {
+  console.error(`ctui: ${msg}`);
+  process.exit(1);
+}
+
+// One tmux session per repo, so running ctui again from the same directory
+// re-attaches to the agent already working there instead of starting a
+// second one beside it. `--name` is for wanting two on purpose.
+export function sessionName(repo: string, name?: string): string {
+  const base = repo.split("/").filter(Boolean).pop() ?? "repo";
+  // tmux treats . and : as target syntax, so they cannot appear in a name.
+  const safe = (s: string): string => s.replace(/[.:\s]/g, "-");
+  return name === undefined ? `ctui-${safe(base)}` : `ctui-${safe(base)}-${safe(name)}`;
+}
+
+// The agent name IS the command. There is no adapter to pick and no
+// protocol to support — whatever binary you name runs in the big pane
+// exactly as it would in a bare terminal — so a whitelist here would only
+// be a list of programs ctui had heard of.
+export function parseShell(argv: string[]): { agent: string[]; name?: string } {
+  let agent = ["claude"];
+  let name: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const flag = argv[i];
+    if (flag === "--agent" || flag === "--name") {
+      const value = argv[i + 1];
+      if (value === undefined) throw new Error(`${flag} requires a value`);
+      if (flag === "--name") name = value;
+      else agent = value.split(" ").filter((s) => s !== "");
+      i++;
+    } else if (flag === "--") {
+      // Everything after -- is the agent's own argv, passed through
+      // untouched: `ctui -- claude --model opus --resume`.
+      agent = argv.slice(i + 1);
+      break;
+    }
+  }
+  if (agent.length === 0) throw new Error("--agent requires a command");
+  return { agent, name };
+}
+
+async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv[0] === "why") return whyCmd(argv[1]);
+  // Run by tmux inside a pane, never by a person.
+  if (argv[0] === "panel") return renderPanel(argv[1] ?? "rail");
+  // Run by tmux's window-resized hook, never by a person.
+  if (argv[0] === "resize") return resize(argv[1] ?? "");
+  if (argv[0] === "gate") return gateCmd(argv.slice(1));
+
+  let agent: string[], name: string | undefined;
+  try {
+    ({ agent, name } = parseShell(argv));
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
+
+  const repo = await repoRoot();
+  const session = sessionName(repo, name);
+
+  if (!have("tmux")) {
+    die("tmux is required (apt install tmux / brew install tmux). ctui hosts the agent in a tmux pane so it stays the real binary.");
+  }
+  // Re-attaching must not check the agent binary: the session already has
+  // one running, and the check would fail for a session started elsewhere.
+  if (sessionExists(session)) return attach(session);
+
+  if (!have(agent[0]!)) die(`${agent[0]} is not on your PATH`);
+
+  // Panels re-enter this same file. process.execPath rather than argv[0]
+  // because `npm link` puts a symlink on PATH whose directory has no node.
+  const self = realpathSync(fileURLToPath(import.meta.url));
+  const panel = (which: string): string[] => [process.execPath, self, "panel", which];
+
+  try {
+    launch(
+      {
+        session,
+        repo,
+        agent,
+        panel,
+        resize: [process.execPath, self, "resize"],
+        cols: process.stdout.columns ?? 120,
+        rows: process.stdout.rows ?? 40,
+      },
+      { agent: ` ${agent[0]} `, rail: " starting… ", dock: " DIFF " },
+    );
+  } catch (err) {
+    die(err instanceof Error ? err.message : String(err));
+  }
 }
 
 // Only run when this file is the entry point, not merely imported — index.test.ts

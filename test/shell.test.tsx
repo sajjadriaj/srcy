@@ -1,0 +1,382 @@
+import assert from "node:assert/strict";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import test from "node:test";
+import React from "react";
+import { render } from "ink-testing-library";
+import { LiveDiff, RepoMap } from "../src/cockpit.js";
+import { splitDiff } from "../src/diff.js";
+import { git } from "../src/git.js";
+import { NarrowChecks, NarrowUsage, activityTitle, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
+import { repoState } from "../src/repo.js";
+import { cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
+import { parseState } from "../src/transcript.js";
+import { newRepo } from "./helpers.js";
+
+// ---------------------------------------------------------------------------
+// The layout
+
+const LAYOUT = {
+  session: "ctui-x",
+  repo: "/r",
+  agent: ["claude"],
+  panel: (which: string) => ["node", "/i.js", "panel", which],
+  resize: ["node", "/i.js", "resize"],
+  cols: 120,
+  rows: 40,
+};
+
+test("the dock is split off before the rail, which is what makes it full width", () => {
+  const steps = plan(LAYOUT);
+  const splits = steps.filter((s) => s[0] === "split-window");
+  assert.equal(splits.length, 2);
+  // Vertical first, while the agent pane is still the whole window. Reverse
+  // these and the dock is wedged under the agent with the rail beside it,
+  // running the full height — a different layout that still "works", which
+  // is why only the order pins it down.
+  assert.equal(splits[0]!.includes("-v"), true, "first split must be vertical (the dock)");
+  assert.match(splits[0]!.at(-1)!, /'panel' 'dock'/);
+  assert.equal(splits[1]!.includes("-h"), true, "second split must be horizontal (the rail)");
+  assert.equal(splits[1]!.includes("-b"), true, "the rail goes before the agent, i.e. on the left");
+  assert.match(splits[1]!.at(-1)!, /'panel' 'rail'/);
+});
+
+test("the keyboard lands on the agent, not on a panel", () => {
+  // The panels are read-only. Starting focus anywhere but the agent means
+  // the first thing anyone types goes nowhere.
+  const steps = plan(LAYOUT);
+  const select = steps.find((s) => s[0] === "select-pane");
+  assert.deepEqual(select, ["select-pane", "-t", "%AGENT%"]);
+});
+
+test("quitting the agent ends the session, and only the agent does", () => {
+  const steps = plan(LAYOUT);
+  // tmux's pane-exited hook accepts `set-hook` and then never fires (3.4),
+  // so teardown rides on the agent's own command line instead.
+  const start = steps.find((s) => s[0] === "new-session")!;
+  assert.match(start.at(-1)!, /'claude';\s*tmux kill-session -t 'ctui-x'/);
+  // And only the agent's: a panel crashing must not take the session down
+  // with an agent mid-turn.
+  for (const split of steps.filter((s) => s[0] === "split-window")) {
+    assert.doesNotMatch(split.at(-1)!, /kill-session/, `a panel tears down the session: ${split.at(-1)}`);
+  }
+});
+
+test("a window resize re-clamps the panes instead of scaling them", () => {
+  const hook = plan(LAYOUT).find((s) => s[0] === "set-hook" && s[3] === "window-resized");
+  assert.ok(hook, "no window-resized hook");
+  assert.match(hook.at(-1)!, /resize/);
+});
+
+test("the rail is clamped at both ends, never a bare percentage", () => {
+  // 30% of 80 columns is 24 — too narrow for `session.ts +12 -4`. 30% of a
+  // maximised 300-column terminal is 90 — an acre of blank beside a file
+  // list, with the agent squeezed into what's left.
+  assert.equal(railWidth(80), 30);
+  assert.equal(railWidth(120), 36);
+  assert.equal(railWidth(300), 44);
+  assert.equal(dockHeight(24), 8);
+  assert.equal(dockHeight(100), 16);
+});
+
+test("shell quoting survives a path with a quote in it", () => {
+  assert.equal(shq("a'b"), `'a'\\''b'`);
+  assert.equal(cmdline(["claude", "--model", "opus 5"]), `'claude' '--model' 'opus 5'`);
+});
+
+test("panes are identified by position, and pane_top is 1 once borders carry titles", () => {
+  // The bug this exists for: matching the rail on `pane_top == 0` labels
+  // every pane the dock, because pane-border-status top pushes the first
+  // row down by one.
+  const listing = ["%41 0 1", "%39 45 1", "%40 0 35"].join("\n");
+  assert.deepEqual(pick(listing), { rail: "%41", agent: "%39", dock: "%40" });
+  assert.deepEqual(pick(""), {});
+});
+
+// ---------------------------------------------------------------------------
+// The transcript
+
+function assistant(blocks: unknown[]): string {
+  return JSON.stringify({ type: "assistant", message: { role: "assistant", content: blocks } });
+}
+function user(blocks: unknown[]): string {
+  return JSON.stringify({ type: "user", message: { role: "user", content: blocks } });
+}
+const todo = (content: string, status: string): unknown => ({ content, status, activeForm: content });
+
+test("the plan on screen is the latest one the agent wrote, not every one it ever wrote", () => {
+  const text = [
+    assistant([{ type: "tool_use", id: "a", name: "TodoWrite", input: { todos: [todo("first", "pending")] } }]),
+    assistant([
+      {
+        type: "tool_use",
+        id: "b",
+        name: "TodoWrite",
+        input: { todos: [todo("first", "completed"), todo("second", "in_progress")] },
+      },
+    ]),
+  ].join("\n");
+  const { plan: p } = parseState(text);
+  assert.deepEqual(p, [
+    { content: "first", status: "completed" },
+    { content: "second", status: "in_progress" },
+  ]);
+});
+
+test("a tool call is in flight until its result lands, and then it is not", () => {
+  const started = assistant([{ type: "tool_use", id: "t1", name: "Edit", input: { file_path: "/r/src/token.ts" } }]);
+  const running = parseState(started);
+  assert.deepEqual(running.activity, { tool: "Edit", target: "/r/src/token.ts" });
+
+  // The only liveness signal a file can carry: the result the agent writes
+  // when the call returns. Without this the rail says "running" forever.
+  const finished = [started, user([{ type: "tool_result", tool_use_id: "t1", content: "ok" }])].join("\n");
+  assert.equal(parseState(finished).activity, null);
+});
+
+test("a subagent's plan and tool calls never reach the rail", () => {
+  // A subagent runs its own unrelated work in the same file. Letting it
+  // through makes the rail flicker between two pieces of work.
+  const text = [
+    assistant([{ type: "tool_use", id: "a", name: "TodoWrite", input: { todos: [todo("mine", "pending")] } }]),
+    JSON.stringify({
+      type: "assistant",
+      isSidechain: true,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "s1", name: "TodoWrite", input: { todos: [todo("theirs", "pending")] } },
+          { type: "tool_use", id: "s2", name: "Grep", input: { pattern: "theirs" } },
+        ],
+      },
+    }),
+  ].join("\n");
+  const s = parseState(text);
+  assert.deepEqual(
+    s.plan.map((e) => e.content),
+    ["mine"],
+  );
+  // The subagent's Grep is the newest tool call in the file. It must not be
+  // what the border says this session is doing.
+  assert.notEqual(s.activity?.tool, "Grep");
+});
+
+test("a Bash call reports what it is for, not the head of its pipeline", () => {
+  const text = assistant([
+    {
+      type: "tool_use",
+      id: "b",
+      name: "Bash",
+      input: { command: 'AGENT="x" bash shot.sh 2>&1 | tail -45', description: "Capture the layout" },
+    },
+  ]);
+  assert.deepEqual(parseState(text).activity, { tool: "Bash", target: "Capture the layout" });
+});
+
+test("a half-written last line is not an error — the agent is still writing it", () => {
+  const text = [
+    assistant([{ type: "tool_use", id: "a", name: "TodoWrite", input: { todos: [todo("keep me", "pending")] } }]),
+    '{"type":"assistant","message":{"content":[{"type":"tool_use"',
+  ].join("\n");
+  assert.equal(parseState(text).plan.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Titles
+
+test("the border names a file by its basename and a command by its head", () => {
+  assert.equal(activityTitle(null), " idle ");
+  assert.equal(activityTitle({ tool: "Edit", target: "/r/src/auth/token.ts" }), " ⟳ Edit token.ts ");
+  // A command's tail names nothing: basenaming `npm run build | tee log`
+  // leaves "log". Its head identifies it.
+  assert.match(activityTitle({ tool: "Bash", target: "npm run build | tee log" }), /⟳ Bash npm run build/);
+  // And a title long enough to wrap a border is cut, not wrapped.
+  const long = activityTitle({ tool: "Bash", target: "x".repeat(200) });
+  assert.ok(long.length < 40, `title not truncated: ${long.length}`);
+  assert.match(long, /…/);
+});
+
+// ---------------------------------------------------------------------------
+// Repo state, from git alone
+
+test("a new file's churn is its whole length, never a +0 -0 that reads as unchanged", async (t) => {
+  const repo = await newRepo(t);
+  await mkdir(join(repo, "src"), { recursive: true });
+  await writeFile(join(repo, "src/new.ts"), "one\ntwo\nthree\n");
+  const s = await repoState(repo);
+  const entry = s.files.find((f) => f.path === "src/new.ts");
+  assert.ok(entry, `untracked file missing from the map: ${JSON.stringify(s.files)}`);
+  assert.equal(entry.added, 3);
+  assert.equal(entry.touch, "wrote");
+});
+
+test("a tracked edit is measured against HEAD, staged or not", async (t) => {
+  const repo = await newRepo(t);
+  await writeFile(join(repo, "a.txt"), "hello\nworld\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-m", "base");
+  await writeFile(join(repo, "a.txt"), "hello\nthere\nworld\n");
+  // Staging is not reviewing: an agent that ran `git add` has not thereby
+  // shown you anything.
+  await git(repo, "add", "-A");
+  const s = await repoState(repo);
+  const entry = s.files.find((f) => f.path === "a.txt");
+  assert.ok(entry, "staged edit missing from the map");
+  assert.equal(entry.added, 1);
+  assert.equal(s.diffs.length, 1);
+});
+
+test("a file that fails checks is on the map even when the agent never touched it", async (t) => {
+  const repo = await newRepo(t);
+  const s = await repoState(repo, [{ path: "src/old.ts", line: 4, message: "boom" }]);
+  const entry = s.files.find((f) => f.path === "src/old.ts");
+  // The reader's question is "what is broken". git's answer to "what moved"
+  // does not contain it.
+  assert.ok(entry, "failing untouched file missing from the map");
+  assert.equal(entry.problems, 1);
+});
+
+test("the dock follows the file written last, not the first one alphabetically", async (t) => {
+  const repo = await newRepo(t);
+  for (const name of ["a.txt", "z.txt"]) {
+    await writeFile(join(repo, name), "x\n");
+  }
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-m", "base");
+  await writeFile(join(repo, "a.txt"), "x\ny\n");
+  await new Promise((r) => setTimeout(r, 20));
+  await writeFile(join(repo, "z.txt"), "x\ny\n");
+  const s = await repoState(repo);
+  const pick = await newest(repo, s.diffs);
+  assert.equal(pick?.path, "z.txt");
+});
+
+// ---------------------------------------------------------------------------
+// Narrow rendering
+
+test("the rail clips a row rather than wrapping it", () => {
+  // A wrapped row restarts at column zero and shifts every row under it, so
+  // the whole list below is off by one line for as long as the name is long.
+  const entries = [{ path: "src/a-very-long-file-name.ts", touch: "wrote" as const, added: 120, removed: 4, problems: 0 }];
+  const frame = render(<RepoMap entries={entries} width={20} />).lastFrame() ?? "";
+  for (const line of frame.split("\n")) {
+    assert.ok(line.length <= 20, `row overflows a 20-column rail: ${JSON.stringify(line)}`);
+  }
+  assert.match(frame, /…/);
+  // Unclipped is still the default, for the wide cockpit.
+  const wide = render(<RepoMap entries={entries} />).lastFrame() ?? "";
+  assert.match(wide, /a-very-long-file-name\.ts/);
+});
+
+test("CHECKS in the rail counts first and lists second", () => {
+  const result = {
+    ok: false,
+    command: "npm run typecheck",
+    tail: "",
+    // Real paths and real compiler messages, both far longer than a rail is
+    // wide — a fixture that happens to fit proves nothing about clipping.
+    problems: [
+      { path: "src/auth/session.ts", line: 41, message: "error TS2532: Object is possibly 'undefined'." },
+      { path: "src/auth/session.ts", line: 52, message: "error TS2345: Argument of type 'string' is not assignable." },
+      { path: "src/auth/token.ts", line: 3, message: "error TS2304: Cannot find name 'verify'." },
+      { path: "src/panels/rail.tsx", line: 4, message: "error TS7006: Parameter implicitly has an 'any' type." },
+      { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'." },
+    ],
+  };
+  const frame = render(<NarrowChecks result={result} width={30} />).lastFrame() ?? "";
+  assert.match(frame, /✖ 5 in 4 files/);
+  assert.match(frame, /…and 2 more/);
+  for (const line of frame.split("\n")) {
+    assert.ok(line.length <= 30, `checks row overflows the rail: ${JSON.stringify(line)}`);
+  }
+  // "not run yet" and "none configured" stay distinguishable: claiming a
+  // project has no checker before looking is the same lie as showing a pass.
+  assert.match(render(<NarrowChecks result={undefined} width={30} />).lastFrame() ?? "", /not run yet/);
+  assert.match(render(<NarrowChecks result={null} width={30} />).lastFrame() ?? "", /none configured/);
+});
+
+test("CONTEXT stacks in a narrow rail instead of wrapping into nonsense", () => {
+  const frame =
+    render(<NarrowUsage usage={{ used: 105_000, size: 200_000, output: 12_000, cached: 0.99 }} width={30} />).lastFrame() ??
+    "";
+  const lines = frame.split("\n");
+  assert.ok(lines.length >= 3, `expected the numbers stacked, got:\n${frame}`);
+  for (const line of lines) {
+    assert.ok(line.length <= 30, `usage row overflows the rail: ${JSON.stringify(line)}`);
+  }
+  assert.match(frame, /53%/);
+  assert.match(frame, /105k\/200k/);
+  assert.match(frame, /out 12k/);
+  assert.match(frame, /cache 99%/);
+  // An unmeasured window is not an empty one.
+  assert.match(render(<NarrowUsage usage={null} width={30} />).lastFrame() ?? "", /not measured/);
+});
+
+test("the dock's heading names a line that is actually on screen", () => {
+  // With a hunk longer than the pane, showing the tail while heading it with
+  // the hunk's start points the reader a hundred lines above anything drawn.
+  const body = Array.from({ length: 30 }, (_, i) => ` line ${i}`).join("\n");
+  const raw = `diff --git a/f.ts b/f.ts\n--- a/f.ts\n+++ b/f.ts\n@@ -100,30 +100,30 @@\n${body}\n`;
+  const file = splitDiff(raw)[0]!;
+  const frame = render(<LiveDiff file={file} maxLines={5} />).lastFrame() ?? "";
+  const heading = frame.split("\n")[0]!;
+  const named = Number(heading.split(":")[1]);
+  const firstShown = Number(frame.split("\n")[1]!.trim().split(" ")[0]);
+  assert.equal(named, firstShown, `heading says ${named} but the first row shown is ${firstShown}`);
+  assert.notEqual(named, 100, "heading still points at the hunk start the reader cannot see");
+});
+
+const MANY = Array.from({ length: 12 }, (_, i) => ({
+  path: `src/deep/nested/file${i}.ts`,
+  touch: "wrote" as const,
+  added: i,
+  removed: 0,
+  problems: i === 9 ? 2 : 0,
+}));
+
+test("the file list never renders more lines than the pane gave it", () => {
+  // Ink overdraws rather than scrolling: a pane's worth of content plus one
+  // line does not scroll off, it lands on top of the line above. The gauge
+  // is at the bottom, so it is what gets landed on.
+  for (const budget of [4, 6, 9, 20]) {
+    const frame = render(<RepoMap entries={MANY} width={30} maxRows={budget} />).lastFrame() ?? "";
+    const lines = frame.split("\n").length;
+    assert.ok(lines <= budget, `budget ${budget} but rendered ${lines} lines:\n${frame}`);
+  }
+});
+
+test("below the fit the tree goes flat, worst first, and every row names a file", () => {
+  const frame = render(<RepoMap entries={MANY} width={34} maxRows={6} />).lastFrame() ?? "";
+  // A truncated tree spends its rows on directory headers and hides the
+  // files under them — the surviving rows name nothing at all.
+  assert.doesNotMatch(frame, /^\s+nested\/$/m, `directory header survived truncation:\n${frame}`);
+  const first = frame.split("\n")[1]!;
+  assert.match(first, /file9/, `the failing file is not first:\n${frame}`);
+  assert.match(frame, /…and \d+ more/);
+  // With room, the nesting is worth having and comes back.
+  const roomy = render(<RepoMap entries={MANY} width={34} maxRows={40} />).lastFrame() ?? "";
+  assert.match(roomy, /nested\//, `tree not used when it fits:\n${roomy}`);
+});
+
+test("the budget counts what the fixed sections actually draw", () => {
+  // These numbers exist so the map can be sized around them. If a section
+  // renders one line more than it claims, the gauge goes off the bottom.
+  const failing = {
+    ok: false,
+    command: "c",
+    tail: "",
+    problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m" })),
+  };
+  const count = (el: React.JSX.Element): number => (render(el).lastFrame() ?? "").split("\n").length;
+  assert.equal(checksRows(undefined), count(<NarrowChecks result={undefined} width={30} />));
+  assert.equal(checksRows(null), count(<NarrowChecks result={null} width={30} />));
+  assert.equal(checksRows(failing), count(<NarrowChecks result={failing} width={30} />));
+  assert.equal(checksRows({ ...failing, ok: true, problems: [] }), count(<NarrowChecks result={{ ...failing, ok: true, problems: [] }} width={30} />));
+  assert.equal(usageRows(null), count(<NarrowUsage usage={null} width={30} />));
+  const bare = { used: 1, size: 2 };
+  assert.equal(usageRows(bare), count(<NarrowUsage usage={bare} width={30} />));
+  const full = { used: 1, size: 2, output: 3, cached: 0.5 };
+  assert.equal(usageRows(full), count(<NarrowUsage usage={full} width={30} />));
+  // And the map never gets a negative or absurd budget out of a tiny pane.
+  assert.ok(mapBudget(6, 5, 4, 3) >= 3);
+});

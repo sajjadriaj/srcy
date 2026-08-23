@@ -16,7 +16,7 @@ import { render } from "ink-testing-library";
 import type { AgentSession } from "../src/acp.js";
 import { git, type Worktree } from "../src/git.js";
 import { App } from "../src/ui.js";
-import { projectDir } from "../src/usage.js";
+import { projectDir } from "../src/transcript.js";
 
 const DIFF = [
   "diff --git a/src/auth/token.ts b/src/auth/token.ts",
