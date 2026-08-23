@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { buildTree, ChecksPane, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom, RepoMap,  } from "../src/cockpit.js";
+import { ChecksPane, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom,  } from "../src/cockpit.js";
 import { splitDiff, type FileDiff } from "../src/diff.js";
 
 // A real two-file diff, the shape splitDiff actually produces — writing the
@@ -42,20 +42,6 @@ test("diffStats counts changed lines and ignores context", () => {
   assert.deepEqual(diffStats(readme), { added: 1, removed: 0 });
 });
 
-test("mapEntries lets a written file outrank the same file merely read", () => {
-  const entries = mapEntries(files(), ["src/auth/token.ts", "src/auth/session.ts"]);
-  const token = entries.find((e) => e.path === "src/auth/token.ts")!;
-  assert.equal(token.touch, "wrote");
-  assert.equal(token.added, 1);
-  const session = entries.find((e) => e.path === "src/auth/session.ts")!;
-  assert.equal(session.touch, "read");
-  // Sorted, so buildTree's "same segment as the row above" collapse holds.
-  assert.deepEqual(
-    entries.map((e) => e.path),
-    ["README.md", "src/auth/session.ts", "src/auth/token.ts"],
-  );
-});
-
 test("mapEntries reports a file the agent edited and reverted as merely read", () => {
   // No diff section for it: the worktree is the authority for "wrote", so
   // claiming a change that no longer exists would be a lie the map tells
@@ -63,24 +49,6 @@ test("mapEntries reports a file the agent edited and reverted as merely read", (
   const entries = mapEntries([], ["src/auth/token.ts"]);
   assert.equal(entries[0]!.touch, "read");
   assert.equal(entries[0]!.added, 0);
-});
-
-test("buildTree emits each directory once and indents by depth", () => {
-  const rows = buildTree(
-    mapEntries(files(), ["src/auth/session.ts", "src/api/routes.ts"]),
-  );
-  assert.deepEqual(
-    rows.map((r) => [r.depth, r.name, r.dir]),
-    [
-      [0, "README.md", false],
-      [0, "src/", true],
-      [1, "api/", true],
-      [2, "routes.ts", false],
-      [1, "auth/", true],
-      [2, "session.ts", false],
-      [2, "token.ts", false],
-    ],
-  );
 });
 
 test("hunkLines shows the new-side number against a removed line too", () => {
@@ -103,21 +71,6 @@ test("hunkLines shows the new-side number against a removed line too", () => {
 test("hunkLines gives the no-newline marker no line number", () => {
   const lines = hunkLines(" a\n\\ No newline at end of file\n", 7);
   assert.deepEqual(lines.map((l) => l.num), ["7", ""]);
-});
-
-test("RepoMap shows what was written, what was read, and the counts", () => {
-  const { lastFrame } = render(<RepoMap entries={mapEntries(files(), ["src/auth/session.ts"])} />);
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /token\.ts.*\+1 -1/);
-  assert.match(frame, /▪/);
-  assert.match(frame, /▫/);
-  // Directories appear once, not once per file beneath them.
-  assert.equal(frame.split("\n").filter((l) => l.trim() === "src/").length, 1);
-});
-
-test("RepoMap says so when nothing has been touched", () => {
-  const { lastFrame } = render(<RepoMap entries={[]} />);
-  assert.match(lastFrame() ?? "", /nothing touched yet/);
 });
 
 test("LiveDiff renders the current file's changed lines", () => {
@@ -190,15 +143,6 @@ test("mapEntries gives a failing file its own row even if untouched", () => {
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.path, "src/api/routes.ts");
   assert.equal(entries[0]!.problems, 1);
-});
-
-test("RepoMap marks a failing file as broken rather than merely changed", () => {
-  const entries = mapEntries(files(), [], [{ path: "src/auth/token.ts", line: 41, message: "error" }]);
-  const frame = render(<RepoMap entries={entries} />).lastFrame() ?? "";
-  const tokenRow = frame.split("\n").find((l) => l.includes("token.ts"))!;
-  assert.match(tokenRow, /^✖/);
-  // README.md changed and still builds, so it keeps the ordinary marker.
-  assert.match(frame.split("\n").find((l) => l.includes("README.md"))!, /^▪/);
 });
 
 test("ChecksPane never renders 'no check configured' the same as 'passing'", () => {

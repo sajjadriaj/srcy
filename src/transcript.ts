@@ -145,6 +145,20 @@ export interface Fold {
   open: Map<string, Activity>;
   output: number;
   last: { used: number; cached: number } | null;
+  // Set only by agents that record it. Codex writes the real number with
+  // every token count; Claude Code writes none, so there it stays undefined
+  // and windowFor infers one.
+  window?: number;
+}
+
+// What one agent's on-disk session looks like. Two implementations — the
+// Claude Code reader below and the Codex one next door — because those are
+// the two formats that exist, not because a third is expected.
+export interface Source {
+  // The session file for work happening in `cwd`, or null if this agent has
+  // not written one. Newest wins: it is the session being typed into.
+  find: (cwd: string) => Promise<string | null>;
+  fold: (f: Fold, line: string) => void;
 }
 
 export function emptyFold(): Fold {
@@ -221,7 +235,12 @@ export function stateOf(f: Fold): State {
 
 export function usageOf(f: Fold): Usage | null {
   if (f.last === null) return null;
-  return { used: f.last.used, size: windowFor(f.last.used), output: f.output, cached: f.last.cached };
+  return {
+    used: f.last.used,
+    size: f.window ?? windowFor(f.last.used),
+    output: f.output,
+    cached: f.last.cached,
+  };
 }
 
 // newestTranscript finds the session file for `cwd`. Unlike transcriptUsage,
@@ -271,7 +290,7 @@ export function newReader(path: string): Reader {
 // session in the same directory) and a file that has shrunk (rotated, or
 // replaced). Folding new bytes onto state from a file that no longer exists
 // would report a plan and a token count belonging to neither.
-export async function advance(r: Reader, path: string): Promise<Fold> {
+export async function advance(r: Reader, path: string, fold = foldLine): Promise<Fold> {
   let size: number;
   try {
     size = (await stat(path)).size;
@@ -296,7 +315,7 @@ export async function advance(r: Reader, path: string): Promise<Fold> {
     // a trailing newline. Both are correct to carry forward.
     r.tail = lines.pop() ?? "";
     r.offset += bytesRead;
-    for (const line of lines) foldLine(r.fold, line);
+    for (const line of lines) fold(r.fold, line);
   } catch {
     // Leave the reader where it was; the next tick tries again.
   } finally {
@@ -309,14 +328,20 @@ export async function advance(r: Reader, path: string): Promise<Fold> {
 // what the agent has written since the last one.
 const readers = new Map<string, Reader>();
 
-export async function readTranscript(cwd: string): Promise<(State & { usage: Usage | null }) | null> {
-  const path = await newestTranscript(cwd);
+export const CLAUDE: Source = { find: newestTranscript, fold: foldLine };
+
+export async function readSession(
+  cwd: string,
+  source: Source,
+): Promise<(State & { usage: Usage | null }) | null> {
+  const path = await source.find(cwd);
   if (path === null) return null;
-  let r = readers.get(cwd);
+  const key = `${cwd}\u0000${source.find.name}`;
+  let r = readers.get(key);
   if (r === undefined) {
     r = newReader(path);
-    readers.set(cwd, r);
+    readers.set(key, r);
   }
-  const fold = await advance(r, path);
+  const fold = await advance(r, path, source.fold);
   return { ...stateOf(fold), usage: usageOf(fold) };
 }

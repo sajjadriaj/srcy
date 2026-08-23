@@ -74,3 +74,11 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
   files.sort((a, b) => a.path.localeCompare(b.path));
   return { files, diffs };
 }
+
+// Every file in the project, for the rail's tree — tracked plus untracked,
+// minus whatever .gitignore excludes. git is asked rather than the directory
+// walked so that node_modules and build output are somebody else's problem.
+export async function listPaths(repo: string): Promise<string[]> {
+  const out = await git(repo, "ls-files", "-co", "--exclude-standard").catch(() => "");
+  return out.split("\n").filter((l) => l !== "");
+}

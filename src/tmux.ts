@@ -191,6 +191,22 @@ export function resize(session: string): void {
 
 // Never returns on success: attach replaces this process, which is what
 // makes ctui feel like one program rather than a launcher that hangs around.
+// The rail and the dock are separate processes, so a file picked in one has
+// to reach the other. tmux user options are a key-value store already scoped
+// to exactly the right thing — this session — so the alternative (a state
+// file, a socket, a daemon) would be building what is already here.
+const SELECTED = "@ctui-file";
+
+export function publishSelection(session: string, path: string): void {
+  tmux(["set-option", "-t", session, SELECTED, path]);
+}
+
+export function readSelection(session: string): string {
+  // An unset user option formats as the empty string, which is the same
+  // answer as "nothing picked" — so no distinction is needed.
+  return tmux(["display-message", "-p", "-t", session, `#{${SELECTED}}`]).out;
+}
+
 export function launch(l: Layout, titles: Record<string, string>): void {
   build(l, titles);
   attach(l.session);

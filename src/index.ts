@@ -74,7 +74,7 @@ export function parseShell(argv: string[]): { agent: string[]; name?: string } {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   // Run by tmux inside a pane, never by a person.
-  if (argv[0] === "panel") return renderPanel(argv[1] ?? "rail");
+  if (argv[0] === "panel") return renderPanel(argv[1] ?? "rail", argv[2] ?? "", argv[3] ?? "");
   // Run by tmux's window-resized hook, never by a person.
   if (argv[0] === "resize") return resize(argv[1] ?? "");
 
@@ -100,7 +100,7 @@ async function main(): Promise<void> {
   // Panels re-enter this same file. process.execPath rather than argv[0]
   // because `npm link` puts a symlink on PATH whose directory has no node.
   const self = realpathSync(fileURLToPath(import.meta.url));
-  const panel = (which: string): string[] => [process.execPath, self, "panel", which];
+  const panel = (which: string): string[] => [process.execPath, self, "panel", which, agent[0]!, session];
 
   try {
     launch(

@@ -5,14 +5,18 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { LiveDiff, RepoMap } from "../src/cockpit.js";
+import { LiveDiff } from "../src/cockpit.js";
 import { splitDiff } from "../src/diff.js";
+import { ancestors, openForChanges, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
-import { NarrowChecks, NarrowUsage, activityTitle, checkStep, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
+import { NarrowChecks, NarrowUsage, TreeLine, activityTitle, checkStep, checksRows, mapBudget, newest, usageRows } from "../src/panels.js";
+import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
-import { advance, newReader, parseState, parseUsage, stateOf, usageOf } from "../src/transcript.js";
+import { CLAUDE, advance, emptyFold, newReader, parseState, parseUsage, stateOf, usageOf } from "../src/transcript.js";
+import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
+import { sourceFor } from "../src/panels.js";
 import { newRepo } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -258,20 +262,6 @@ test("the dock follows the file written last, not the first one alphabetically",
 // ---------------------------------------------------------------------------
 // Narrow rendering
 
-test("the rail clips a row rather than wrapping it", () => {
-  // A wrapped row restarts at column zero and shifts every row under it, so
-  // the whole list below is off by one line for as long as the name is long.
-  const entries = [{ path: "src/a-very-long-file-name.ts", touch: "wrote" as const, added: 120, removed: 4, problems: 0 }];
-  const frame = render(<RepoMap entries={entries} width={20} />).lastFrame() ?? "";
-  for (const line of frame.split("\n")) {
-    assert.ok(line.length <= 20, `row overflows a 20-column rail: ${JSON.stringify(line)}`);
-  }
-  assert.match(frame, /…/);
-  // Unclipped is still the default, for the wide cockpit.
-  const wide = render(<RepoMap entries={entries} />).lastFrame() ?? "";
-  assert.match(wide, /a-very-long-file-name\.ts/);
-});
-
 test("CHECKS in the rail counts first and lists second", () => {
   const result = {
     ok: false,
@@ -337,30 +327,6 @@ const MANY = Array.from({ length: 12 }, (_, i) => ({
   removed: 0,
   problems: i === 9 ? 2 : 0,
 }));
-
-test("the file list never renders more lines than the pane gave it", () => {
-  // Ink overdraws rather than scrolling: a pane's worth of content plus one
-  // line does not scroll off, it lands on top of the line above. The gauge
-  // is at the bottom, so it is what gets landed on.
-  for (const budget of [4, 6, 9, 20]) {
-    const frame = render(<RepoMap entries={MANY} width={30} maxRows={budget} />).lastFrame() ?? "";
-    const lines = frame.split("\n").length;
-    assert.ok(lines <= budget, `budget ${budget} but rendered ${lines} lines:\n${frame}`);
-  }
-});
-
-test("below the fit the tree goes flat, worst first, and every row names a file", () => {
-  const frame = render(<RepoMap entries={MANY} width={34} maxRows={6} />).lastFrame() ?? "";
-  // A truncated tree spends its rows on directory headers and hides the
-  // files under them — the surviving rows name nothing at all.
-  assert.doesNotMatch(frame, /^\s+nested\/$/m, `directory header survived truncation:\n${frame}`);
-  const first = frame.split("\n")[1]!;
-  assert.match(first, /file9/, `the failing file is not first:\n${frame}`);
-  assert.match(frame, /…and \d+ more/);
-  // With room, the nesting is worth having and comes back.
-  const roomy = render(<RepoMap entries={MANY} width={34} maxRows={40} />).lastFrame() ?? "";
-  assert.match(roomy, /nested\//, `tree not used when it fits:\n${roomy}`);
-});
 
 test("the budget counts what the fixed sections actually draw", () => {
   // These numbers exist so the map can be sized around them. If a section
@@ -540,4 +506,187 @@ test("every teardown the agent's shell runs reaches ctui's own server", () => {
   const start = plan(LAYOUT).find((s) => s[0] === "new-session")!;
   assert.match(start.at(-1)!, new RegExp(`${TMUX} kill-session`));
   assert.equal(TMUX.includes("-L"), true);
+});
+
+// ---------------------------------------------------------------------------
+// Codex
+
+// Shapes copied from a real ~/.codex/sessions log, not invented.
+const cxMeta = (cwd: string): string =>
+  JSON.stringify({ type: "session_meta", payload: { session_id: "s", cwd, cli_version: "0.147.0" } });
+
+const cxTokens = (last: Record<string, number>, totalOut: number, window = 258_400): string =>
+  JSON.stringify({
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        total_token_usage: { input_tokens: 20_987_367, output_tokens: totalOut },
+        last_token_usage: last,
+        model_context_window: window,
+      },
+    },
+  });
+
+const cxCall = (id: string, name: string, args: unknown): string =>
+  JSON.stringify({ type: "response_item", payload: { type: "function_call", call_id: id, name, arguments: JSON.stringify(args) } });
+
+const cxDone = (id: string): string =>
+  JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: id, output: "ok" } });
+
+function cxFold(lines: string[]) {
+  const f = emptyFold();
+  for (const l of lines) codexFold(f, l);
+  return f;
+}
+
+test("codex occupancy is the last request's, against the window codex itself recorded", () => {
+  // total_token_usage.input_tokens reaches twenty million against a 258k
+  // window — summing it would peg the gauge at 100% forever, the same trap
+  // the Claude reader has. And the window is read, not guessed: codex is the
+  // only agent that writes it down.
+  const f = cxFold([
+    cxTokens({ input_tokens: 14_890, cached_input_tokens: 11_008 }, 261),
+    cxTokens({ input_tokens: 161_209, cached_input_tokens: 160_512 }, 34_012),
+  ]);
+  const u = usageOf(f);
+  assert.equal(u?.used, 161_209);
+  assert.equal(u?.size, 258_400);
+  assert.equal(u?.output, 34_012);
+  assert.equal(Math.round((u?.cached ?? 0) * 100), 100);
+  // A model with a different window is believed, not overridden by the
+  // 200k/1M guess the Claude reader has to make.
+  assert.equal(usageOf(cxFold([cxTokens({ input_tokens: 10 }, 1, 400_000)]))?.size, 400_000);
+});
+
+test("a codex call is in flight until its output lands", () => {
+  const running = cxFold([cxCall("call_1", "shell", { command: ["npm", "test"] })]);
+  assert.deepEqual(stateOf(running).activity, { tool: "shell", target: "npm test" });
+  assert.equal(stateOf(cxFold([cxCall("call_1", "shell", { command: ["npm", "test"] }), cxDone("call_1")])).activity, null);
+});
+
+test("codex's plan is read when it writes one", () => {
+  // Unverified against a real log: update_plan exists as a tool but no
+  // session on this machine has ever called it, so this is written from the
+  // tool's shape.
+  const f = cxFold([
+    cxCall("call_p", "update_plan", {
+      plan: [
+        { step: "find the comparison", status: "completed" },
+        { step: "fix the off-by-one", status: "in_progress" },
+      ],
+    }),
+  ]);
+  assert.deepEqual(stateOf(f).plan, [
+    { content: "find the comparison", status: "completed" },
+    { content: "fix the off-by-one", status: "in_progress" },
+  ]);
+});
+
+test("codex sessions are found by the directory they declare, newest first", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ctui-cx-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // Filed by date, several levels down — the walk must not count levels.
+  const day = join(root, "2026", "08", "19");
+  await mkdir(day, { recursive: true });
+  await writeFile(join(day, "old.jsonl"), `${cxMeta("/r/mine")}\n${cxTokens({ input_tokens: 5 }, 1)}\n`);
+  await new Promise((r) => setTimeout(r, 20));
+  await writeFile(join(day, "new.jsonl"), `${cxMeta("/r/mine")}\n${cxTokens({ input_tokens: 9 }, 2)}\n`);
+  await writeFile(join(day, "other.jsonl"), `${cxMeta("/r/theirs")}\n`);
+
+  assert.match((await findSession("/r/mine", root)) ?? "", /new\.jsonl$/);
+  assert.match((await findSession("/r/theirs", root)) ?? "", /other\.jsonl$/);
+  // A directory codex has never worked in is not somebody else's session.
+  assert.equal(await findSession("/r/never", root), null);
+});
+
+test("the panel reads the format the agent in the pane actually writes", () => {
+  // The agent name is a command, so anything unrecognised gets no source at
+  // all: REPO, CHECKS and DIFF still work, since those come from git.
+  assert.equal(sourceFor("claude"), CLAUDE);
+  assert.equal(sourceFor("/usr/local/bin/codex"), CODEX);
+  assert.equal(sourceFor("aider"), null);
+  assert.equal(sourceFor(""), null);
+});
+
+// ---------------------------------------------------------------------------
+// The tree
+
+const FILES = ["README.md", "src/auth/token.ts", "src/auth/session.ts", "src/main.ts", "docs/a.md"];
+const CHANGED = new Map([["src/auth/token.ts", { path: "src/auth/token.ts", touch: "wrote" as const, added: 1, removed: 1, problems: 0 }]]);
+
+test("directories start closed, except the ones holding this session's work", () => {
+  // A rail that hid the change behind a closed src/ would make you navigate
+  // to see the thing you just asked about.
+  const open = openForChanges(CHANGED.keys());
+  assert.deepEqual([...open].sort(), ["src", "src/auth"]);
+  const shown = treeRows(FILES, open, CHANGED).map((r) => r.path);
+  assert.ok(shown.includes("src/auth/token.ts"), `the change is not visible: ${shown.join(", ")}`);
+  // Everything else stays one row.
+  assert.ok(shown.includes("docs"), "docs/ missing");
+  assert.ok(!shown.includes("docs/a.md"), "an unrelated directory was opened");
+});
+
+test("the tree draws directories before files, each alphabetically", () => {
+  const all = treeRows(FILES, new Set(["src", "src/auth", "docs"])).map((r) => r.path);
+  assert.deepEqual(all, [
+    "docs", "docs/a.md",
+    "src", "src/auth", "src/auth/session.ts", "src/auth/token.ts", "src/main.ts",
+    "README.md",
+  ]);
+});
+
+test("ancestors names every directory on the way down, and toggle flips one", () => {
+  assert.deepEqual(ancestors("a/b/c.ts"), ["a", "a/b"]);
+  assert.deepEqual(ancestors("top.ts"), []);
+  assert.deepEqual([...toggle(new Set(["a"]), "b")].sort(), ["a", "b"]);
+  assert.deepEqual([...toggle(new Set(["a", "b"]), "a")], ["b"]);
+});
+
+test("the viewport keeps the cursor on screen without scrolling past the ends", () => {
+  // Off either end is the failure that matters: a cursor you cannot see is a
+  // cursor you cannot steer.
+  assert.deepEqual(treeWindow(5, 3, 10), { start: 0, end: 5 });
+  assert.deepEqual(treeWindow(100, 0, 10), { start: 0, end: 10 });
+  assert.deepEqual(treeWindow(100, 99, 10), { start: 90, end: 100 });
+  for (const cursor of [0, 1, 37, 98, 99]) {
+    const w = treeWindow(100, cursor, 10);
+    assert.ok(cursor >= w.start && cursor < w.end, `cursor ${cursor} outside ${JSON.stringify(w)}`);
+    assert.equal(w.end - w.start, 10);
+  }
+});
+
+test("a tree row is clipped to the rail, and a failing file spends its column on the failures", () => {
+  const long = { path: "src/a-very-long-file-name.ts", name: "a-very-long-file-name.ts", depth: 2, dir: false,
+    entry: { path: "src/a-very-long-file-name.ts", touch: "wrote" as const, added: 120, removed: 4, problems: 0 } };
+  const frame = render(<TreeLine row={long} width={24} cursor={false} />).lastFrame() ?? "";
+  // A wrapped row restarts at column zero and shifts every row under it.
+  for (const line of frame.split("\n")) assert.ok(line.length <= 24, `row overflows: ${JSON.stringify(line)}`);
+
+  const broken = { path: "t.ts", name: "t.ts", depth: 0, dir: false,
+    entry: { path: "t.ts", touch: "wrote" as const, added: 1, removed: 1, problems: 2 } };
+  const bad = render(<TreeLine row={broken} width={30} cursor={false} />).lastFrame() ?? "";
+  // "+1 -1" is not what you act on when the file no longer compiles.
+  assert.match(bad, /✖2/);
+  assert.doesNotMatch(bad, /\+1 -1/);
+});
+
+test("every glyph the rail draws is one cell wide in every terminal", () => {
+  // ● ○ ▶ █ are East-Asian *Ambiguous*: a terminal set to ambiguous-width
+  // double renders them two cells, which tears a fixed-width column and
+  // slides the gauge as it fills.
+  const frames = [
+    render(<TreeLine row={{ path: "s", name: "src", depth: 0, dir: true, open: true }} width={20} cursor />).lastFrame(),
+    render(<TreeLine row={{ path: "s", name: "src", depth: 0, dir: true, open: false }} width={20} cursor={false} />).lastFrame(),
+    render(<TreeLine row={{ path: "a.ts", name: "a.ts", depth: 1, dir: false,
+      entry: { path: "a.ts", touch: "wrote" as const, added: 2, removed: 1, problems: 3 } }} width={24} cursor={false} />).lastFrame(),
+    render(<NarrowUsage usage={{ used: 104_800, size: 200_000, output: 12_000, cached: 0.99 }} width={30} />).lastFrame(),
+    render(<NarrowChecks result={{ ok: false, command: "c", tail: "", problems: [{ path: "a.ts", line: 4, message: "boom" }] }} width={30} />).lastFrame(),
+  ];
+  for (const frame of frames) {
+    for (const ch of frame ?? "") {
+      const w = eastAsianWidth(ch.codePointAt(0)!, { ambiguousAsWide: true });
+      assert.equal(w, 1, `${JSON.stringify(ch)} (U+${ch.codePointAt(0)!.toString(16)}) is not one cell:\n${frame}`);
+    }
+  }
 });

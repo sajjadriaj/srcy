@@ -1,12 +1,15 @@
-import React, { useEffect, useRef, useState } from "react";
-import { stat } from "node:fs/promises";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { Box, Text, render } from "ink";
-import { LiveDiff, PlanBar, RepoMap, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
+import { Box, Text, render, useInput } from "ink";
+import { LiveDiff, PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
 import type { FileDiff } from "./diff.js";
 import { runChecks, type CheckResult } from "./checks.js";
-import { repoState, type RepoState } from "./repo.js";
-import { readTranscript, type Activity } from "./transcript.js";
+import { listPaths, repoState, type RepoState } from "./repo.js";
+import { openForChanges, rows as treeRows, toggle, window as treeWindow, type Row } from "./tree.js";
+import { publishSelection, readSelection } from "./tmux.js";
+import { CLAUDE, readSession, type Activity, type Source } from "./transcript.js";
+import { CODEX } from "./codex.js";
 
 // The panels around the agent's pane.
 //
@@ -115,7 +118,7 @@ export function checkStep(
 // `rail` is the pane that shows everything. The dock shows one diff, so it
 // neither runs the project's checker nor opens the transcript — work whose
 // result it would never draw.
-function useWatch(cwd: string, rail: boolean): Watched {
+function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
   const [state, setState] = useState<Watched>(EMPTY);
   // Refs, not state: these drive when work happens, and re-rendering because
   // a fingerprint changed would be a render per poll forever.
@@ -135,7 +138,7 @@ function useWatch(cwd: string, rail: boolean): Watched {
     const tick = async (): Promise<void> => {
       try {
         const repo = await repoState(cwd, problems.current?.problems ?? []);
-        const t = rail ? await readTranscript(cwd) : null;
+        const t = rail && source !== null ? await readSession(cwd, source) : null;
         if (!live) return;
         setState({
           repo,
@@ -176,7 +179,7 @@ function useWatch(cwd: string, rail: boolean): Watched {
       live = false;
       clearTimeout(timer);
     };
-  }, [cwd, rail]);
+  }, [cwd, rail, source]);
 
   return state;
 }
@@ -288,19 +291,103 @@ export function mapBudget(height: number, plan: number, checks: number, usage: n
   return Math.max(3, height - 3 - Math.max(1, plan) - checks - usage);
 }
 
-export function Rail({ cwd, width, height }: { cwd: string; width: number; height?: number }): React.JSX.Element {
-  const s = useWatch(cwd, true);
+// How often the project's file list is refreshed. Slower than the poll
+// because files appear and vanish far less often than they change, and
+// `git ls-files` on a large repo is not free.
+const TREE_MS = 5000;
+
+function useTree(cwd: string): string[] {
+  const [paths, setPaths] = useState<string[]>([]);
+  useEffect(() => {
+    let live = true;
+    const tick = async (): Promise<void> => {
+      const next = await listPaths(cwd).catch(() => []);
+      if (live && next.length > 0) setPaths(next);
+    };
+    void tick();
+    const id = setInterval(() => void tick(), TREE_MS);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, [cwd]);
+  return paths;
+}
+
+export function Rail({
+  cwd,
+  width,
+  height,
+  source = null,
+  session = "",
+  interactive = true,
+}: {
+  cwd: string;
+  width: number;
+  height?: number;
+  // Null for an agent whose session format ctui cannot read: PLAN and
+  // CONTEXT stay blank rather than showing another agent's numbers.
+  source?: Source | null;
+  // Where to publish the file the cursor picks, for the dock to read.
+  session?: string;
+  interactive?: boolean;
+}): React.JSX.Element {
+  const s = useWatch(cwd, true, source);
+  const paths = useTree(cwd);
+  const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
+
+  // Directories the reader has opened or closed by hand. Null until they
+  // touch one, so until then the view follows the work: everything on the
+  // path to a change is open and nothing else is.
+  const [manual, setManual] = useState<Set<string> | null>(null);
+  const auto = useMemo(() => openForChanges(changed.keys()), [changed]);
+  const open = manual ?? auto;
+
+  const visible = useMemo(() => treeRows(paths, open, changed), [paths, open, changed]);
+  const [cursor, setCursor] = useState(-1);
+
+  // Until the reader moves it, the cursor sits on the first changed file
+  // rather than on row zero — which is whichever dotfile directory sorts
+  // first, and never what anyone opened the rail to look at.
+  const firstChange = visible.findIndex((r) => r.entry !== undefined);
+  const at = cursor >= 0 ? Math.min(cursor, Math.max(0, visible.length - 1)) : Math.max(0, firstChange);
+
   useEffect(() => {
     setPaneTitle(activityTitle(s.activity));
   }, [s.activity?.tool, s.activity?.target]);
 
+  // tmux only delivers keystrokes to the focused pane, so this is inert
+  // until the reader moves the keyboard here — the agent keeps every key
+  // otherwise, which is the point.
+  useInput(
+    (input, key) => {
+      if (visible.length === 0) return;
+      const row = visible[at];
+      if (input === "j" || key.downArrow) setCursor(Math.min(at + 1, visible.length - 1));
+      else if (input === "k" || key.upArrow) setCursor(Math.max(at - 1, 0));
+      else if (row !== undefined && (key.return || input === " ")) {
+        if (row.dir) setManual(toggle(open, row.path));
+        // A file the reader picked outranks the file the agent wrote last:
+        // they are looking at something on purpose.
+        else if (session !== "") publishSelection(session, row.path);
+      }
+    },
+    { isActive: interactive },
+  );
+
+  const budget = height === undefined ? undefined : mapBudget(height, s.plan.length, checksRows(s.checks), usageRows(s.usage));
+  const view = treeWindow(visible.length, at, Math.max(1, (budget ?? visible.length) - 1));
+
   return (
     <Box flexDirection="column" height={height}>
-      <RepoMap
-        entries={s.repo.files}
-        width={width}
-        maxRows={height === undefined ? undefined : mapBudget(height, s.plan.length, checksRows(s.checks), usageRows(s.usage))}
-      />
+      <Text dimColor>REPO</Text>
+      {visible.length === 0 ? (
+        <Text dimColor>{"  (reading the project…)"}</Text>
+      ) : (
+        visible.slice(view.start, view.end).map((row, i) => (
+          <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
+        ))
+      )}
       <Rule label="PLAN" width={width} />
       <PlanBody entries={s.plan} />
       <Rule label="CHECKS" width={width} />
@@ -313,6 +400,40 @@ export function Rail({ cwd, width, height }: { cwd: string; width: number; heigh
       <NarrowUsage usage={s.usage} width={width} />
     </Box>
   );
+}
+
+// One row of the tree. The marker column is the same width whether or not a
+// file changed, so nesting reads straight down and does not jog when the
+// agent touches something.
+export function TreeLine({ row, width, cursor }: { row: Row; width: number; cursor: boolean }): React.JSX.Element {
+  const indent = "  ".repeat(row.depth);
+  const caret = cursor ? "\u25ba" : " ";
+  if (row.dir) {
+    return (
+      <Text dimColor inverse={cursor}>
+        {clipTo(`${row.open === true ? "\u25be" : "\u25b8"}${caret} ${indent}${row.name}/`, width)}
+      </Text>
+    );
+  }
+  const e = row.entry;
+  if (e === undefined) {
+    return (
+      <Text dimColor inverse={cursor}>
+        {clipTo(`  ${caret} ${indent}${row.name}`, width)}
+      </Text>
+    );
+  }
+  const stat = e.problems > 0 ? `\u2716${e.problems}` : `+${e.added} -${e.removed}`;
+  const label = `${indent}${row.name}`.padEnd(Math.max(0, width - 12));
+  return (
+    <Text color={e.problems > 0 ? "red" : "green"} inverse={cursor}>
+      {clipTo(`${e.problems > 0 ? "\u2716" : "\u25aa"}${caret} ${label} ${stat}`, width)}
+    </Text>
+  );
+}
+
+function clipTo(s: string, width: number): string {
+  return s.length <= width ? s : `${s.slice(0, width - 1)}\u2026`;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,33 +455,93 @@ export async function newest(cwd: string, diffs: FileDiff[]): Promise<FileDiff |
   return best?.f;
 }
 
-export function Dock({ cwd, rows }: { cwd: string; rows: number }): React.JSX.Element {
-  const s = useWatch(cwd, false);
+// How much of an unchanged file to show. The dock is a preview, not an
+// editor: enough to see what the file is, and no scrollback to get lost in.
+const PREVIEW_LINES = 400;
+
+export function Dock({ cwd, rows, session = "" }: { cwd: string; rows: number; session?: string }): React.JSX.Element {
+  const s = useWatch(cwd, false, null);
   const [file, setFile] = useState<FileDiff | undefined>(undefined);
+  const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
 
   useEffect(() => {
-    void newest(cwd, s.repo.diffs).then(setFile);
-  }, [cwd, s.repo.diffs]);
+    let live = true;
+    void (async () => {
+      // A file the reader picked in the rail outranks the file the agent
+      // wrote last: they are looking at something on purpose.
+      const picked = session === "" ? "" : readSelection(session);
+      if (picked !== "") {
+        const diff = s.repo.diffs.find((f) => f.path === picked);
+        if (diff !== undefined) {
+          if (live) {
+            setFile(diff);
+            setPreview(null);
+          }
+          return;
+        }
+        // Picked, but unchanged. Showing "no diff" would make every
+        // unmodified file a dead end, so the dock reads it instead.
+        const text = await readFile(join(cwd, picked), "utf8").catch(() => null);
+        if (live) {
+          setFile(undefined);
+          setPreview(text === null ? null : { path: picked, text });
+        }
+        return;
+      }
+      const newestFile = await newest(cwd, s.repo.diffs);
+      if (live) {
+        setFile(newestFile);
+        setPreview(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [cwd, session, s.repo.diffs]);
 
+  const title = file?.path ?? preview?.path;
   useEffect(() => {
-    setPaneTitle(file === undefined ? " DIFF  (clean) " : ` DIFF  ${file.path} `);
-  }, [file?.path]);
+    setPaneTitle(title === undefined ? " DIFF  (clean) " : ` ${file === undefined ? "FILE" : "DIFF"}  ${title} `);
+  }, [title, file === undefined]);
 
-  if (file === undefined) {
-    return <Text dimColor>{"  working tree clean — nothing to review"}</Text>;
+  if (file !== undefined) return <LiveDiff file={file} maxLines={Math.max(3, rows - 2)} />;
+  if (preview !== null) {
+    const lines = preview.text.split("\n").slice(0, Math.min(PREVIEW_LINES, Math.max(3, rows - 2)));
+    return (
+      <Box flexDirection="column">
+        {lines.map((line, i) => (
+          <Text key={i} dimColor>{`${String(i + 1).padStart(4)}  ${line}`}</Text>
+        ))}
+      </Box>
+    );
   }
-  return <LiveDiff file={file} maxLines={Math.max(3, rows - 2)} />;
+  return <Text dimColor>{"  working tree clean — nothing to review"}</Text>;
 }
 
 // ---------------------------------------------------------------------------
 
 // Entry point for `ctui panel <which>`, run by tmux inside the pane.
-function Panel({ which }: { which: string }): React.JSX.Element {
+function Panel({ which, source, session }: { which: string; source: Source | null; session: string }): React.JSX.Element {
   const { cols, rows } = useSize();
   const cwd = process.cwd();
-  return which === "dock" ? <Dock cwd={cwd} rows={rows} /> : <Rail cwd={cwd} width={cols} height={rows} />;
+  return which === "dock" ? (
+    <Dock cwd={cwd} rows={rows} session={session} />
+  ) : (
+    <Rail cwd={cwd} width={cols} height={rows} source={source} session={session} />
+  );
 }
 
-export function renderPanel(which: string): void {
-  render(<Panel which={which} />);
+// Which on-disk session format to read, from the command the agent pane is
+// running. The name is a command, not an enum, so anything unrecognised gets
+// no source at all — REPO, CHECKS and DIFF still work, because those come
+// from git.
+export function sourceFor(agent: string): Source | null {
+  const name = agent.split("/").pop() ?? agent;
+  if (name === "claude") return CLAUDE;
+  if (name === "codex") return CODEX;
+  return null;
+}
+
+export function renderPanel(which: string, agent = "", session = ""): void {
+  render(<Panel which={which} source={sourceFor(agent)} session={session} />);
 }

@@ -126,6 +126,9 @@ async function main(): Promise<void> {
         // Left open on purpose: an unanswered call is what the rail's border
         // reads as "running", which is the state worth photographing.
         call("t2", "Bash", { command: "npm run typecheck", description: "Typecheck the worktree" }),
+        // Trailing newline, because the reader deliberately holds an
+        // unterminated final line back as one the agent is still writing.
+        "",
       ].join("\n"),
     );
 
@@ -138,7 +141,10 @@ async function main(): Promise<void> {
         session: SESSION,
         repo,
         agent: ["sh", "-c", AGENT_SCRIPT],
-        panel: (which) => [tsx, self, "panel", which],
+        // "claude" names the session format the fixture transcript is in;
+        // the pane itself runs a canned shell, since a real turn is the one
+        // thing a preview cannot have.
+        panel: (which) => [tsx, self, "panel", which, "claude", SESSION],
         resize: [tsx, self, "resize"],
         cols: COLS,
         rows: ROWS,

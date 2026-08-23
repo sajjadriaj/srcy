@@ -3,21 +3,22 @@
 An IDE around the coding agent you already use.
 
 The agent is not wrapped, driven, or reimplemented. `claude`, `codex`,
-`opencode`, `pi`, `aider` — whichever binary you name runs in the big pane
-exactly as it runs in a bare terminal, with its own slash commands, its own
-keybinds, its own scrollback and its own mouse selection. ctui is the panes
-around it: what changed, what it plans to do, whether the code still builds,
-and how full its context window is.
+`opencode`, `pi`, `gemini`, `aider` — whichever binary you name runs in the
+big pane exactly as it runs in a bare terminal, with its own slash commands,
+its own keybinds, its own scrollback and its own mouse selection. ctui is the
+panes around it: the project tree with this session's work marked in it, the
+agent's plan, whether the code still builds, how full its context window is,
+and the file being edited as it is edited.
 
 ```
 ──  ⟳ Bash Typecheck the wor──┬──  ✳ Claude Code  ──────────────────────────────────────────────────
 REPO                          │> fix the token expiry off-by-one
-   src/                       │
-     auth/                    │● Read  src/auth/token.ts
-▪      expiry.test.ts +1 -0   │● Read  src/auth/session.ts
-✖      session.ts    ✖1       │
-▪      token.ts      +1 -1    │The expiry check is exclusive: a token that expires on this exact
-▪ wrote  ✖ failing            │millisecond is still accepted. Changing < to <= in verify().
+▸  .ctui/                     │
+▾  src/                       │● Read  src/auth/token.ts
+▾    auth/                    │● Read  src/auth/session.ts
+▪►     expiry.test.ts +1 -0   │
+✖      session.ts     ✖1      │The expiry check is exclusive: a token that expires on this exact
+▪      token.ts       +1 -1   │millisecond is still accepted. Changing < to <= in verify().
 ─ PLAN ───────────────────────│
   ✔ find the expiry comparison│● Edit  src/auth/token.ts
   ✔ fix the off-by-one        │● Edit  src/auth/session.ts
@@ -39,30 +40,43 @@ src/auth/session.ts:1
    4   }
 ```
 
-Left rail, top to bottom: every file this session touched with how much of
-each changed, the agent's own plan as a live checklist, what your project's
-checker says, and how full the window is. Bottom dock: the file being edited,
-as it is edited. Big pane: the agent, untouched.
-
 ## How it works
 
-tmux hosts the layout. That is the whole trick, and it is why the agent stays
+tmux hosts the layout, on a socket of ctui's own. That is why the agent stays
 native: tmux already solves the pty, the resize protocol, scrollback, mouse
-and copy-paste, and it solves them better than a reimplementation inside this
-repo would. The agent gets a real terminal because it *is* in a real terminal.
+and copy-paste, better than a reimplementation in this repo would. The agent
+gets a real terminal because it *is* in a real terminal.
+
+The private socket is not cosmetic. Agents ask their terminal for things —
+Claude Code wants `focus-events`, pi wants `extended-keys` so shift+enter
+arrives as shift+enter — and those are server-wide options in tmux. On a
+shared server, turning them on would reach into every other session you have
+open and stay on after ctui exits. On ctui's own server they are ctui's to
+set. Your `~/.tmux.conf` still loads, so your prefix and keybinds are
+unchanged; the cost is that ctui sessions answer to `tmux -L ctui ls` rather
+than a bare `tmux ls`.
 
 The panels never speak to the agent. There is no protocol to intercept, no
-adapter to install, and nothing that has to be supported per-agent. They read:
+adapter to install. They read:
 
-- **git**, for what changed and by how much — `REPO` and `DIFF`
+- **git**, for the tree and what changed in it — `REPO` and `DIFF`
 - **your project's own checker**, for whether it still builds — `CHECKS`
-- **Claude Code's session transcript**, for the plan and the token counts —
+- **the agent's own session log**, for the plan and the token counts —
   `PLAN` and `CONTEXT`
 
 The first two work for every agent, and for a person with an editor open. The
-last is Claude-Code-specific: under `--agent codex` the rail keeps `REPO`,
-`CHECKS` and `DIFF`, and leaves `PLAN` and `CONTEXT` blank rather than
-guessing at them.
+third is per-agent, because each writes its own format:
+
+| agent | `PLAN` | `CONTEXT` |
+|---|---|---|
+| `claude` | yes | yes, window inferred (200k, or 1M once past it) |
+| `codex` | when it calls `update_plan` | yes, against the window codex records itself |
+| anything else | blank | blank |
+
+An agent ctui cannot read gets blank panels rather than another agent's
+numbers. Codex is the better-instrumented of the two: it writes the real
+context window with every token count, so that gauge is measured rather than
+guessed.
 
 ## Install
 
@@ -82,16 +96,16 @@ Run inside any git repo:
 
 ```bash
 ctui                          # claude, in this repo
-ctui --agent codex            # or codex, opencode, pi, aider — the name is the command
+ctui --agent codex            # or pi, gemini, opencode, aider — the name is the command
 ctui -- claude --model opus   # everything after -- is the agent's own argv
 ctui --name review            # a second session on the same repo
-ctui why src/tts.ts:18        # which commit produced this line, and its message
 ```
 
 Running `ctui` again from the same repo re-attaches to the session already
-working there instead of starting a second one beside it. `--name` is for
-wanting two on purpose. Quitting the agent ends the session; the panels do
-not keep it alive with nothing to watch.
+working there instead of starting a second one. The session is named after
+the repo *and* a hash of its path, so `~/work/api` and `~/side/api` never
+collide. Quitting the agent ends the session; the panels do not keep it alive
+with nothing to watch. A mistyped flag is refused rather than ignored.
 
 Keys are tmux's, because it is tmux:
 
@@ -101,22 +115,33 @@ ctrl-b ←→   pane by direction  ctrl-b d    detach (the agent keeps working)
 mouse       click to focus, drag a border to resize, scroll to scroll back
 ```
 
-Detaching leaves the agent running. `ctui` from the same repo picks it back up.
+Detaching leaves the agent running; `ctui` from the same repo picks it back
+up. With the keyboard in the rail:
+
+```
+j / k  ↓ / ↑   move the cursor
+⏎ or space     open or close a directory; on a file, pin the dock to it
+```
+
+The agent keeps every keystroke otherwise — the rail is inert until you move
+the keyboard to it, which is the point.
 
 ## What the panels say
 
-`REPO` is every file with changes against `HEAD`, staged or not — an agent
-that ran `git add` has not thereby shown you anything. New files count their
-whole length, because `+0 -0` on a file that did not exist an hour ago reads
-as "nothing happened here". A file whose checks fail turns red and spends its
-count column on the failure count rather than the churn: `+1 -1` is not what
-you act on when the file no longer compiles. A file that fails checks appears
-even if the agent never touched it — the question is what is broken, and
-git's answer to what moved does not contain it.
+`REPO` is the project, not just the diff: every file git tracks or would
+track, with this session's work marked in it. Directories start closed except
+the ones holding a change, so the work is visible without a keystroke while
+the other ten thousand files stay one row each. Changed files carry their
+churn; a file whose checks fail turns red and spends that column on the
+failure count instead — `+1 -1` is not what you act on when the file no
+longer compiles. New files count their whole length, because `+0 -0` on a
+file that did not exist an hour ago reads as "nothing happened here".
 
-When the pane is too short for the tree, the nesting is what gets cut and the
-list goes flat, worst first. A truncated tree spends its few rows on
-directory headers and hides the files under them.
+`DIFF` follows the file the agent wrote last, until you pin it to one from
+the rail; a pinned file with no changes is shown as a plain preview rather
+than a dead end. The rail and the dock are separate processes, so the pick
+travels between them as a tmux user option on the session — a key-value store
+already scoped to exactly the right thing.
 
 `CHECKS` runs `.ctui/check` (executable) if you have one, otherwise your
 `typecheck` or `build` npm script. It runs when the diff stops moving, not on
@@ -125,17 +150,18 @@ rail that goes red between two halves of one edit is noise. Nothing is ever
 reported as passing before it has run.
 
 `CONTEXT` is how full the window is, how much the agent has written, and how
-much of its last request came from cache. The last two have no field in any
-agent protocol — they are read from the transcript Claude Code writes as it
-works. `cache` is the bloat reading: a session re-sending its whole context
+much of its last request came from cache. Occupancy is the last request's,
+never a running total — every agent's cumulative count runs to millions
+against a window of a few hundred thousand, which would peg the gauge at full
+forever. `cache` is the bloat reading: a session re-sending its whole context
 every turn shows it collapsing, a healthy one sits near 99% after the first
 request. ctui adds nothing to that window; every token in there is the
 agent's. An unmeasured window is left blank rather than drawn empty.
 
 The rail's own border says what the agent is doing right now — the one fact
 that belongs where the eye already is rather than in a row you have to find.
-Claude Code names its pane too, which is why the big pane's border reads
-`✳ Claude Code` without ctui writing a character of it.
+The agents name their own panes, which is why the big border reads
+`✳ Claude Code` or `π` without ctui writing a character of it.
 
 Colour is an encoding. Green wrote, red failed, dim is background you may
 skip. Every glyph is one cell wide in every terminal: the obvious markers
@@ -146,28 +172,6 @@ terminal settings, which tears a fixed-width column.
 photograph of it — no agent, no waiting on a turn. `PREVIEW_COLS` and
 `PREVIEW_ROWS` set the size. That is how to iterate on the panes.
 
-## The review gate
-
-`ctui gate` is the earlier design, still here: ctui drives the agent over ACP
-in a throwaway worktree, and nothing reaches your tree until you have read the
-diff and the agent has said what could break. What you accept is committed
-with your prompt as the subject, which is what `ctui why` reads back.
-
-It is no longer the default, because an agent driven over a protocol loses its
-slash commands, its keybinds and its scrollback — the opposite of what the
-panels exist to preserve. `npm run preview:gate` paints its frames.
-
-```bash
-ctui gate                  # prompt, watch, review, accept
-ctui gate --explain        # read-only: ask questions, nothing is kept
-```
-
-- worktrees under `.ctui/wt/<name>`, branches `ctui/<name>`, both removed on exit
-- `.ctui/` added to `.git/info/exclude`, not your `.gitignore`
-- accepting commits to your current branch with `Ctui-Session` / `Ctui-Prompt`
-  trailers; nothing is pushed
-- accepting into a file you have modified is refused, not merged
-
 ## Development
 
 ```bash
@@ -176,4 +180,4 @@ npm run typecheck
 npm run preview
 ```
 
-Design: `docs/superpowers/specs/2026-08-19-code-tui-design.md`
+Dependencies: `ink` and `react`. That is the whole list.
