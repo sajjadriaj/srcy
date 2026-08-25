@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { renameSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { LiveDiff, PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
 import type { FileDiff } from "./diff.js";
-import { runChecks, type CheckResult } from "./checks.js";
+import { runChecks, type CheckResult, type Problem } from "./checks.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
-import { publishSelection, readSelection } from "./tmux.js";
 import { CLAUDE, readSession, type Activity, type Source } from "./transcript.js";
 import { CODEX } from "./codex.js";
 
@@ -77,6 +78,64 @@ export function useSize(): { cols: number; rows: number } {
 }
 
 // ---------------------------------------------------------------------------
+// Between the panels
+//
+// The rail and the dock are separate processes, and the rail knows two things
+// the dock cannot see for itself: which file the reader picked, and what the
+// project's checker said. The dock will not run a typecheck the rail is
+// already running.
+//
+// This was a tmux user option, which is the right store for a path and the
+// wrong one for a check result. Measured on tmux 3.4: set-option refuses a
+// value somewhere past 16 KB with "command too long", and a value holding
+// `$name` reads back with a backslash inserted — enough on its own to make
+// JSON.parse throw on a message that mentions a shell variable. A file has
+// neither limit, costs no process per poll, and is named after the session,
+// which is already unique per repo.
+
+interface Shared {
+  file?: string;
+  checks?: CheckResult | null;
+}
+
+function statePath(session: string): string {
+  return join(tmpdir(), `${session}.json`);
+}
+
+let shared: Shared = {};
+
+// Written whole and renamed into place: the dock reads this on a timer, and a
+// half-written file is a JSON.parse away from the pane blanking mid-poll.
+export function publish(session: string, patch: Shared): void {
+  if (session === "") return;
+  shared = { ...shared, ...patch };
+  const path = statePath(session);
+  try {
+    writeFileSync(`${path}.tmp`, JSON.stringify(shared));
+    renameSync(`${path}.tmp`, path);
+  } catch {
+    // The dock keeps the last state it read, which beats a crashed rail.
+  }
+}
+
+// Clearing is its own verb. Merging an empty patch reads like a clear and is
+// not one: `shared` outlives the call, so the write would put the last pick
+// straight back on disk.
+export function reset(session: string): void {
+  shared = {};
+  publish(session, {});
+}
+
+export async function readShared(session: string): Promise<Shared> {
+  if (session === "") return {};
+  try {
+    return JSON.parse(await readFile(statePath(session), "utf8")) as Shared;
+  } catch {
+    return {};
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Polling
 
 interface Watched {
@@ -143,7 +202,7 @@ export function checkStep(
 // `rail` is the pane that shows everything. The dock shows one diff, so it
 // neither runs the project's checker nor opens the transcript — work whose
 // result it would never draw.
-function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
+function useWatch(cwd: string, rail: boolean, source: Source | null, session = ""): Watched {
   const [state, setState] = useState<Watched>(EMPTY);
   // Refs, not state: these drive when work happens, and re-rendering because
   // a fingerprint changed would be a render per poll forever.
@@ -161,6 +220,9 @@ function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
   useEffect(() => {
     let live = true;
     let timer: NodeJS.Timeout;
+    // A session name is reused when you reopen the same repo, so the file may
+    // still hold the last run's pick. Cleared before the dock can read it.
+    if (rail) reset(session);
 
     const tick = async (): Promise<void> => {
       try {
@@ -190,6 +252,9 @@ function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
               .then((r) => {
                 problems.current = r;
                 checkedFor.current = ranFor;
+                // The rail has room for `session.ts:3`. The message goes to
+                // the pane with the width to print it.
+                publish(session, { checks: r });
               })
               .catch(() => {})
               .finally(() => {
@@ -210,7 +275,7 @@ function useWatch(cwd: string, rail: boolean, source: Source | null): Watched {
       live = false;
       clearTimeout(timer);
     };
-  }, [cwd, rail, source]);
+  }, [cwd, rail, source, session]);
 
   return state;
 }
@@ -420,7 +485,7 @@ export function Rail({
   session?: string;
   interactive?: boolean;
 }): React.JSX.Element {
-  const s = useWatch(cwd, true, source);
+  const s = useWatch(cwd, true, source, session);
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
 
@@ -455,7 +520,7 @@ export function Rail({
         if (row.dir) setManual(toggle(manual, row.path, open.has(row.path)));
         // A file the reader picked outranks the file the agent wrote last:
         // they are looking at something on purpose.
-        else if (session !== "") publishSelection(session, row.path);
+        else publish(session, { file: row.path });
       }
     },
     // Ink turns on raw mode to read keys, which a pane that is not a
@@ -549,17 +614,72 @@ export async function newest(cwd: string, diffs: FileDiff[]): Promise<FileDiff |
 // editor: enough to see what the file is, and no scrollback to get lost in.
 const PREVIEW_LINES = 400;
 
-export function Dock({ cwd, rows, session = "" }: { cwd: string; rows: number; session?: string }): React.JSX.Element {
+// How many rows of failure the dock spends before the diff. Four is what the
+// rail already caps at, and a fifth line of TypeScript is rarely the one that
+// tells you something the first four did not.
+const DOCK_PROBLEMS = 4;
+
+// The rail says `session.ts:3`, which is where — never what. The message is
+// the half that says what to do about it, and this is the pane with the
+// width to print it.
+//
+// Returned as strings rather than rendered here so the dock can count them:
+// the diff below has to give up exactly these rows, and Ink overdraws rather
+// than scrolling when it does not.
+export function problemLines(
+  checks: CheckResult | null | undefined,
+  focus: string | undefined,
+  width: number,
+): string[] {
+  if (checks === undefined || checks === null || checks.ok) return [];
+  // The file on screen first: its failures are the ones the diff underneath
+  // is about. The rest still show, because a tree that does not compile is
+  // worth reading whichever file you happened to be looking at.
+  const ordered = [
+    ...checks.problems.filter((p) => p.path === focus),
+    ...checks.problems.filter((p) => p.path !== focus),
+  ];
+  if (ordered.length === 0) {
+    // A failure that named no location at all: the raw output is the only
+    // thing there is to go on, and nowhere else shows it.
+    return checks.tail
+      .split("\n")
+      .filter((l) => l.trim() !== "")
+      .slice(-DOCK_PROBLEMS)
+      .map((l) => `  ${l}`.slice(0, width));
+  }
+  const out = ordered
+    .slice(0, DOCK_PROBLEMS)
+    .map((p: Problem) => `  ✖ ${p.path}:${p.line}  ${p.message}`.slice(0, width));
+  if (ordered.length > out.length) out.push(`  …and ${ordered.length - out.length} more`);
+  return out;
+}
+
+export function Dock({
+  cwd,
+  rows,
+  width = 80,
+  session = "",
+}: {
+  cwd: string;
+  rows: number;
+  width?: number;
+  session?: string;
+}): React.JSX.Element {
   const s = useWatch(cwd, false, null);
   const [file, setFile] = useState<FileDiff | undefined>(undefined);
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
+  const [checks, setChecks] = useState<CheckResult | null | undefined>(undefined);
 
   useEffect(() => {
     let live = true;
     void (async () => {
+      const state = await readShared(session);
+      if (!live) return;
+      setChecks(state.checks);
       // A file the reader picked in the rail outranks the file the agent
       // wrote last: they are looking at something on purpose.
-      const picked = session === "" ? "" : readSelection(session);
+      const picked = state.file ?? "";
       if (picked !== "") {
         const diff = s.repo.diffs.find((f) => f.path === picked);
         if (diff !== undefined) {
@@ -594,18 +714,35 @@ export function Dock({ cwd, rows, session = "" }: { cwd: string; rows: number; s
     setPaneTitle(title === undefined ? " DIFF  (clean) " : ` ${file === undefined ? "FILE" : "DIFF"}  ${title} `);
   }, [title, file === undefined]);
 
-  if (file !== undefined) return <LiveDiff file={file} maxLines={Math.max(3, rows - 2)} />;
-  if (preview !== null) {
-    const lines = preview.text.split("\n").slice(0, Math.min(PREVIEW_LINES, Math.max(3, rows - 2)));
-    return (
+  const failures = problemLines(checks, title, width);
+  const room = Math.max(3, rows - 2 - failures.length);
+  const body =
+    file !== undefined ? (
+      <LiveDiff file={file} maxLines={room} />
+    ) : preview !== null ? (
       <Box flexDirection="column">
-        {lines.map((line, i) => (
-          <Text key={i} dimColor>{`${String(i + 1).padStart(4)}  ${line}`}</Text>
-        ))}
+        {preview.text
+          .split("\n")
+          .slice(0, Math.min(PREVIEW_LINES, room))
+          .map((line, i) => (
+            <Text key={i} dimColor>{`${String(i + 1).padStart(4)}  ${line}`}</Text>
+          ))}
       </Box>
+    ) : (
+      <Text dimColor>{"  working tree clean — nothing to review"}</Text>
     );
-  }
-  return <Text dimColor>{"  working tree clean — nothing to review"}</Text>;
+
+  if (failures.length === 0) return body;
+  return (
+    <Box flexDirection="column">
+      {failures.map((line, i) => (
+        <Text key={i} color="red">
+          {line}
+        </Text>
+      ))}
+      {body}
+    </Box>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -615,7 +752,7 @@ function Panel({ which, source, session }: { which: string; source: Source | nul
   const { cols, rows } = useSize();
   const cwd = process.cwd();
   return which === "dock" ? (
-    <Dock cwd={cwd} rows={rows} session={session} />
+    <Dock cwd={cwd} rows={rows} width={cols} session={session} />
   ) : (
     <Rail cwd={cwd} width={cols} height={rows} source={source} session={session} />
   );

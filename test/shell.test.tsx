@@ -11,7 +11,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, mapBudget, newest, usageRows } from "../src/panels.js";
+import { Dock, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
@@ -828,4 +828,142 @@ test("a check whose code has already moved says so instead of reading as current
   assert.doesNotMatch(render(<NarrowChecks result={passing} width={40} />).lastFrame() ?? "", /moved/);
   // Staleness is not a fourth state to confuse with the other three.
   assert.match(render(<NarrowChecks result={undefined} width={40} stale />).lastFrame() ?? "", /not run yet/);
+});
+
+// ---------------------------------------------------------------------------
+// What the checker actually said
+
+const failing = (problems: { path: string; line: number; message: string }[], tail = ""): {
+  command: string;
+  ok: boolean;
+  problems: { path: string; line: number; message: string }[];
+  tail: string;
+} => ({ command: "npm run typecheck", ok: false, problems, tail });
+
+test("the dock prints the message the rail has no room for", () => {
+  const problems = [
+    { path: "src/auth/session.ts", line: 3, message: "error TS2532: Object is possibly 'undefined'." },
+    { path: "src/auth/token.ts", line: 9, message: "error TS2345: Argument of type 'string' is not assignable." },
+  ];
+  const lines = problemLines(failing(problems), "src/auth/token.ts", 100);
+  // The file on screen leads: the diff underneath is about that one.
+  assert.match(lines[0]!, /token\.ts:9/, lines.join("\n"));
+  assert.match(lines[0]!, /TS2345/, lines.join("\n"));
+  assert.match(lines[1]!, /session\.ts:3/, lines.join("\n"));
+  // Which is the whole point: the rail can say where, never what.
+  const rail = render(<NarrowChecks result={failing(problems)} width={30} />).lastFrame() ?? "";
+  assert.doesNotMatch(rail, /TS2532/, rail);
+
+  // Nothing to say when the check passed, was never run, or does not exist.
+  assert.deepEqual(problemLines({ ...failing([]), ok: true }, "a.ts", 80), []);
+  assert.deepEqual(problemLines(undefined, "a.ts", 80), []);
+  assert.deepEqual(problemLines(null, "a.ts", 80), []);
+});
+
+test("the dock caps the failure list and says what it cut", () => {
+  const many = Array.from({ length: 9 }, (_, i) => ({
+    path: `src/deeply/nested/module${i}.ts`,
+    line: i + 1,
+    message: `error TS2532: Object is possibly 'undefined' and this sentence runs well past any pane ${i}`,
+  }));
+  const lines = problemLines(failing(many), undefined, 100);
+  assert.equal(lines.length, 5, lines.join("\n"));
+  assert.match(lines[4]!, /…and 5 more/, lines.join("\n"));
+  // And every line is clipped to the pane, never wrapped onto the diff.
+  for (const line of problemLines(failing(many), undefined, 24)) {
+    assert.ok(line.length <= 24, JSON.stringify(line));
+  }
+});
+
+test("a failure that named no file still shows its output somewhere", () => {
+  // Parsed nothing means the tail is the only evidence there is, and no
+  // other pane draws it — a red rail with no message anywhere is the state
+  // this exists to prevent.
+  const lines = problemLines(failing([], "\nlink error: undefined symbol _start\nexit 2\n"), "a.ts", 80);
+  assert.deepEqual(lines, ["  link error: undefined symbol _start", "  exit 2"]);
+});
+
+test("the panels pass a check result between processes without tmux mangling it", async (t) => {
+  // tmux 3.4 was the first transport: set-option refuses a value past ~16 KB,
+  // and `$name` in a value reads back with a backslash inserted, which makes
+  // JSON.parse throw. Both are exercised here.
+  const session = `ctui-test-bus-${process.pid}`;
+  t.after(() => rm(join(tmpdir(), `${session}.json`), { force: true }));
+  const problems = Array.from({ length: 20 }, (_, i) => ({
+    path: `src/very/deeply/nested/module${i}.ts`,
+    line: i + 1,
+    message: `error TS2532: $HOME is possibly 'undefined' ${"x".repeat(400)}`,
+  }));
+  publish(session, { file: "src/auth/token.ts" });
+  publish(session, { checks: failing(problems, "tail") });
+  const got = await readShared(session);
+  assert.equal(got.file, "src/auth/token.ts");
+  assert.deepEqual(got.checks?.problems, problems);
+
+  // An unwritten session is "nothing picked", not a crash.
+  assert.deepEqual(await readShared(`ctui-test-absent-${process.pid}`), {});
+});
+
+test("the dock gives the diff the rows the failures took", async (t) => {
+  const repo = await mkdtemp(join(tmpdir(), "ctui-dockrows-"));
+  const session = `ctui-test-dock-${process.pid}`;
+  t.after(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(join(tmpdir(), `${session}.json`), { force: true });
+  });
+  await writeFile(join(repo, "a.ts"), "const a = 1\n");
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+  // Long enough that the diff has to clip. With the failure line taking a
+  // row and nothing giving one back, the pane overflows — and Ink overdraws
+  // rather than scrolling, so the overflow lands on top of the border.
+  await writeFile(
+    join(repo, "a.ts"),
+    `const a = 1\n${Array.from({ length: 12 }, (_, i) => `const v${i} = ${i}`).join("\n")}\n`,
+  );
+  publish(session, {
+    file: "a.ts",
+    checks: failing([
+      { path: "a.ts", line: 2, message: "error TS1000: nope" },
+      { path: "a.ts", line: 3, message: "error TS1001: also nope" },
+      { path: "a.ts", line: 4, message: "error TS1002: still nope" },
+    ]),
+  });
+
+  const { lastFrame, unmount } = render(<Dock cwd={repo} rows={8} width={70} session={session} />);
+  t.after(() => unmount());
+  await new Promise((r) => setTimeout(r, 900));
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /TS1000: nope/, frame);
+  assert.match(frame, /const v11 = 11/, frame);
+  // The three failure rows came out of the diff's budget, not out of the pane.
+  assert.ok(frame.split("\n").length <= 8, `${frame.split("\n").length} rows in a pane of 8:\n${frame}`);
+});
+
+test("a reopened session does not pin the dock to last time's file", async (t) => {
+  // The session name is derived from the repo, so it comes back identical
+  // tomorrow — and so does the state file, still holding whatever was picked
+  // before. The rail clears it before the dock can read it.
+  const repo = await mkdtemp(join(tmpdir(), "ctui-stale-"));
+  const session = `ctui-test-stale-${process.pid}`;
+  const state = join(tmpdir(), `${session}.json`);
+  t.after(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(state, { force: true });
+  });
+  await writeFile(join(repo, "a.ts"), "const a = 1\n");
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+  await writeFile(state, JSON.stringify({ file: "gone-yesterday.ts" }));
+
+  const { unmount } = render(<Rail cwd={repo} width={30} height={20} session={session} interactive={false} />);
+  t.after(() => unmount());
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal((await readShared(session)).file, undefined);
 });

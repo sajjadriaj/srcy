@@ -38,6 +38,7 @@ REPO                          │> fix the token expiry off-by-one
   session.ts:3                │
 ▮▮▮▯▯ 52% 105k/200k cache 99% │
 ──  DIFF  src/auth/session.ts  ─────────────────────────────────────────────────────────────────────
+  ✖ src/auth/session.ts:3  error TS2532: Object is possibly 'undefined'.
 src/auth/session.ts:1
    1   export class Session {
    2 +   private renewals = 0
@@ -150,9 +151,19 @@ file that did not exist an hour ago reads as "nothing happened here".
 
 `DIFF` follows the file the agent wrote last, until you pin it to one from
 the rail; a pinned file with no changes is shown as a plain preview rather
-than a dead end. The rail and the dock are separate processes, so the pick
-travels between them as a tmux user option on the session — a key-value store
-already scoped to exactly the right thing.
+than a dead end. When the checker is failing, the dock heads the diff with
+what it said — the file on screen first, then the rest — because the rail has
+room for `session.ts:3` and the message is the half that tells you what to do
+about it. Those rows come out of the diff's budget, never off the bottom of
+the pane.
+
+The rail and the dock are separate processes, so both the pick and the check
+result travel between them through one small file named after the session. It
+was a tmux user option, which is the right store for a path and the wrong one
+for a check result: measured on tmux 3.4, `set-option` refuses a value past
+about 16 KB, and a value holding `$name` reads back with a backslash inserted,
+which is on its own enough to make `JSON.parse` throw on an error message that
+mentions a shell variable.
 
 `CHECKS` runs `.ctui/check` (executable) if you have one, otherwise your
 `typecheck` or `build` npm script. It runs when the diff stops moving, not on
@@ -160,7 +171,8 @@ every keystroke: an agent mid-edit produces a broken tree on purpose, and a
 rail that goes red between two halves of one edit is noise. Nothing is ever
 reported as passing before it has run — and once the code has moved on, the
 verdict says `code moved since` and stops being drawn as current. A stale
-green reads exactly like a fresh one, and only one of them is worth trusting.
+green reads exactly like a fresh one, and only one of them is worth trusting. The failures
+themselves land in the dock, where there is width for the message.
 
 The gauge on the bottom edge is one line with no heading — `52% 105k/200k
 cache 99%` says what it is, and a `CONTEXT` rule above it would cost a row of
