@@ -290,19 +290,28 @@ test("CHECKS in the rail counts first and lists second", () => {
   assert.match(render(<NarrowChecks result={null} width={30} />).lastFrame() ?? "", /none configured/);
 });
 
-test("CONTEXT stacks in a narrow rail instead of wrapping into nonsense", () => {
-  const frame =
-    render(<NarrowUsage usage={{ used: 105_000, size: 200_000, output: 12_000, cached: 0.99 }} width={30} />).lastFrame() ??
-    "";
-  const lines = frame.split("\n");
-  assert.ok(lines.length >= 3, `expected the numbers stacked, got:\n${frame}`);
-  for (const line of lines) {
-    assert.ok(line.length <= 30, `usage row overflows the rail: ${JSON.stringify(line)}`);
+test("the gauge is one line and the counts survive every rail width", () => {
+  // The bar gives up its cells, never the numbers: at the narrow end the bar
+  // shrinks to nothing before `105k/200k` loses a digit, because the digits
+  // are what the reader is there for.
+  // 20 is narrower than railWidth ever asks for, but a pane is not a
+  // promise: drag the border and the rail gets whatever is left. One line
+  // that overflows becomes two that Ink lays on top of the tree.
+  for (const width of [20, 30, 34, 40, 44]) {
+    const frame =
+      render(<NarrowUsage usage={{ used: 105_000, size: 200_000, output: 12_000, cached: 0.99 }} width={width} />).lastFrame() ?? "";
+    const lines = frame.split("\n");
+    assert.equal(lines.length, 1, `expected one line at ${width}, got:\n${frame}`);
+    assert.ok(lines[0]!.length <= width, `gauge overflows a ${width}-wide rail: ${JSON.stringify(lines[0])}`);
+    assert.match(frame, /53%/, frame);
+    assert.match(frame, /105k\/200k/, frame);
+    // cache is the first thing cut, because it is the last thing read.
+    if (width >= 30) assert.match(frame, /cache 99%/, frame);
+    // The heading is gone; the line has to say what it is on its own.
+    assert.doesNotMatch(frame, /CONTEXT/, frame);
+    // And `out` went with the rows it cost.
+    assert.doesNotMatch(frame, /out 12k/, frame);
   }
-  assert.match(frame, /53%/);
-  assert.match(frame, /105k\/200k/);
-  assert.match(frame, /out 12k/);
-  assert.match(frame, /cache 99%/);
   // An unmeasured window is not an empty one.
   assert.match(render(<NarrowUsage usage={null} width={30} />).lastFrame() ?? "", /not measured/);
 });
@@ -348,6 +357,9 @@ test("the budget counts what the fixed sections actually draw", () => {
   assert.equal(usageRows(bare), count(<NarrowUsage usage={bare} width={30} />));
   const full = { used: 1, size: 2, output: 3, cached: 0.5 };
   assert.equal(usageRows(full), count(<NarrowUsage usage={full} width={30} />));
+  // The rail draws two rules now, not three. A budget still counting the
+  // deleted CONTEXT rule would leave a blank row at the bottom for ever.
+  assert.equal(mapBudget(24, 3, 2, 1), 24 - 2 - 3 - 2 - 1);
   // And the map never gets a negative or absurd budget out of a tiny pane.
   assert.ok(mapBudget(6, 5, 4, 3) >= 3);
 });
@@ -792,8 +804,9 @@ test("the rail draws the project, the plan and the gauge from what is on disk", 
   assert.match(frame, /token\.ts\s+\+1 -0/, frame);
   // The plan and the gauge, read from the transcript.
   assert.match(frame, /fix the expiry/, frame);
-  assert.match(frame, /CONTEXT/, frame);
   assert.match(frame, /94\.6k|95k/, frame);
+  assert.match(frame, /\u25ae/, frame); // the gauge itself, on the bottom edge
+  assert.doesNotMatch(frame, /CONTEXT/, frame);
   // And nothing wrapped past the pane it was given.
   for (const line of frame.split("\n")) {
     assert.ok(line.length <= 34, `rail row overflows: ${JSON.stringify(line)}`);

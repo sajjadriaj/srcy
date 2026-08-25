@@ -10,28 +10,33 @@ panes around it: the project tree with this session's work marked in it, the
 agent's plan, whether the code still builds, how full its context window is,
 and the file being edited as it is edited.
 
+None of that reimplements what the agent already prints. An agent's pane is
+a log: every fact appears once, at the moment it happened, then goes under
+the next forty tool calls. The rail is state — what the plan is *now*, what
+has changed *so far*, whether the tree compiles *at this moment*. Where the
+two overlap, the rail is the copy still on screen an hour later. Where they
+do not, it is the only copy.
+
 ```
 ──  ⟳ 52s Bash Typecheck th…──┬──  ✳ Claude Code  ──────────────────────────────────────────────────
 REPO                          │> fix the token expiry off-by-one
 ▸  .ctui/                     │
-▾  src/                       │● Read  src/auth/token.ts
-▾    auth/                    │● Read  src/auth/session.ts
-▪►     expiry.test.ts +1 -0   │
-✖      session.ts     ✖1      │The expiry check is exclusive: a token that expires on this exact
-▪      token.ts       +1 -1   │millisecond is still accepted. Changing < to <= in verify().
-─ PLAN ───────────────────────│
-  ✔ find the expiry comparison│● Edit  src/auth/token.ts
-  ✔ fix the off-by-one        │● Edit  src/auth/session.ts
-  ▸ add a regression test     │● Bash  npm run typecheck
+▸  docs/                      │● Read  src/auth/token.ts
+▾  src/                       │● Read  src/auth/session.ts
+▾    auth/                    │
+▪►     expiry.test.ts +1 -0   │The expiry check is exclusive: a token that expires on this exact
+        hash.ts               │millisecond is still accepted. Changing < to <= in verify().
+✖      session.ts     ✖1      │
+▪      token.ts       +1 -1   │● Edit  src/auth/token.ts
+▸    http/                    │● Edit  src/auth/session.ts
+─ PLAN ───────────────────────│● Bash  npm run typecheck
+  ✔ find the expiry comparison│
+  ✔ fix the off-by-one        │❯
+  ▸ add a regression test     │
 ─ CHECKS ─────────────────────│
-  ✖ 1 in 1 file               │❯
+  ✖ 1 in 1 file               │
   session.ts:3                │
-                              │
-                              │
-─ CONTEXT ────────────────────│
-▮▮▮▮▮▮▮▮▮▮▮▮▯▯▯▯▯▯▯▯▯▯  52%   │
-  105k/200k                   │
-  out 12k  cache 99%          │
+▮▮▮▯▯ 52% 105k/200k cache 99% │
 ──  DIFF  src/auth/session.ts  ─────────────────────────────────────────────────────────────────────
 src/auth/session.ts:1
    1   export class Session {
@@ -62,12 +67,12 @@ adapter to install. They read:
 - **git**, for the tree and what changed in it — `REPO` and `DIFF`
 - **your project's own checker**, for whether it still builds — `CHECKS`
 - **the agent's own session log**, for the plan and the token counts —
-  `PLAN` and `CONTEXT`
+  `PLAN` and the gauge
 
 The first two work for every agent, and for a person with an editor open. The
 third is per-agent, because each writes its own format:
 
-| agent | `PLAN` | `CONTEXT` |
+| agent | `PLAN` | the gauge |
 |---|---|---|
 | `claude` | yes | yes, window inferred (200k, or 1M once past it) |
 | `codex` | when it calls `update_plan` | yes, against the window codex records itself |
@@ -157,14 +162,23 @@ reported as passing before it has run — and once the code has moved on, the
 verdict says `code moved since` and stops being drawn as current. A stale
 green reads exactly like a fresh one, and only one of them is worth trusting.
 
-`CONTEXT` is how full the window is, how much the agent has written, and how
-much of its last request came from cache. Occupancy is the last request's,
-never a running total — every agent's cumulative count runs to millions
-against a window of a few hundred thousand, which would peg the gauge at full
-forever. `cache` is the bloat reading: a session re-sending its whole context
-every turn shows it collapsing, a healthy one sits near 99% after the first
-request. ctui adds nothing to that window; every token in there is the
-agent's. An unmeasured window is left blank rather than drawn empty.
+The gauge on the bottom edge is one line with no heading — `52% 105k/200k
+cache 99%` says what it is, and a `CONTEXT` rule above it would cost a row of
+the tree to repeat that. It used to be four rows. Claude Code prints a
+context percentage in its own status line and again under `/context`, so
+most of those rows were spending the rail's scarcest resource on a number
+the reader already had twice. They went back to `REPO`, which has no second
+copy anywhere.
+
+What survived the cut is the part no agent prints. `cache` is the bloat
+reading: a session re-sending its whole context every turn shows it
+collapsing, a healthy one sits near 99% after the first request. Occupancy
+is the last request's, never a running total — every agent's cumulative
+count runs to millions against a window of a few hundred thousand, which
+would peg the gauge at full forever. The bar gives up its cells as the rail
+narrows, never the digits: the bar is glanced at, the numbers are read. ctui
+adds nothing to that window; every token in there is the agent's. An
+unmeasured window says so rather than being drawn empty.
 
 The rail's own border says what the agent is doing right now, and for how
 long: `⟳ 52s Bash npm test`. That clock is the difference between an agent

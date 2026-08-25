@@ -269,21 +269,32 @@ export function NarrowChecks({
   );
 }
 
-// The wide UsageBar puts everything on one line, which a rail this narrow
-// wraps into nonsense. Same numbers, stacked.
+// One line, and no heading above it.
+//
+// Claude Code prints a context percentage in its own status line and again
+// under /context, so a four-row panel here was spending the rail's scarcest
+// resource on a number the reader already had. What no agent prints is the
+// cache share — the reading that says whether a session is re-sending its
+// whole context every turn — so that is the part worth a row.
+//
+// `out` is gone with the rows it cost. It was the one number here nobody
+// acts on: knowing the agent has written twelve thousand tokens changes
+// nothing you would do next.
 export function NarrowUsage({ usage, width }: { usage: Usage | null; width: number }): React.JSX.Element {
-  if (usage === null) return <Text dimColor>{"  not measured"}</Text>;
+  if (usage === null) return <Text dimColor>{clipTo("  context not measured", width)}</Text>;
   const frac = usage.used / usage.size;
   const color = frac >= 0.85 ? "red" : frac >= 0.6 ? "yellow" : "green";
-  const bar = gauge(usage.used, usage.size, Math.max(6, width - 8));
-  const extras: string[] = [];
-  if (usage.output !== undefined) extras.push(`out ${tokens(usage.output)}`);
-  if (usage.cached !== undefined) extras.push(`cache ${Math.round(usage.cached * 100)}%`);
+  const cache = usage.cached === undefined ? "" : ` cache ${Math.round(usage.cached * 100)}%`;
+  const text = `${String(Math.round(frac * 100)).padStart(2)}% ${tokens(usage.used)}/${tokens(usage.size)}${cache}`;
+  // The numbers are sized first and the bar takes what is left. A bar with a
+  // fixed width pushes the counts off the right edge of a narrow rail, and
+  // the counts are the half you read — the bar is only there to be glanced
+  // at. One cell is held back so an exact fit cannot wrap.
+  const bar = gauge(usage.used, usage.size, Math.max(0, width - text.length - 2));
   return (
-    <Box flexDirection="column">
-      <Text color={color}>{`${bar} ${String(Math.round(frac * 100)).padStart(3)}%`}</Text>
-      <Text dimColor>{`  ${tokens(usage.used)}/${tokens(usage.size)}`}</Text>
-      {extras.length > 0 ? <Text dimColor>{`  ${extras.join("  ")}`}</Text> : null}
+    <Box>
+      <Text color={color}>{bar}</Text>
+      <Text dimColor>{clipTo(` ${text}`, width - bar.length)}</Text>
     </Box>
   );
 }
@@ -340,15 +351,16 @@ export function checksRows(result: CheckResult | null | undefined): number {
   return 1 + shown + (result.problems.length > shown ? 1 : 0);
 }
 
-export function usageRows(usage: Usage | null): number {
-  if (usage === null) return 1;
-  return usage.output === undefined && usage.cached === undefined ? 2 : 3;
+// One line whatever it holds. Still measured through this function rather
+// than written as 1 in the budget, so the two can never drift apart.
+export function usageRows(_usage: Usage | null): number {
+  return 1;
 }
 
 // Lines left for the file list once the plan, the failures, the gauge and
-// the three rules between them have taken theirs.
+// the two rules between them have taken theirs.
 export function mapBudget(height: number, plan: number, checks: number, usage: number): number {
-  return Math.max(3, height - 3 - Math.max(1, plan) - checks - usage);
+  return Math.max(3, height - 2 - Math.max(1, plan) - checks - usage);
 }
 
 // How often the project's file list is refreshed. Slower than the poll
@@ -469,11 +481,12 @@ export function Rail({
       <PlanBody entries={s.plan} />
       <Rule label="CHECKS" width={width} />
       <NarrowChecks result={s.checks} width={width} stale={s.stale} />
-      {/* Pushes CONTEXT to the bottom edge, so the gauge is in the same
-          place whether the session has touched two files or twenty. A
-          number you have to hunt for is a number you stop reading. */}
+      {/* Pushes the gauge to the bottom edge, so it is in the same place
+          whether the session has touched two files or twenty. A number you
+          have to hunt for is a number you stop reading. It carries no
+          heading: `47% 94.6k/200k` says what it is, and a rule above it
+          would cost a row of the tree to repeat that. */}
       <Box flexGrow={1} />
-      <Rule label="CONTEXT" width={width} />
       <NarrowUsage usage={s.usage} width={width} />
     </Box>
   );

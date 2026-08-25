@@ -302,7 +302,9 @@ const EMPTY = "▯";
 // "how much" per column, this one encodes "how far along", and reusing the
 // glyphs would make two different quantities look like the same thing.
 export function gauge(used: number, size: number, width = GAUGE_WIDTH): string {
-  if (size <= 0) return "";
+  // A caller with no room left asks for zero cells, and the fill below would
+  // round up to one and then repeat the remainder -1 times, which throws.
+  if (size <= 0 || width <= 0) return "";
   const frac = Math.min(1, Math.max(0, used / size));
   // A window with anything in it never reads as empty, and one with room
   // left never reads as full — the two states the reader acts on.
@@ -333,7 +335,4 @@ export interface Usage {
   cached?: number;
 }
 
-// Above 80% of the window, a compaction is close enough that it changes what
-// a reader should do next — finish the thought, or start a fresh session.
-const CONTEXT_WARN = 0.8;
 

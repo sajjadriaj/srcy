@@ -13,7 +13,7 @@
 import { spawnSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SOCKET, build } from "../src/tmux.js";
 import { projectDir } from "../src/transcript.js";
@@ -93,6 +93,24 @@ async function main(): Promise<void> {
     await mkdir(join(repo, "src", "auth"), { recursive: true });
     await writeFile(join(repo, "src/auth/token.ts"), `${BEFORE}\n`);
     await writeFile(join(repo, "src/auth/session.ts"), "export class Session {\n}\n");
+    await writeFile(join(repo, "src/auth/hash.ts"), "export const hash = (s: string): string => s\n");
+    // Files this session never touches. They are the point of REPO: the rail
+    // is the project, so the directories holding no change collapse to one
+    // row each and the one holding the work is already open.
+    for (const [path, body] of [
+      ["src/index.ts", "export * from './auth/token.js'\n"],
+      ["src/http/client.ts", "export const get = (u: string): string => u\n"],
+      ["src/http/routes.ts", "export const routes = []\n"],
+      ["src/util/clock.ts", "export const now = (): number => Date.now()\n"],
+      ["src/util/log.ts", "export const log = console.log\n"],
+      ["docs/api.md", "# api\n"],
+      ["docs/setup.md", "# setup\n"],
+      ["package.json", '{ "name": "expiry" }\n'],
+      ["README.md", "# expiry\n"],
+    ] as const) {
+      await mkdir(dirname(join(repo, path)), { recursive: true });
+      await writeFile(join(repo, path), body);
+    }
     // A checker that fails, because the red path is the one worth looking
     // at: it colours a row in the map, puts a count beside it, and fills
     // CHECKS. A preview where everything passes exercises none of that.
