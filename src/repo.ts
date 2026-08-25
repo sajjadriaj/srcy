@@ -7,7 +7,7 @@ import type { Problem } from "./checks.js";
 
 // What the repo looks like right now, derived from git alone.
 //
-// This is the half of the panels that works for every agent. ctui does not
+// This is the half of the panels that works for every agent. srcy does not
 // speak to the agent — it is the real binary in its own pane — so "what
 // changed" is answered the way a second terminal would answer it: by asking
 // git. Claude Code, Codex, opencode, aider, or a human typing vim all move

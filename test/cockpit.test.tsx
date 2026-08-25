@@ -176,7 +176,7 @@ test("ChecksPane shows the output when a failure names no location", () => {
   const frame =
     render(
       <ChecksPane
-        result={{ command: "./.ctui/check", ok: false, problems: [], tail: "Segmentation fault" }}
+        result={{ command: "./.srcy/check", ok: false, problems: [], tail: "Segmentation fault" }}
         running={false}
       />,
     ).lastFrame() ?? "";

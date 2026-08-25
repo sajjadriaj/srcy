@@ -33,7 +33,7 @@ const CHECK_QUIET_MS = 2500;
 // A pane sets its own tmux title with OSC 2 — the same escape any terminal
 // program uses to name its window. tmux reads it into #{pane_title}, which
 // the border format prints. So the border can say which file the dock is
-// showing without ctui drawing a single border character itself.
+// showing without srcy drawing a single border character itself.
 function setPaneTitle(title: string): void {
   // Only to a real terminal. Anywhere else — a pipe, a test — this is an
   // escape sequence printed into somebody's output as literal text.
@@ -171,7 +171,7 @@ export function fingerprint(s: RepoState): string {
 // When to run the project's checker. Pure, because the decision has three
 // conditions and one of them already hid a bug: a clean tree fingerprints to
 // the empty string, so a `mark` starting at "" read as "nothing changed" and
-// the checker never ran at all on a repo that was already clean when ctui
+// the checker never ran at all on a repo that was already clean when srcy
 // opened. `mark` is null until the first observation for exactly that reason.
 //
 // The wait exists because an agent mid-edit produces a broken tree on
@@ -478,7 +478,7 @@ export function Rail({
   cwd: string;
   width: number;
   height?: number;
-  // Null for an agent whose session format ctui cannot read: PLAN and
+  // Null for an agent whose session format srcy cannot read: PLAN and
   // CONTEXT stay blank rather than showing another agent's numbers.
   source?: Source | null;
   // Where to publish the file the cursor picks, for the dock to read.
@@ -747,7 +747,7 @@ export function Dock({
 
 // ---------------------------------------------------------------------------
 
-// Entry point for `ctui panel <which>`, run by tmux inside the pane.
+// Entry point for `srcy panel <which>`, run by tmux inside the pane.
 function Panel({ which, source, session }: { which: string; source: Source | null; session: string }): React.JSX.Element {
   const { cols, rows } = useSize();
   const cwd = process.cwd();

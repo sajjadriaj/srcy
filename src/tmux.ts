@@ -1,30 +1,30 @@
 import { spawn, spawnSync } from "node:child_process";
 
-// ctui runs its own tmux server, on its own socket.
+// srcy runs its own tmux server, on its own socket.
 //
 // Two reasons, and the second is why it is not optional. Agents want terminal
 // features their host has to turn on — Claude Code asks for focus-events, pi
 // asks for extended-keys so shift+enter reaches it — and both of those are
 // server-wide in tmux. Setting them on a shared server would reach into every
-// other session the reader has open and stay changed after ctui exits.
+// other session the reader has open and stay changed after srcy exits.
 // On our own socket they are ours to set.
 //
 // The reader's ~/.tmux.conf still loads, so their prefix and keybinds are
-// unchanged. The cost is that ctui sessions do not appear in a bare
-// `tmux ls` — that is `tmux -L ctui ls`.
-export const SOCKET = "ctui";
+// unchanged. The cost is that srcy sessions do not appear in a bare
+// `tmux ls` — that is `tmux -L srcy ls`.
+export const SOCKET = "srcy";
 
 // The literal `tmux` a shell inside a pane must type to reach this server:
 // the teardown line sequenced onto the agent's command runs there, not here.
 export const TMUX = `tmux -L ${SOCKET}`;
 
-// ctui does not run the agent. tmux does.
+// srcy does not run the agent. tmux does.
 //
 // The agent in the big pane is the real `claude` / `codex` / `opencode`
 // binary, attached to a real pty, with a real terminal under it: its slash
 // commands, its keybinds, its scrollback, its mouse selection and its
 // alt-screen all work because nothing here is emulating any of them. The
-// panes around it are ctui processes that watch the repo.
+// panes around it are srcy processes that watch the repo.
 //
 // tmux is doing the part that would otherwise be a terminal emulator, a pty
 // layer and a resize protocol living in this repo, and doing it better than
@@ -58,7 +58,7 @@ export interface Layout {
   repo: string;
   agent: string[];
   panel: (which: string) => string[];
-  // How to re-invoke ctui for the window-resized hook, as argv.
+  // How to re-invoke srcy for the window-resized hook, as argv.
   resize: string[];
   cols: number;
   rows: number;
@@ -95,7 +95,14 @@ export function plan(l: Layout): string[][] {
     // What the agents in the pane ask their terminal for. Claude Code wants
     // focus-events so it knows when you looked away; pi wants extended-keys
     // so shift+enter arrives as shift+enter instead of a bare newline. Both
-    // are server-wide, which is exactly why ctui has a server of its own.
+    // are server-wide, which is exactly why srcy has a server of its own.
+    // The borders are srcy's layout, not decoration, so they are drawn rather
+    // than left to whatever grey the terminal's default resolves to — on a
+    // dark theme that is close enough to the background that the three panes
+    // read as three unrelated blocks. Safe to set here in a way it would not
+    // be on a shared server: this one is srcy's.
+    ["set-option", "-t", S, "pane-border-style", "fg=colour240"],
+    ["set-option", "-t", S, "pane-active-border-style", "fg=colour78"],
     ["set-option", "-t", S, "focus-events", "on"],
     ["set-option", "-t", S, "extended-keys", "on"],
     // The agent pane keeps the keyboard: it is the thing you type into.
@@ -149,7 +156,7 @@ interface Panes {
 
 // Which pane is which, by where it sits. Positions are read rather than
 // remembered because a pane id is not stable across a session the user has
-// since rearranged, and because `ctui resize` runs in a fresh process that
+// since rearranged, and because `srcy resize` runs in a fresh process that
 // was never told them.
 //
 // The dock is the bottom row; of the two above it, the rail is on the left.
@@ -197,7 +204,7 @@ export function launch(l: Layout, titles: Record<string, string>): void {
 // Inside an existing tmux, attach-session refuses to nest. switch-client is
 // the same gesture from in there, and leaves the outer session alone.
 export function attach(session: string): void {
-  // TMUX is dropped rather than switch-client'd: ctui's server is not the one
+  // TMUX is dropped rather than switch-client'd: srcy's server is not the one
   // the reader may already be sitting in, and tmux refuses to attach at all
   // while that variable says it is already inside a session. Removing it is
   // the standard way to nest, and leaves their outer session alone.

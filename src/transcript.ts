@@ -16,7 +16,7 @@ import type { PlanEntry, Usage } from "./cockpit.js";
 
 // Claude Code names a session's transcript directory after the working
 // directory it ran in, with every non-alphanumeric character replaced by a
-// dash: /home/u/p/.ctui/wt/s1 -> -home-u-p--ctui-wt-s1.
+// dash: /home/u/p/.srcy/wt/s1 -> -home-u-p--srcy-wt-s1.
 export function projectDir(cwd: string): string {
   return join(homedir(), ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
 }
@@ -75,7 +75,7 @@ export function parseUsage(text: string): Usage | null {
 // The rest of the transcript: what the agent is doing, and what it plans to do.
 //
 // These come from the same file as the token counts, and for the same reason.
-// ctui no longer drives the agent — the agent is the real binary, running in
+// srcy no longer drives the agent — the agent is the real binary, running in
 // its own pane, with its own slash commands and keybinds intact — so there is
 // no protocol to listen to. What the panels know, they know by watching the
 // repo and reading this file.
@@ -260,8 +260,8 @@ export function usageOf(f: Fold): Usage | null {
 }
 
 // newestTranscript finds the session file for `cwd`. Unlike transcriptUsage,
-// there is no `since` filter: ctui now attaches to an agent the reader
-// started themselves, possibly before ctui, so "newer than this process" is
+// there is no `since` filter: srcy now attaches to an agent the reader
+// started themselves, possibly before srcy, so "newer than this process" is
 // the wrong test. Newest-modified is the session being typed into.
 export async function newestTranscript(cwd: string, dir = projectDir(cwd)): Promise<string | null> {
   let names: string[];

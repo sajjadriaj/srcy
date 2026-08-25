@@ -8,7 +8,7 @@ import { git } from "../src/git.js";
 // The directory is removed after the test via t.after, the node:test
 // equivalent of Go's t.TempDir() auto-cleanup.
 export async function newRepo(t: TestContext): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), "ctui-"));
+  const dir = await mkdtemp(join(tmpdir(), "srcy-"));
   t.after(async () => {
     await rm(dir, { recursive: true, force: true });
   });

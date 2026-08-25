@@ -29,22 +29,22 @@ const TAIL_LINES = 12;
 // A wall of problems is noise — the first few are what get fixed.
 const MAX_PROBLEMS = 20;
 
-// checkCommand decides what to run. `.ctui/check` (executable, in the user's
+// checkCommand decides what to run. `.srcy/check` (executable, in the user's
 // real repo) wins outright: it is the escape hatch for any project whose
 // build is not one command. Otherwise we fall back to the one npm script
 // that is nearly always a fast correctness check.
 //
 // ponytail: two cases, not a build-system detector. Cargo, Go, Maven and
 // friends each want their own command and their own error format; add
-// `.ctui/check` and you have all of them. Grow this only if one ecosystem
+// `.srcy/check` and you have all of them. Grow this only if one ecosystem
 // turns out to be worth special-casing.
 export async function checkCommand(repo: string): Promise<string[] | null> {
-  const script = join(repo, ".ctui", "check");
+  const script = join(repo, ".srcy", "check");
   try {
     await access(script, constants.X_OK);
     return [script];
   } catch {
-    // no executable .ctui/check — fall through
+    // no executable .srcy/check — fall through
   }
   try {
     const pkg = JSON.parse(await readFile(join(repo, "package.json"), "utf8")) as {
@@ -133,12 +133,12 @@ export async function runChecks(worktreePath: string, repo: string): Promise<Che
       } catch {
         // already gone
       }
-      text += `\nctui: check timed out after ${TIMEOUT_MS / 1000}s`;
+      text += `\nsrcy: check timed out after ${TIMEOUT_MS / 1000}s`;
     }, TIMEOUT_MS);
     timer.unref();
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ text: `ctui: could not run check: ${err.message}`, code: 1 });
+      resolve({ text: `srcy: could not run check: ${err.message}`, code: 1 });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -150,7 +150,7 @@ export async function runChecks(worktreePath: string, repo: string): Promise<Che
   return {
     // The script's absolute path is a temp-dir-length distraction in a
     // status line; what the reader needs is which of the two it was.
-    command: argv[0] === join(repo, ".ctui", "check") ? ".ctui/check" : argv.join(" "),
+    command: argv[0] === join(repo, ".srcy", "check") ? ".srcy/check" : argv.join(" "),
     ok: output.code === 0,
     problems: output.code === 0 ? [] : parseProblems(output.text, worktreePath),
     tail: lines.slice(-TAIL_LINES).join("\n"),

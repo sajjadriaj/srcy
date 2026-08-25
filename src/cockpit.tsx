@@ -200,7 +200,7 @@ export function ChecksPane({
   if (result === null) {
     // Deliberately not silent: a project with no check configured should
     // learn that it could have one, exactly when it would have mattered.
-    return <Text dimColor>{"CHECKS  none configured — add an executable .ctui/check"}</Text>;
+    return <Text dimColor>{"CHECKS  none configured — add an executable .srcy/check"}</Text>;
   }
   if (result.ok) {
     return <Text color="green">{`CHECKS  ${result.command}  ✔ passing`}</Text>;

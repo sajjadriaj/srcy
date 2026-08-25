@@ -7,24 +7,24 @@ import { git } from "./git.js";
 import { renderPanel } from "./panels.js";
 import { attach, have, launch, resize, sessionExists } from "./tmux.js";
 
-// repoRoot resolves the repository ctui is being run from, or explains why
+// repoRoot resolves the repository srcy is being run from, or explains why
 // there isn't one. Every command needs it and none of them work without it.
 async function repoRoot(): Promise<string> {
   try {
     return await git(process.cwd(), "rev-parse", "--show-toplevel");
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    console.error(`ctui must be run inside a git repository. (${detail})`);
+    console.error(`srcy must be run inside a git repository. (${detail})`);
     process.exit(1);
   }
 }
 
 function die(msg: string): never {
-  console.error(`ctui: ${msg}`);
+  console.error(`srcy: ${msg}`);
   process.exit(1);
 }
 
-// One tmux session per repo, so running ctui again from the same directory
+// One tmux session per repo, so running srcy again from the same directory
 // re-attaches to the agent already working there instead of starting a
 // second one beside it. `--name` is for wanting two on purpose.
 export function sessionName(repo: string, name?: string): string {
@@ -37,13 +37,13 @@ export function sessionName(repo: string, name?: string): string {
   // not looking at. The suffix is what makes the name identify the path.
   const id = createHash("sha1").update(repo).digest("hex").slice(0, 6);
   const tail = name === undefined ? "" : `-${safe(name)}`;
-  return `ctui-${safe(base)}${tail}-${id}`;
+  return `srcy-${safe(base)}${tail}-${id}`;
 }
 
 // The agent name IS the command. There is no adapter to pick and no
 // protocol to support — whatever binary you name runs in the big pane
 // exactly as it would in a bare terminal — so a whitelist here would only
-// be a list of programs ctui had heard of.
+// be a list of programs srcy had heard of.
 export function parseShell(argv: string[]): { agent: string[]; name?: string } {
   let agent = ["claude"];
   let name: string | undefined;
@@ -57,7 +57,7 @@ export function parseShell(argv: string[]): { agent: string[]; name?: string } {
       i++;
     } else if (flag === "--") {
       // Everything after -- is the agent's own argv, passed through
-      // untouched: `ctui -- claude --model opus --resume`.
+      // untouched: `srcy -- claude --model opus --resume`.
       agent = argv.slice(i + 1);
       break;
     } else {
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   const session = sessionName(repo, name);
 
   if (!have("tmux")) {
-    die("tmux is required (apt install tmux / brew install tmux). ctui hosts the agent in a tmux pane so it stays the real binary.");
+    die("tmux is required (apt install tmux / brew install tmux). srcy hosts the agent in a tmux pane so it stays the real binary.");
   }
   // Re-attaching must not check the agent binary: the session already has
   // one running, and the check would fail for a session started elsewhere.
@@ -127,7 +127,7 @@ async function main(): Promise<void> {
 // Both sides go through realpathSync: `npm link` and `npm install -g` put a
 // symlink in node_modules/.bin, so argv[1] is that symlink while
 // import.meta.url is always the real file. Comparing them unresolved makes
-// every installed `ctui` exit 0 having done nothing at all.
+// every installed `srcy` exit 0 having done nothing at all.
 const isEntryPoint = ((): boolean => {
   const invoked = process.argv[1];
   if (invoked === undefined) return false;

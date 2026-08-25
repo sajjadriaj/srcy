@@ -67,7 +67,7 @@ test("a window already past 200k is proof of the larger one", () => {
 
 test("the transcript directory is named the way Claude Code names it", () => {
   // Every non-alphanumeric character becomes a dash, so a worktree under
-  // .ctui/wt lands in a directory with a doubled dash where the dot was.
-  assert.match(projectDir("/home/u/p/.ctui/wt/s1"), /projects\/-home-u-p--ctui-wt-s1$/);
+  // .srcy/wt lands in a directory with a doubled dash where the dot was.
+  assert.match(projectDir("/home/u/p/.srcy/wt/s1"), /projects\/-home-u-p--srcy-wt-s1$/);
 });
 

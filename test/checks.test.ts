@@ -59,13 +59,13 @@ test("parseProblems strips ANSI colour before matching", () => {
   assert.deepEqual(parseProblems(out, "/repo"), [{ path: "src/a.ts", line: 7, message: "error: red" }]);
 });
 
-test("checkCommand prefers an executable .ctui/check over any npm script", async (t) => {
+test("checkCommand prefers an executable .srcy/check over any npm script", async (t) => {
   const repo = await newRepo(t);
   await writeFile(join(repo, "package.json"), JSON.stringify({ scripts: { typecheck: "tsc" } }));
   assert.deepEqual(await checkCommand(repo), ["npm", "run", "typecheck", "--silent"]);
 
-  await mkdir(join(repo, ".ctui"), { recursive: true });
-  const script = join(repo, ".ctui", "check");
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  const script = join(repo, ".srcy", "check");
   await writeFile(script, "#!/bin/sh\nexit 0\n");
   // Present but not executable is not a command — the same rule postcreate
   // uses, so a stray file can't start running on every turn.
@@ -90,8 +90,8 @@ test("runChecks reports nothing to run as null, never as a pass", async (t) => {
 
 test("runChecks runs the check inside the worktree and reports failures", async (t) => {
   const repo = await newRepo(t);
-  await mkdir(join(repo, ".ctui"), { recursive: true });
-  const script = join(repo, ".ctui", "check");
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  const script = join(repo, ".srcy", "check");
   // Prints a location relative to its own cwd, which is what a real
   // compiler does — proving the check ran in the directory we passed.
   await writeFile(script, '#!/bin/sh\necho "src/a.ts:4:1: error: broken"\ncat marker.txt\nexit 1\n');
@@ -108,8 +108,8 @@ test("runChecks runs the check inside the worktree and reports failures", async 
 
 test("runChecks reports a passing check with no problems", async (t) => {
   const repo = await newRepo(t);
-  await mkdir(join(repo, ".ctui"), { recursive: true });
-  const script = join(repo, ".ctui", "check");
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  const script = join(repo, ".srcy", "check");
   // Exits 0 while printing something that looks exactly like an error:
   // exit status is the verdict, not whatever the tool chose to print.
   await writeFile(script, '#!/bin/sh\necho "src/a.ts:4:1: error: not actually a failure"\nexit 0\n');
@@ -122,8 +122,8 @@ test("runChecks reports a passing check with no problems", async (t) => {
 
 test("a failure that names no file still reads as failing, with its output kept", async (t) => {
   const repo = await newRepo(t);
-  await mkdir(join(repo, ".ctui"), { recursive: true });
-  const script = join(repo, ".ctui", "check");
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  const script = join(repo, ".srcy", "check");
   // A crash, a missing binary, a bare "FAILED" — no file:line anywhere. If
   // the pane only rendered `problems`, this would show as zero problems and
   // read exactly like a clean run.

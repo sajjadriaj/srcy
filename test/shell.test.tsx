@@ -24,7 +24,7 @@ import { newRepo } from "./helpers.js";
 // The layout
 
 const LAYOUT = {
-  session: "ctui-x",
+  session: "srcy-x",
   repo: "/r",
   agent: ["claude"],
   panel: (which: string) => ["node", "/i.js", "panel", which],
@@ -61,7 +61,7 @@ test("quitting the agent ends the session, and only the agent does", () => {
   // tmux's pane-exited hook accepts `set-hook` and then never fires (3.4),
   // so teardown rides on the agent's own command line instead.
   const start = steps.find((s) => s[0] === "new-session")!;
-  assert.match(start.at(-1)!, /'claude';\s*tmux -L ctui kill-session -t 'ctui-x'/);
+  assert.match(start.at(-1)!, /'claude';\s*tmux -L srcy kill-session -t 'srcy-x'/);
   // And only the agent's: a panel crashing must not take the session down
   // with an agent mid-turn.
   for (const split of steps.filter((s) => s[0] === "split-window")) {
@@ -368,7 +368,7 @@ test("the budget counts what the fixed sections actually draw", () => {
 // Reading the transcript without re-reading it
 
 test("folding in an append gives the same answer as parsing the whole file", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "ctui-fold-"));
+  const dir = await mkdtemp(join(tmpdir(), "srcy-fold-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, "s.jsonl");
 
@@ -403,7 +403,7 @@ test("folding in an append gives the same answer as parsing the whole file", asy
 });
 
 test("a line still being written is folded in once, when it is finished", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "ctui-partial-"));
+  const dir = await mkdtemp(join(tmpdir(), "srcy-partial-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, "s.jsonl");
 
@@ -424,7 +424,7 @@ test("a line still being written is folded in once, when it is finished", async 
 });
 
 test("a replaced or truncated transcript starts over instead of folding onto a stranger", async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "ctui-reset-"));
+  const dir = await mkdtemp(join(tmpdir(), "srcy-reset-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const a = join(dir, "a.jsonl");
   const b = join(dir, "b.jsonl");
@@ -475,7 +475,7 @@ test("the checker waits for the tree to stop moving, then runs once", () => {
 // Naming the session, and reading the command line
 
 test("two repos with the same basename get different sessions", () => {
-  // Otherwise `ctui` in ~/side/api re-attaches to the agent working in
+  // Otherwise `srcy` in ~/side/api re-attaches to the agent working in
   // ~/work/api: the reader types at an agent editing a repo they are not
   // looking at, beside a rail describing the other one.
   assert.notEqual(sessionName("/home/u/work/api"), sessionName("/home/u/side/api"));
@@ -500,9 +500,9 @@ test("a mistyped flag is refused, not ignored", () => {
 
 test("the layout turns on what the agents in the pane ask their terminal for", () => {
   // Claude Code wants focus-events, pi wants extended-keys for shift+enter.
-  // Both are server-wide options, which is the whole reason ctui runs its own
+  // Both are server-wide options, which is the whole reason srcy runs its own
   // tmux server: setting them on the reader's would reach into every other
-  // session they have open and stay changed after ctui exits.
+  // session they have open and stay changed after srcy exits.
   const opts = new Map(
     plan(LAYOUT)
       .filter((s) => s[0] === "set-option")
@@ -512,7 +512,7 @@ test("the layout turns on what the agents in the pane ask their terminal for", (
   assert.equal(opts.get("extended-keys"), "on");
 });
 
-test("every teardown the agent's shell runs reaches ctui's own server", () => {
+test("every teardown the agent's shell runs reaches srcy's own server", () => {
   // A bare `tmux kill-session` from inside the pane talks to the default
   // server, where this session does not exist — so nothing is torn down and
   // the panels outlive the agent again.
@@ -597,7 +597,7 @@ test("codex's plan is read when it writes one", () => {
 });
 
 test("codex sessions are found by the directory they declare, newest first", async (t) => {
-  const root = await mkdtemp(join(tmpdir(), "ctui-cx-"));
+  const root = await mkdtemp(join(tmpdir(), "srcy-cx-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   // Filed by date, several levels down — the walk must not count levels.
   const day = join(root, "2026", "08", "19");
@@ -887,7 +887,7 @@ test("the panels pass a check result between processes without tmux mangling it"
   // tmux 3.4 was the first transport: set-option refuses a value past ~16 KB,
   // and `$name` in a value reads back with a backslash inserted, which makes
   // JSON.parse throw. Both are exercised here.
-  const session = `ctui-test-bus-${process.pid}`;
+  const session = `srcy-test-bus-${process.pid}`;
   t.after(() => rm(join(tmpdir(), `${session}.json`), { force: true }));
   const problems = Array.from({ length: 20 }, (_, i) => ({
     path: `src/very/deeply/nested/module${i}.ts`,
@@ -901,12 +901,12 @@ test("the panels pass a check result between processes without tmux mangling it"
   assert.deepEqual(got.checks?.problems, problems);
 
   // An unwritten session is "nothing picked", not a crash.
-  assert.deepEqual(await readShared(`ctui-test-absent-${process.pid}`), {});
+  assert.deepEqual(await readShared(`srcy-test-absent-${process.pid}`), {});
 });
 
 test("the dock gives the diff the rows the failures took", async (t) => {
-  const repo = await mkdtemp(join(tmpdir(), "ctui-dockrows-"));
-  const session = `ctui-test-dock-${process.pid}`;
+  const repo = await mkdtemp(join(tmpdir(), "srcy-dockrows-"));
+  const session = `srcy-test-dock-${process.pid}`;
   t.after(async () => {
     await rm(repo, { recursive: true, force: true });
     await rm(join(tmpdir(), `${session}.json`), { force: true });
@@ -947,8 +947,8 @@ test("a reopened session does not pin the dock to last time's file", async (t) =
   // The session name is derived from the repo, so it comes back identical
   // tomorrow — and so does the state file, still holding whatever was picked
   // before. The rail clears it before the dock can read it.
-  const repo = await mkdtemp(join(tmpdir(), "ctui-stale-"));
-  const session = `ctui-test-stale-${process.pid}`;
+  const repo = await mkdtemp(join(tmpdir(), "srcy-stale-"));
+  const session = `srcy-test-stale-${process.pid}`;
   const state = join(tmpdir(), `${session}.json`);
   t.after(async () => {
     await rm(repo, { recursive: true, force: true });

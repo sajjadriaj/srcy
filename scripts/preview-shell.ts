@@ -2,9 +2,9 @@
 // prints a photograph of it.
 //
 // Layout work has to be looked at. Looking at this layout means looking at
-// tmux's pane borders as well as ctui's panes, so a component-level render
+// tmux's pane borders as well as srcy's panes, so a component-level render
 // would be a picture of half the product. This builds the session the way
-// `ctui` builds it, attaches to it from inside a second tmux session sized
+// `srcy` builds it, attaches to it from inside a second tmux session sized
 // exactly, and captures that — borders, titles and all.
 //
 // The only fixture is the agent: a real one would need a real turn. The
@@ -18,8 +18,8 @@ import { fileURLToPath } from "node:url";
 import { SOCKET, build } from "../src/tmux.js";
 import { projectDir } from "../src/transcript.js";
 
-const SESSION = "ctui-preview";
-const CAMERA = "ctui-preview-camera";
+const SESSION = "srcy-preview";
+const CAMERA = "srcy-preview-camera";
 // Overridable so a frame can be captured at the size it will be pasted at.
 const COLS = Number(process.env.PREVIEW_COLS ?? 118);
 const ROWS = Number(process.env.PREVIEW_ROWS ?? 34);
@@ -29,11 +29,11 @@ const sh = (cmd: string, args: string[], cwd?: string): void => {
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")}\n${r.stderr ?? ""}`);
 };
 // The camera is an ordinary tmux session on the default server; the layout
-// being photographed lives on ctui's own socket. Keeping the two straight is
+// being photographed lives on srcy's own socket. Keeping the two straight is
 // the whole reason these are separate helpers.
 const cam = (args: string[]): string => spawnSync("tmux", args, { encoding: "utf8" }).stdout?.trim() ?? "";
 const camQuiet = (args: string[]): void => void spawnSync("tmux", args, { stdio: "ignore" });
-const ctuiQuiet = (args: string[]): void => void spawnSync("tmux", ["-L", SOCKET, ...args], { stdio: "ignore" });
+const srcyQuiet = (args: string[]): void => void spawnSync("tmux", ["-L", SOCKET, ...args], { stdio: "ignore" });
 
 const BEFORE = [
   "export function verify(t: string) {",
@@ -86,7 +86,7 @@ const todos = (...rows: [string, string][]): unknown => ({
 });
 
 async function main(): Promise<void> {
-  const repo = await mkdtemp(join(tmpdir(), "ctui-preview-"));
+  const repo = await mkdtemp(join(tmpdir(), "srcy-preview-"));
   const transcript = projectDir(repo);
 
   try {
@@ -114,15 +114,15 @@ async function main(): Promise<void> {
     // A checker that fails, because the red path is the one worth looking
     // at: it colours a row in the map, puts a count beside it, and fills
     // CHECKS. A preview where everything passes exercises none of that.
-    await mkdir(join(repo, ".ctui"), { recursive: true });
+    await mkdir(join(repo, ".srcy"), { recursive: true });
     await writeFile(
-      join(repo, ".ctui", "check"),
+      join(repo, ".srcy", "check"),
       ["#!/bin/sh", "echo \"src/auth/session.ts(3,21): error TS2532: Object is possibly 'undefined'.\"", "exit 1", ""].join("\n"),
     );
-    await chmod(join(repo, ".ctui", "check"), 0o755);
+    await chmod(join(repo, ".srcy", "check"), 0o755);
 
     sh("git", ["init", "-q"], repo);
-    sh("git", ["config", "user.email", "preview@ctui"], repo);
+    sh("git", ["config", "user.email", "preview@srcy"], repo);
     sh("git", ["config", "user.name", "preview"], repo);
     sh("git", ["add", "-A"], repo);
     sh("git", ["commit", "-qm", "base"], repo);
@@ -160,7 +160,7 @@ async function main(): Promise<void> {
     const self = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tsx = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 
-    ctuiQuiet(["kill-session", "-t", SESSION]);
+    srcyQuiet(["kill-session", "-t", SESSION]);
     build(
       {
         session: SESSION,
@@ -188,18 +188,18 @@ async function main(): Promise<void> {
     // client on the server most recently did anything — so -x/-y at creation
     // is only a hint, and a preview would come out the size of whatever
     // terminal the user happens to have open elsewhere. Both sessions are
-    // pinned so the frame is the size that was asked for. The real ctui
+    // pinned so the frame is the size that was asked for. The real srcy
     // session leaves this alone: there, tracking the terminal is correct.
     camQuiet(["set-option", "-t", CAMERA, "window-size", "manual"]);
     camQuiet(["resize-window", "-t", CAMERA, "-x", String(COLS), "-y", String(ROWS)]);
-    ctuiQuiet(["set-option", "-t", SESSION, "window-size", "manual"]);
-    ctuiQuiet(["resize-window", "-t", SESSION, "-x", String(COLS), "-y", String(ROWS)]);
+    srcyQuiet(["set-option", "-t", SESSION, "window-size", "manual"]);
+    srcyQuiet(["resize-window", "-t", SESSION, "-x", String(COLS), "-y", String(ROWS)]);
     // Long enough for a poll, a debounce and a check run to have happened.
     await new Promise((r) => setTimeout(r, 6000));
     console.log(cam(["capture-pane", "-p", "-t", CAMERA]).replace(/\s+$/gm, ""));
   } finally {
     camQuiet(["kill-session", "-t", CAMERA]);
-    ctuiQuiet(["kill-session", "-t", SESSION]);
+    srcyQuiet(["kill-session", "-t", SESSION]);
     await rm(repo, { recursive: true, force: true });
     await rm(transcript, { recursive: true, force: true });
   }
