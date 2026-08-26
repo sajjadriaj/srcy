@@ -205,6 +205,12 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
   `none configured` ≠ `timed out`. A gate that ran out of time proved nothing
   either way, so it is not rewritten to "failing".
+- **The part that actually changed is picked out inside the line.** An
+  off-by-one is one character in eighty; `-` and `+` say the line moved, not
+  where. Both views mark the span between the common prefix and the common
+  suffix, in inverse rather than a third colour — the row already spends
+  colour on `+` and `-`. A line rewritten outright shares neither end and is
+  left alone, because marking all of it says nothing.
 - **Side by side is a key, not the default.** The dock is a short pane
   spanning the window, so unified gets the whole width for the line and `s`
   halves it — worth it reading a rewrite, not watching one land. Each column

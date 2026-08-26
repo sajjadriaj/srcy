@@ -1232,3 +1232,23 @@ test("the border says the agent is working, or that it is your turn", () => {
   const narrow = activityTitle(null, now, 12, Date.parse("2026-08-26T10:00:00.000Z"));
   assert.ok(narrow.length <= 14, JSON.stringify(narrow));
 });
+
+test("a marked span emphasises without changing the row's width", () => {
+  // Inverse is escapes, not columns — but a row that grew by one cell would
+  // wrap, and a wrapped row lands on top of the one under it.
+  const strip = (s: string): string => s.replace(/\u001b\[[0-9;]*m/g, "");
+  const line = { num: "5", sign: "+", text: "  if (exp <= now())", mark: { from: 11, to: 12 } };
+  const plain = { num: "5", sign: "+", text: "  if (exp <= now())" };
+  for (const width of [20, 40, 76]) {
+    const a = render(<ReviewRow line={line} width={width} />).lastFrame() ?? "";
+    const b = render(<ReviewRow line={plain} width={width} />).lastFrame() ?? "";
+    assert.equal(a.split("\n").length, 1, a);
+    assert.equal(strip(a), strip(b), `${width}: ${JSON.stringify(a)}`);
+  }
+  // A span past the end of a clipped line is dropped rather than rendered
+  // off the row.
+  const far = { num: "5", sign: "+", text: "  if (exp <= now())", mark: { from: 60, to: 70 } };
+  const frame = render(<ReviewRow line={far} width={20} />).lastFrame() ?? "";
+  assert.equal(frame.split("\n").length, 1, frame);
+  assert.ok(strip(frame.split("\n")[0] ?? "").length <= 20, JSON.stringify(frame));
+});

@@ -1188,9 +1188,7 @@ export function ReviewRow({ line, width }: { line: ReviewLine; width: number }):
     return <Text dimColor>{clipTo(`  @@ ${line.text}`, width)}</Text>;
   }
   if (line.right === undefined) {
-    return (
-      <Text color={signColor(line.sign)}>{clipTo(`${line.num.padStart(4)} ${line.sign} ${line.text}`, width)}</Text>
-    );
+    return <Marked side={line} width={width} />;
   }
   // Halves, with one cell for the divider between them. Padded to exactly
   // half rather than left to Ink's layout: the divider has to land in the
@@ -1199,10 +1197,35 @@ export function ReviewRow({ line, width }: { line: ReviewLine; width: number }):
   const half = Math.floor((width - 1) / 2);
   return (
     <Box>
-      <Text color={signColor(line.sign)}>{cell(line, half).padEnd(half)}</Text>
+      <Marked side={line} width={half} pad={half} />
       <Text dimColor>{DIVIDER}</Text>
-      <Text color={signColor(line.right.sign)}>{cell(line.right, width - half - 1)}</Text>
+      <Marked side={line.right} width={width - half - 1} />
     </Box>
+  );
+}
+
+// One side of a row, with the part that actually differs picked out.
+//
+// Inverse rather than another colour: the row already spends colour on `+`
+// and `-`, and a second hue there would be read as a third kind of line
+// rather than as emphasis inside this one.
+function Marked({ side, width, pad = 0 }: { side: Side; width: number; pad?: number }): React.JSX.Element {
+  const color = signColor(side.sign);
+  const body = cell(side, width);
+  const full = pad > 0 ? body.padEnd(pad) : body;
+  const m = side.mark;
+  // The head is a fixed four columns of line number, a space, the sign and a
+  // space, so a span inside the text starts that far along the rendered row.
+  const head = 7;
+  const from = m === undefined ? 0 : Math.min(head + m.from, full.length);
+  const to = m === undefined ? 0 : Math.min(head + m.to, full.length);
+  if (to <= from) return <Text color={color}>{full}</Text>;
+  return (
+    <Text color={color}>
+      {full.slice(0, from)}
+      <Text inverse>{full.slice(from, to)}</Text>
+      {full.slice(to)}
+    </Text>
   );
 }
 

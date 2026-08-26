@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
 import { rowFor } from "../src/panels.js";
-import { START, actionFor, fileLines, move, scopeFor, view, type Review } from "../src/review.js";
+import { START, actionFor, fileLines, move, scopeFor, spans, view, type Review } from "../src/review.js";
 
 const raw = `diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -256,4 +256,37 @@ test("a failing line lands on the row that shows it", () => {
   // line numbers are in.
   const side = fileLines(rewrite[0]!, true);
   assert.equal(Number(side[rowFor(side, 6)]!.right?.num), 6);
+});
+
+test("the part that actually changed is the part that gets marked", () => {
+  // One character inside eighty is the case this exists for.
+  const one = spans("  if (exp < now())", "  if (exp <= now())")!;
+  assert.equal("  if (exp <= now())".slice(one.b.from, one.b.to), "=");
+  // Nothing was removed to make room for it, so the removal's span is empty
+  // — which is what an insertion looks like from the other side.
+  assert.equal(one.a.from, one.a.to);
+
+  // A line rewritten outright shares neither end. Marking all of it says
+  // nothing the `-` and `+` do not already say.
+  assert.equal(spans("aaa", "bbb"), undefined);
+  assert.equal(spans("same", "same"), undefined);
+
+  // Prefix and suffix never claim the same characters twice.
+  const grow = spans("ab", "aXb")!;
+  assert.equal("aXb".slice(grow.b.from, grow.b.to), "X");
+  assert.equal(grow.a.from, grow.a.to);
+
+  const both = splitDiff(`diff --git a/t.ts b/t.ts
+--- a/t.ts
++++ b/t.ts
+@@ -1,2 +1,2 @@ f()
+-  if (exp < now())
++  if (exp <= now())
+`)[0]!;
+  // Unified and split reach the same answer: it is the same pairing.
+  for (const split of [false, true]) {
+    const rows = fileLines(both, split);
+    const add = split ? rows.find((l) => l.right?.sign === "+")!.right! : rows.find((l) => l.sign === "+")!;
+    assert.equal(add.text.slice(add.mark!.from, add.mark!.to), "=");
+  }
 });

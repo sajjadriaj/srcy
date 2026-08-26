@@ -19,10 +19,65 @@ export type Scope = "turn" | "session" | "head";
 
 // One rendered row. `sign` is a diff prefix — ' ', '+', '-' — or '@' for a
 // hunk heading, which is not a line of the file and so carries no number.
+export interface Span {
+  from: number;
+  to: number;
+}
+
 export interface Side {
   num: string;
   sign: string;
   text: string;
+  // The part of `text` that actually differs from the line it replaced, when
+  // there is a line it replaced and the two have something in common. An
+  // off-by-one fix is one character inside eighty, and finding it by eye is
+  // the work the pane exists to save.
+  mark?: Span;
+}
+
+// The span that differs between two lines, as a common prefix and a common
+// suffix. Undefined when they share neither end: a line rewritten outright
+// is all changed, and marking all of it says nothing that the `-` and `+`
+// do not already say.
+//
+// The two spans are separate because they are in different strings — the
+// same edit is one character wide on one side and none on the other, which
+// is exactly what a one-character insertion looks like.
+export function spans(a: string, b: string): { a: Span; b: Span } | undefined {
+  if (a === b) return undefined;
+  const max = Math.min(a.length, b.length);
+  let head = 0;
+  while (head < max && a[head] === b[head]) head++;
+  // Bounded by what the prefix left, so the two never overlap and claim the
+  // same characters twice.
+  let tail = 0;
+  while (tail < max - head && a[a.length - 1 - tail] === b[b.length - 1 - tail]) tail++;
+  if (head === 0 && tail === 0) return undefined;
+  return { a: { from: head, to: a.length - tail }, b: { from: head, to: b.length - tail } };
+}
+
+// Marks every run of removals against the run of additions that replaced it,
+// pairing by position the way the split view does. Mutates: the rows were
+// built a line ago and belong to nobody else yet.
+function markRuns(lines: ReviewLine[]): void {
+  let i = 0;
+  while (i < lines.length) {
+    if (lines[i]!.sign !== "-") {
+      i++;
+      continue;
+    }
+    let cut = i;
+    while (cut < lines.length && lines[cut]!.sign === "-") cut++;
+    let add = cut;
+    while (add < lines.length && lines[add]!.sign === "+") add++;
+    for (let k = 0; k < Math.min(cut - i, add - cut); k++) {
+      const sp = spans(lines[i + k]!.text, lines[cut + k]!.text);
+      if (sp === undefined) continue;
+      lines[i + k]!.mark = sp.a;
+      lines[cut + k]!.mark = sp.b;
+    }
+    i = add > cut ? add : cut;
+  }
 }
 
 // One row of the pane. `right` is the new side of a side-by-side row: absent
@@ -102,7 +157,14 @@ function splitHunk(body: string, oldStart: number, newStart: number): ReviewLine
   let adds: Side[] = [];
   const flush = (): void => {
     for (let i = 0; i < Math.max(dels.length, adds.length); i++) {
-      out.push({ ...(dels[i] ?? BLANK), right: adds[i] ?? BLANK });
+      const del = dels[i];
+      const add = adds[i];
+      const sp = del === undefined || add === undefined ? undefined : spans(del.text, add.text);
+      if (sp !== undefined) {
+        del!.mark = sp.a;
+        add!.mark = sp.b;
+      }
+      out.push({ ...(del ?? BLANK), right: add ?? BLANK });
     }
     dels = [];
     adds = [];
@@ -139,7 +201,13 @@ export function fileLines(f: FileDiff, split = false): ReviewLine[] {
   const out: ReviewLine[] = [];
   for (const h of f.hunks) {
     out.push({ num: "", sign: "@", text: `${h.newStart}  ${h.func === "" ? TOP_LEVEL : h.func}` });
-    out.push(...(split ? splitHunk(h.body, h.oldStart, h.newStart) : hunkLines(h.body, h.newStart)));
+    if (split) {
+      out.push(...splitHunk(h.body, h.oldStart, h.newStart));
+      continue;
+    }
+    const body = hunkLines(h.body, h.newStart) as ReviewLine[];
+    markRuns(body);
+    out.push(...body);
   }
   // A rename or a mode change has no hunks at all. Saying so beats an empty
   // pane, which reads as "nothing happened" about a file that moved.
