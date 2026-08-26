@@ -390,6 +390,12 @@ checker work for every agent — and for a person with an editor open. Only
 Blank, never another agent's numbers — and `c` sets the turn baseline by hand
 wherever srcy cannot read one.
 
+An agent started *below* the root — a package in a monorepo, a worktree
+checked out under it — is still this repo's agent, and srcy reads its session
+rather than showing a blank PLAN, GOAL and gauge with no word about why. git
+is repo-wide either way. The session's own records carry the directory it
+runs in, so a sibling like `../api-legacy` is never mistaken for one of yours.
+
 <details>
 <summary>The same repo under <code>srcy --agent codex</code></summary>
 

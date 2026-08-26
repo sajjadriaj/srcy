@@ -21,8 +21,12 @@ import type { PlanEntry, Usage } from "./cockpit.js";
 // under a scratch HOME will actually look for it. The preview does exactly
 // that, and without it the transcript half of the picture — the plan, the
 // gauge, the goal — was blank in every frame it has ever produced.
+export function projectKey(cwd: string): string {
+  return cwd.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
 export function projectDir(cwd: string, home = homedir()): string {
-  return join(home, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+  return join(home, ".claude", "projects", projectKey(cwd));
 }
 
 // The transcript never records how big the context window is, and the model
@@ -448,12 +452,87 @@ export function usageOf(f: Fold, override = envWindow()): Usage | null {
 // there is no `since` filter: srcy now attaches to an agent the reader
 // started themselves, possibly before srcy, so "newer than this process" is
 // the wrong test. Newest-modified is the session being typed into.
-export async function newestTranscript(cwd: string, dir = projectDir(cwd)): Promise<string | null> {
+// The session file for work happening *under* `cwd`, when nothing is
+// happening in `cwd` itself.
+//
+// An agent started in a subdirectory -- a package inside a monorepo, a git
+// worktree checked out below the root -- files its transcript under that
+// directory's name, and srcy launched at the root would find nothing and
+// show a blank PLAN, a blank GOAL and a blank gauge with no word about why.
+// git is repo-wide either way, so the right answer is to read that session.
+//
+// The directory name is a lossy encoding of a path, so a prefix match can
+// claim `/home/u/proj-other` for `/home/u/proj`. The transcript's own records
+// carry the real `cwd`, which settles it.
+const HEAD_BYTES = 64 * 1024;
+
+async function headOf(path: string): Promise<string> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await open(path, "r");
+    const buf = Buffer.allocUnsafe(HEAD_BYTES);
+    const { bytesRead } = await fh.read(buf, 0, HEAD_BYTES, 0);
+    return buf.toString("utf8", 0, bytesRead);
+  } catch {
+    return "";
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
+async function transcriptBelow(cwd: string, root: string): Promise<string | null> {
+  const want = projectKey(cwd);
   let names: string[];
+  try {
+    names = await readdir(root);
+  } catch {
+    return null;
+  }
+  const under: { path: string; at: number }[] = [];
+  for (const name of names) {
+    if (!name.startsWith(`${want}-`)) continue;
+    let files: string[];
+    try {
+      files = await readdir(join(root, name));
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.endsWith(".jsonl")) continue;
+      const path = join(root, name, f);
+      try {
+        under.push({ path, at: (await stat(path)).mtimeMs });
+      } catch {
+        continue;
+      }
+    }
+  }
+  under.sort((a, b) => b.at - a.at);
+  for (const { path } of under) {
+    // One record is enough: every one of them carries the directory the
+    // session is running in. Bounded, because these files reach megabytes and
+    // the answer is in the first few kilobytes of them.
+    const head = await headOf(path);
+    const line = head.split("\n").find((l) => l.includes('"cwd"'));
+    if (line === undefined) continue;
+    try {
+      const at = (JSON.parse(line) as { cwd?: unknown }).cwd;
+      if (typeof at === "string" && at.startsWith(`${cwd}/`)) return path;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+export async function newestTranscript(cwd: string, dir = projectDir(cwd)): Promise<string | null> {
+  // A missing directory is the common shape of the case this falls back for:
+  // the agent has never run *here*, because it is running below here.
+  let names: string[] = [];
   try {
     names = await readdir(dir);
   } catch {
-    return null;
+    names = [];
   }
   let newest: { path: string; at: number } | null = null;
   for (const name of names) {
@@ -466,7 +545,9 @@ export async function newestTranscript(cwd: string, dir = projectDir(cwd)): Prom
       continue;
     }
   }
-  return newest?.path ?? null;
+  if (newest !== null) return newest.path;
+  // Nothing for this directory. The agent may be running below it.
+  return transcriptBelow(cwd, join(dir, ".."));
 }
 
 // A reader that remembers where it stopped. One per path, because a panel

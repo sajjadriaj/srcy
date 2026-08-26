@@ -110,17 +110,24 @@ export async function findSession(cwd: string, root = SESSIONS): Promise<string 
     }
   }
   dated.sort((a, b) => b.at - a.at);
+  // Exact first, then anything running below it. An agent started in a
+  // package of a monorepo, or in a worktree checked out under the root, is
+  // working on this repo -- git is repo-wide either way -- and srcy finding
+  // nothing there means a blank PLAN, GOAL and gauge with no word about why.
+  let below: string | null = null;
   for (const { path } of dated) {
     const head = await firstLine(path);
     if (head === null) continue;
     try {
       const rec = JSON.parse(head) as { payload?: Payload };
-      if (rec.payload?.cwd === cwd) return path;
+      const at = rec.payload?.cwd;
+      if (at === cwd) return path;
+      if (below === null && typeof at === "string" && at.startsWith(`${cwd}/`)) below = path;
     } catch {
       continue;
     }
   }
-  return null;
+  return below;
 }
 
 // The subset of a call's arguments worth a one-line status.

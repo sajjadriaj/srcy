@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdir, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { parseState, parseUsage, projectDir, usageOf } from "../src/transcript.js";
+import { newestTranscript, parseState, parseUsage, projectDir, usageOf } from "../src/transcript.js";
 import { foldLine as codexFold } from "../src/codex.js";
 import { emptyFold, stateOf } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
@@ -220,4 +221,37 @@ test("a synthetic record is not a model, and does not reset anything", () => {
   assert.equal(u?.size, 1_000_000);
   // And the notice never gets to call itself the model on the gauge.
   assert.equal(u?.model, "claude-opus-5");
+});
+
+test("an agent running below the repo root is still this repo's agent", async (t) => {
+  const home = await mkdtemp(join(tmpdir(), "srcy-home-"));
+  t.after(async () => { await rm(home, { recursive: true, force: true }); });
+  const repo = "/work/api";
+  const sub = "/work/api/packages/core";
+
+  const rec = (cwd: string): string =>
+    JSON.stringify({ type: "assistant", cwd, timestamp: "2026-08-26T10:00:00.000Z", message: { role: "assistant", model: "claude-opus-5", usage: { input_tokens: 1 } } });
+
+  await mkdir(projectDir(sub, home), { recursive: true });
+  await writeFile(join(projectDir(sub, home), "s.jsonl"), rec(sub) + "\n");
+
+  // Nothing filed under the root, so the root would have shown a blank PLAN,
+  // GOAL and gauge with no word about why. git is repo-wide either way.
+  const found = await newestTranscript(repo, projectDir(repo, home));
+  assert.equal(found, join(projectDir(sub, home), "s.jsonl"));
+
+  // The directory name is a lossy encoding, so a prefix match alone would
+  // claim a sibling. The records carry the real cwd, which settles it.
+  const other = "/work/api-legacy";
+  await mkdir(projectDir(other, home), { recursive: true });
+  await writeFile(join(projectDir(other, home), "s.jsonl"), rec(other) + "\n");
+  assert.equal(await newestTranscript(repo, projectDir(repo, home)), join(projectDir(sub, home), "s.jsonl"));
+
+  // A directory of its own wins over anything below it.
+  await mkdir(projectDir(repo, home), { recursive: true });
+  await writeFile(join(projectDir(repo, home), "own.jsonl"), rec(repo) + "\n");
+  assert.equal(await newestTranscript(repo, projectDir(repo, home)), join(projectDir(repo, home), "own.jsonl"));
+
+  // And a repo with nothing anywhere still gets nothing.
+  assert.equal(await newestTranscript("/work/nothing", projectDir("/work/nothing", home)), null);
 });
