@@ -191,6 +191,8 @@ interface Watched {
   gates: Gate[];
   results: GateResult[];
   gateError?: string;
+  // .srcy/task.md's first line, or "" when the project has not pinned one.
+  task: string;
   // The gate running right now, or "" — a verdict from before it started is
   // not what is happening now.
   running: string;
@@ -202,6 +204,7 @@ const EMPTY: Watched = {
   usage: null,
   activity: null,
   turn: null,
+  task: "",
   gates: [],
   results: [],
   running: "",
@@ -276,6 +279,7 @@ function useWatch(
   const config = useRef<Gate[]>([]);
   const configError = useRef<string | undefined>(undefined);
   const configFor = useRef<string | null>(null);
+  const task = useRef("");
   const results = useRef<GateResult[]>([]);
   const queue = useRef<string[]>([]);
   const running = useRef("");
@@ -307,6 +311,7 @@ function useWatch(
           gates: config.current,
           results: results.current,
           gateError: configError.current,
+          task: task.current,
           running: running.current,
         });
 
@@ -338,6 +343,9 @@ function useWatch(
             const loaded = await loadGates(cwd);
             config.current = loaded.gates;
             configError.current = loaded.error;
+            // Same gate as the config: editing either is a change to the
+            // tree, which is the thing this branch is watching for.
+            task.current = await loadTask(cwd);
           }
 
           const step = checkStep(fp, mark.current, quietSince.current, Date.now(), running.current !== "");
@@ -665,7 +673,27 @@ export function usageRows(_usage: Usage | null): number {
 // for" three tool calls later, not to be read again in full. An agent whose
 // transcript srcy cannot read says so rather than showing an empty row,
 // which would read as "you asked for nothing".
-export function GoalLine({ turn, width }: { turn: Turn | null; width: number }): React.JSX.Element {
+// The objective the project pinned, if it pinned one. A transcript's newest
+// request is the newest thing you said, which is not the same as what you are
+// trying to do: it is replaced every turn, and a compaction or a model change
+// can leave it describing a detour. A file in the repo outlives all three.
+export async function loadTask(cwd: string): Promise<string> {
+  const raw = await readFile(join(cwd, ".srcy", "task.md"), "utf8").catch(() => "");
+  // It is markdown, so the first line is usually a heading and its hashes are
+  // punctuation rather than something to read.
+  return (
+    raw
+      .split("\n")
+      .map((l) => l.replace(/^#+\s*/, "").trim())
+      .find((l) => l !== "") ?? ""
+  );
+}
+
+export function GoalLine({ turn, width, task = "" }: { turn: Turn | null; width: number; task?: string }): React.JSX.Element {
+  // The pinned objective wins. The rule above says which of the two this is,
+  // so a stale task.md is visible as a task.md rather than mistaken for the
+  // request you just typed.
+  if (task !== "") return <Text>{clipTo(`  ${task}`, width)}</Text>;
   if (turn === null) return <Text dimColor>{"  (no request read)"}</Text>;
   const first = turn.text.split("\n").find((l) => l.trim() !== "") ?? "";
   return <Text>{clipTo(`  ${first}`, width)}</Text>;
@@ -877,8 +905,8 @@ export function Rail({
           <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
         ))
       )}
-      <Rule label="GOAL" width={width} color={AGENT} />
-      <GoalLine turn={s.turn} width={width} />
+      <Rule label={s.task === "" ? "GOAL" : "GOAL  task.md"} width={width} color={AGENT} />
+      <GoalLine turn={s.turn} task={s.task} width={width} />
       <Rule label="PLAN" width={width} color={AGENT} />
       <PlanBody entries={s.plan} />
       <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} color={gatesTone(s.gates, s.results, s.repo.mark)} />

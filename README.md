@@ -156,7 +156,7 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 | panel | reads | notes |
 |---|---|---|
 | **REPO** | `git` | `FOLLOW`/`PINNED`; whole project; directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
-| **GOAL** | agent's session log | what you asked for, in your words, after forty tool calls buried it |
+| **GOAL** | `.srcy/task.md`, else the agent's session log | what you asked for, in your words, after forty tool calls buried it |
 | **PLAN** | agent's session log | still there 40 tool calls later |
 | **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
 | **gauge** | agent's session log | `34% 343k/1.0M opus-5 cache 99%` |
@@ -244,6 +244,23 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   an hour ago reads as "nothing happened here".
 - srcy adds **nothing** to the context window. Every token in there is the
   agent's.
+
+### Pinning the objective
+
+`.srcy/task.md` — one line, or a markdown file whose first line is one:
+
+```markdown
+# Ship the auth rewrite behind a flag
+```
+
+GOAL shows it, and the rule says `GOAL  task.md` so a stale one is never
+mistaken for the request you just typed. Without the file, GOAL is the newest
+thing you asked the agent — which is the newest thing you *said*, not what
+you are trying to do: it is replaced every turn, and a compaction or a model
+change can leave it describing a detour. The file outlives all three.
+
+The `TURN` baseline still comes from the request, not from this. A pinned
+objective is not a checkpoint.
 
 ### What gets verified
 

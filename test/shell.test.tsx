@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -1251,4 +1251,28 @@ test("a marked span emphasises without changing the row's width", () => {
   const frame = render(<ReviewRow line={far} width={20} />).lastFrame() ?? "";
   assert.equal(frame.split("\n").length, 1, frame);
   assert.ok(strip(frame.split("\n")[0] ?? "").length <= 20, JSON.stringify(frame));
+});
+
+test("a pinned task outranks the newest request, and says which it is", async (t) => {
+  const repo = await newRepo(t);
+  // No file: the transcript's request is the goal, as it always was.
+  assert.equal(await loadTask(repo), "");
+  const turn = { at: 1, text: "fix the token expiry off-by-one" };
+  assert.match(render(<GoalLine turn={turn} width={40} />).lastFrame() ?? "", /fix the token expiry/);
+
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  await writeFile(join(repo, ".srcy", "task.md"), "\n# Ship the auth rewrite\n\nNotes below.\n");
+  // Markdown, so the heading's hashes are punctuation rather than content.
+  const task = await loadTask(repo);
+  assert.equal(task, "Ship the auth rewrite");
+
+  // The objective outranks the turn: the newest thing you said is not the
+  // same as what you are trying to do.
+  const frame = render(<GoalLine turn={turn} task={task} width={40} />).lastFrame() ?? "";
+  assert.match(frame, /Ship the auth rewrite/);
+  assert.doesNotMatch(frame, /off-by-one/);
+
+  // An empty file is not a task, and does not silence the request.
+  await writeFile(join(repo, ".srcy", "task.md"), "\n\n");
+  assert.equal(await loadTask(repo), "");
 });
