@@ -46,14 +46,22 @@ The existing multi-process design remains:
 - The rail process watches repository, transcript, task, gate, and runtime
   state.
 - The dock process becomes an interactive review surface.
-- The processes exchange a versioned, atomically-written session snapshot in
-  the temporary directory.
+- The rail is the single authoritative state writer. It publishes a versioned,
+  atomically-written session snapshot in the temporary directory.
+- Interactive panels send small commands to the rail through an append-only
+  intent file. Each JSON line carries a session ID, writer PID, local sequence,
+  and bounded payload. `O_APPEND` keeps each sub-4 KB line indivisible; the rail
+  consumes from a byte offset, deduplicates `(pid, sequence)`, reduces intents
+  in order, and alone writes the resulting snapshot.
 
 There will be no central daemon. Focused pure modules will isolate configuration,
 Git scopes, gate execution, runtime lifecycle, task parsing, review navigation,
 and risk classification. The rail remains the owner of expensive or mutating
-work such as gates, baselines, and the configured runtime. The dock only reads
-snapshots and repository state.
+work such as gates, baselines, and the configured runtime. The dock reads
+snapshots and repository state, applies navigation optimistically for immediate
+feedback, and emits an intent. The next authoritative snapshot confirms or
+clamps that position. Rapid commands cannot overwrite unrelated gate, runtime,
+or review state because panels never rewrite the snapshot.
 
 This keeps panel failure isolated: a crashed dock cannot kill the agent, and a
 failed poll leaves the last truthful frame visible.
@@ -76,7 +84,7 @@ runtime status       |
 ---------------------+------------------------------------------
  REVIEW | TURN | FOLLOW | file 2/5 | hunk 1/3
  complete navigable diff
- [/] hunk | n/p file | f follow | r gate | ? help
+ [/] hunk | n/p file | f follow | 1/2/3 scope | ? help
 ```
 
 The layout does not add a fourth pane. GOAL, GATES, and APP share the rail's
@@ -91,7 +99,9 @@ shown only while the dock has focus or help is open.
 - `Enter` or `Space`: toggle a directory or pin a file in review.
 - `f`: clear the pinned file and resume following the newest write.
 - `c`: create a manual turn checkpoint.
-- `r`: run the gate selected by the gate cursor.
+- `g`: move focus from REPO to GATES; `j` and `k` then move the gate cursor;
+  `Escape` returns focus to REPO.
+- `r` or `Enter` while GATES has focus: run the selected gate.
 - `R`: run every configured gate.
 - `s`: start or stop the configured runtime.
 - `?`: show contextual help.
@@ -148,6 +158,15 @@ moves review to the latest modified file and its latest hunk. In pinned mode,
 the selected path remains stable. If a pinned file disappears, review returns
 to follow mode and says why for one frame.
 
+Empty and unavailable states are explicit:
+
+```text
+REVIEW  HEAD  clean -- nothing to review
+REVIEW  TURN  unavailable -- press c before the next change
+REVIEW  SESSION  unavailable -- session baseline could not be created
+REVIEW  TURN  FOLLOW -- pinned file disappeared
+```
+
 The title always exposes state:
 
 ```text
@@ -181,11 +200,19 @@ the worktree and real index remain unchanged. If baseline creation fails, the
 scope is unavailable and the UI explains the failure. It never silently falls
 back to `HEAD` while labelled TURN or SESSION.
 
-Claude and Codex adapters expose a stable user-turn marker. A new marker creates
-a turn baseline before subsequent repository changes are observed. Unsupported
-agents use the manual `c` checkpoint. Session baseline creation occurs before
-the agent command begins whenever possible; if the session is reattached, the
-stored baseline is reused.
+Claude and Codex adapters expose a stable user-turn marker plus whether a
+write-like tool (`Edit`, `Write`, patch application, or notebook edit) has
+started after it. The transcript is watched for appends rather than waiting for
+the normal repository poll. When a new marker is observed before any such tool
+has started, the rail snapshots the current tree and TURN becomes available.
+
+If the first observation already contains a write-like tool after the marker,
+srcy cannot prove that the tree is still the pre-turn tree. TURN is therefore
+labelled unavailable instead of absorbing early edits into a dishonest
+baseline. The user may press `c` before the next change to establish an exact
+manual checkpoint. Unsupported agents always use `c`. Session baseline creation
+occurs synchronously before the agent command begins; an attached session reuses
+its stored baseline.
 
 ## Goal and acceptance state
 
@@ -216,6 +243,11 @@ beside a criterion only when the criterion explicitly names a gate using
 If no acceptance list exists, the rail says `acceptance not declared` rather
 than `0/0` or `passing`.
 
+If `.srcy/task.md` is unreadable or contains an Acceptance section with malformed
+task-list syntax, GOAL shows a one-line task-file error and falls back to the
+latest supported transcript goal. Acceptance becomes unavailable; partially
+parsed criteria are not shown.
+
 ## Attention state
 
 Transcript adapters expose evidence sufficient for a conservative state:
@@ -224,11 +256,15 @@ Transcript adapters expose evidence sufficient for a conservative state:
 type Attention = "idle" | "thinking" | "working" | "ready" | "needs_input";
 ```
 
-- `working`: at least one tool call is open.
-- `thinking`: a user turn is newer than any completed assistant response.
+The precedence is strict: `needs_input` > `working` > `thinking` > `ready` >
+`idle`.
+
+- `needs_input`: the adapter explicitly records a permission or input request,
+  even if the corresponding tool call remains open.
+- `working`: at least one tool call is open and no input request is present.
+- `thinking`: a user turn is newer than any completed assistant response and no
+  tool or input request is open.
 - `ready`: a completed assistant response is newer than the latest user turn.
-- `needs_input`: only when the adapter format explicitly records a permission
-  or input request.
 - `idle`: no active or completed turn is known.
 
 Unsupported agents display `telemetry unavailable for <agent>` instead of
@@ -274,6 +310,8 @@ Validation rules:
 - `timeoutMs` is positive and capped at ten minutes.
 - Unknown fields are ignored for forward compatibility.
 - A malformed config is reported in GATES or APP; it never crashes a panel.
+- Configured gates default to `auto: false` and `timeoutMs: 120000`.
+- Runtime defaults to `autoStart: false`; notifications default to `false`.
 
 Compatibility order when `gates` is absent:
 
@@ -287,14 +325,20 @@ fingerprint. Manual gates run on request. Gates run sequentially to avoid CPU
 and output contention. Each result records command, status, duration, problems,
 tail, measured fingerprint, and start/finish time.
 
-The rail summary distinguishes:
+The canonical gate status is one of `not_run`, `queued`, `running`, `pass`,
+`fail`, `timeout`, or `stale`. Timeout is distinct in the UI and counts as
+needing attention; it is not rewritten to `fail`. A result becomes stale when
+its measured fingerprint differs from the current repository fingerprint.
+
+The summary numerator is the number of fresh `pass` results; the denominator is
+the number of configured gates. The rail distinguishes:
 
 ```text
-GATES  2/4 passing
-  check      running 4.2s
-  unit       failing
+GATES  1/4 passing  2 need attention
+  check      passing 1.3s
+  unit       running 4.2s
   e2e        not run
-  visual     stale
+  visual     timeout
 ```
 
 The dock prints full messages for the reviewed file before diff content, as it
@@ -332,17 +376,24 @@ matching on repository-relative paths. Matching files and their ancestors stay
 visible. Search never shells out and does not modify manual directory overrides.
 
 The deterministic risk summary contains total files and churn plus zero or more
-path-derived signals:
+path-derived signals. Matching is case-insensitive on POSIX-normalized paths:
 
-- tests added or no changed test file,
-- delete or rename,
-- lockfile,
-- migration,
-- configuration,
-- binary asset,
-- generated-looking path,
-- secret-like filename,
-- large change threshold.
+- **tests:** basename contains `.test.`, `.spec.`, `_test.`, or path contains a
+  `test` or `tests` segment; report `tests +N` or `no tests changed`.
+- **delete/rename:** comes from parsed Git diff metadata.
+- **lockfile:** basename is `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+  `Cargo.lock`, `poetry.lock`, or `go.sum`.
+- **migration:** path contains a `migration` or `migrations` segment.
+- **configuration:** basename starts with `.env`, or matches common project
+  config suffixes/names such as `package.json`, `tsconfig*.json`, `*.config.*`,
+  `Dockerfile`, or workflow files under `.github/workflows`.
+- **binary asset:** the Git diff is binary.
+- **generated-looking:** path contains `generated`, `gen`, `dist`, `build`, or
+  `vendor` as a complete segment.
+- **secret-like:** basename starts with `.env`, contains `secret` or
+  `credential`, or ends with `.pem` or `.key`. Example/template suffixes remain
+  flagged because they still deserve review; the signal is not an accusation.
+- **large change:** more than 20 files or more than 500 added-plus-removed lines.
 
 It describes review attention, not security findings. Example:
 
@@ -354,7 +405,7 @@ The summary never claims a vulnerability, safety, or adequate coverage.
 
 ## Session snapshot
 
-The current shared file becomes a versioned snapshot:
+The current shared file becomes a versioned snapshot written only by the rail:
 
 ```ts
 interface SessionSnapshotV1 {
@@ -373,6 +424,12 @@ interface SessionSnapshotV1 {
 Writes remain whole-file-plus-rename. Readers reject unknown major versions and
 retain their last good state. Snapshot fields use bounded strings and arrays so
 logs or error output cannot grow the file without limit.
+
+Panel-to-rail intents use a separate append-only JSONL file. The rail truncates
+it only after all complete lines have been reduced and a snapshot containing
+their effects has been atomically published. An incomplete final line is held
+for the next read. The intent file is reset when a brand-new session starts and
+reused on reattach.
 
 ## Error handling and safety
 
@@ -486,4 +543,3 @@ next begins.
 - No new permanent pane, embedded chat, model picker, automatic staging,
   automatic commit, or automatic browser launch is introduced.
 - Tests, typecheck, build, and normal/compact previews pass at handoff.
-
