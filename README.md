@@ -411,14 +411,13 @@ window with every token count — measured, where Claude Code's is inferred.
 `PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
-
 ──  ⟳ 52s shell bash -lc npm run…──┬──  codex  ───────────────────────────────────────────────────────────────────────
 ─ REPO  FOLLOW ────────────────────│user
 ▸  .srcy/                          │  fix the token expiry off-by-one
 ▸  docs/                           │
 ▾  src/                            │codex
 ▾    auth/                         │  The expiry check is exclusive: a token that expires on this exact
-▪►     expiry.test.ts      +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
++►     expiry.test.ts      +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
         hash.ts                    │
 ✖      session.ts          ✖1      │  exec  bash -lc "npm run typecheck"
 ▪      token.ts            +1 -1   │
@@ -443,7 +442,7 @@ window with every token count — measured, where Claude Code's is inferred.
    2 +   private renewals = 0
    3 +   renew() { this.renewals++ }
    4   }
- ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope
+ ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn
 ```
 </details>
 

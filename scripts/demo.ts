@@ -339,6 +339,15 @@ async function main(): Promise<void> {
     await jsonl(result("t3"));
     await wait(1700);
 
+    // A deletion, because agents delete things and the tree draws that
+    // differently from an edit — which is the whole reason it draws it
+    // differently.
+    await say(`${GN}●${OFF} Bash  rm src/util/log.ts`);
+    await rm(join(repo, "src/util/log.ts"));
+    await jsonl(call("t5", "Bash", { command: "rm src/util/log.ts", description: "Remove the unused logger" }));
+    await jsonl(result("t5"));
+    await wait(1600);
+
     await say(`${GN}●${OFF} Bash  npm run typecheck`);
     await jsonl(record({ input_tokens: 3, cache_creation_input_tokens: 900, cache_read_input_tokens: 104_900, output_tokens: 12_050 }));
     // Left unanswered on purpose: an open call is what the rail's border reads
