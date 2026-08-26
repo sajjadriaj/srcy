@@ -212,6 +212,12 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   line leaves `+1 -1` exactly as it was — so the tree is identified by content,
   not by churn counts. Otherwise the fix for the bug the agent introduced three
   seconds ago never re-runs the checker.
+- **Where srcy hasn't run a gate, the agent's own run is the evidence.**
+  `not run · agent ran 4m00s ago`, or `not run · agent ran, stale` when it
+  went on editing afterwards. "I ran the tests" is the claim taken on faith
+  more than any other, and both timestamps are the agent's own — so this holds
+  up on a transcript read hours later. Where srcy *has* run the gate its own
+  verdict is the better answer, and this stays out of the way.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
   `none configured` ≠ `timed out`. A gate that ran out of time proved nothing
   either way, so it is not rewritten to "failing".

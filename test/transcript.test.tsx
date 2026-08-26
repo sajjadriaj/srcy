@@ -120,7 +120,7 @@ test("a window that cannot be inferred can be stated", () => {
   // Nothing in a Claude transcript names the model's window, and the model
   // string is the same one a 200k session writes — so a reader who has
   // switched models is the only one who knows.
-  const fold = { plan: [], open: new Map(), output: 0, last: { used: 50_000, cached: 0 } };
+  const fold = { plan: [], open: new Map(), output: 0, last: { used: 50_000, cached: 0 }, ran: new Map() };
   assert.equal(usageOf(fold, 400_000)?.size, 400_000);
   assert.equal(usageOf(fold, undefined)?.size, 200_000);
   // What the agent recorded itself still wins: codex writes the real number.

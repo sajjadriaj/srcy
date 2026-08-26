@@ -187,6 +187,10 @@ interface Watched {
   at?: number;
   // When the plan's in-progress item became the in-progress item.
   doingAt?: number;
+  // Shell commands the agent has run, and when it last ran each.
+  ran: Map<string, number>;
+  // When the agent last started something that could change the tree.
+  wrote?: number;
   // What this project verifies, and what each of those has said. The
   // verdicts carry the tree they were measured against, so "passing" and
   // "passed, before the last three edits" are different things on screen.
@@ -207,6 +211,7 @@ const EMPTY: Watched = {
   activity: null,
   turn: null,
   task: "",
+  ran: new Map(),
   gates: [],
   results: [],
   running: "",
@@ -316,6 +321,8 @@ function useWatch(
           turn: t?.turn ?? null,
           at: t?.at,
           doingAt: t?.doingAt,
+          ran: t?.ran ?? new Map(),
+          wrote: t?.wrote,
           gates: [...config.current, ...built.current],
           results: [...results.current, ...builtResults.current],
           gateError: configError.current,
@@ -437,6 +444,8 @@ export function Rule({ label, width, color }: { label: string; width: number; co
 // agent's transcript says what it is trying to do, and the gates say whether
 // any of it holds. GATES is the one that also carries a state, so it is the
 // one that changes colour — the others name a source, which does not.
+const EMPTY_RAN = new Map<string, number>();
+
 export const GIT = "cyan";
 export const AGENT = "magenta";
 
@@ -471,6 +480,9 @@ export function GateRows({
   running,
   error,
   width,
+  ran,
+  wrote,
+  now,
 }: {
   gates: Gate[];
   results: GateResult[];
@@ -481,6 +493,10 @@ export function GateRows({
   running: string;
   error?: string;
   width: number;
+  // What the agent has run, for the gates srcy has not run itself.
+  ran?: Map<string, number>;
+  wrote?: number;
+  now?: number;
 }): React.JSX.Element {
   if (gates.length === 0) {
     // Deliberately not silent: a project with nothing configured should
@@ -499,7 +515,17 @@ export function GateRows({
     <Box flexDirection="column">
       {error !== undefined && <Text color="red">{clipTo(`  ${error}`, width)}</Text>}
       {gates.map((g) => (
-        <GateLine key={g.name} gate={g} result={by.get(g.name)} mark={mark} running={running === g.name} width={width} />
+        <GateLine
+          key={g.name}
+          gate={g}
+          result={by.get(g.name)}
+          mark={mark}
+          running={running === g.name}
+          width={width}
+          ran={ran}
+          wrote={wrote}
+          now={now}
+        />
       ))}
       {shown.map((p, i) => (
         // Truncated rather than wrapped: a TypeScript message is longer than
@@ -518,18 +544,53 @@ export function GateRows({
 // "typecheck", short enough to leave the verdict room in a narrow rail.
 const GATE_NAME = 10;
 
+// What the agent itself has to say about a gate, when srcy has no verdict of
+// its own.
+//
+// "I ran the tests" is the claim taken on faith more often than any other,
+// and the transcript settles the part of it that matters: whether the agent
+// ran the command at all, and whether it went on editing afterwards. Both
+// times are the agent's own, so this holds up on a transcript read from disk
+// long after the fact — no marks, no bookkeeping, nothing to get out of step.
+//
+// Only shown where srcy has not run the gate itself. Where it has, its own
+// verdict is the better answer and this would be a second opinion nobody
+// asked for.
+export function agentRan(ran: Map<string, number>, gate: Gate, wrote: number | undefined, now: number): string {
+  const want = gate.command.join(" ");
+  if (want === "") return "";
+  let at = 0;
+  for (const [cmd, when] of ran) if (cmd.includes(want) && when > at) at = when;
+  if (at === 0) return "";
+  // Edited after running it: whatever it saw, it is not what is there now.
+  // "stale" is the word the rest of this pane uses for a verdict measured
+  // against a tree that has moved on, and this is the same thing said about
+  // the agent's run instead of srcy's.
+  if (wrote !== undefined && wrote > at) return "agent ran, stale";
+  // Short because the row is thirteen columns of name and marker before it
+  // gets here, on a rail that can be thirty wide. A line that clips is a line
+  // whose ending nobody reads.
+  return now === 0 ? "agent ran" : `agent ran ${elapsed(now - at)} ago`;
+}
+
 export function GateLine({
   gate,
   result,
   mark,
   running,
   width,
+  ran = EMPTY_RAN,
+  wrote,
+  now = 0,
 }: {
   gate: Gate;
   result: GateResult | undefined;
   mark: string;
   running: boolean;
   width: number;
+  ran?: Map<string, number>;
+  wrote?: number;
+  now?: number;
 }): React.JSX.Element {
   const name = gate.name.slice(0, GATE_NAME).padEnd(GATE_NAME);
   if (running) return <Text color="cyan">{clipTo(`  ${name} running…`, width)}</Text>;
@@ -537,7 +598,9 @@ export function GateLine({
   // automatic gate is waiting for the tree to settle; a manual one is
   // waiting for you, and says which.
   if (result === undefined) {
-    return <Text dimColor>{clipTo(`  ${name} ${gate.auto ? "not run yet" : "not run — press r"}`, width)}</Text>;
+    const said = agentRan(ran, gate, wrote, now);
+    const waiting = gate.auto ? "not run yet" : "not run — press r";
+    return <Text dimColor>{clipTo(`  ${name} ${said === "" ? waiting : `not run · ${said}`}`, width)}</Text>;
   }
   const stale = result.mark !== mark;
   const age = stale ? " · code moved since" : "";
@@ -950,6 +1013,9 @@ export function Rail({
         running={s.running}
         error={s.gateError}
         width={width}
+        ran={s.ran}
+        wrote={s.wrote}
+        now={now}
       />
       {/* Pushes the gauge to the bottom edge, so it is in the same place
           whether the session has touched two files or twenty. A number you

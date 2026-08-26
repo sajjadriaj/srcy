@@ -9,8 +9,8 @@ import { splitDiff } from "../src/diff.js";
 import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
-import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, planAge, PlanBody, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { projectDir, remember } from "../src/transcript.js";
+import { Dock, GateLine, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, agentRan, cursorAt, following, elapsed, loadTask, planAge, PlanBody, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -1335,4 +1335,46 @@ test("a plan item that has not moved in a while says how long", () => {
 
   const fresh = render(<PlanBody entries={entries} since={now - 1000} now={now} />).lastFrame() ?? "";
   assert.doesNotMatch(fresh, /[0-9]+m[0-9]+s/, fresh);
+});
+
+test("when srcy has not run a gate, the agent's own run is the evidence", () => {
+  const now = Date.parse("2026-08-26T10:10:00.000Z");
+  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000 };
+  const ran = new Map([["npm test 2>&1 | tail -20", Date.parse("2026-08-26T10:06:00.000Z")]]);
+
+  // Matched loosely: an agent wraps the command in a pipeline, and it is
+  // still the command.
+  assert.equal(agentRan(ran, gate, undefined, now), "agent ran 4m00s ago");
+  // Edited afterwards: whatever it saw is not what is there now.
+  assert.equal(agentRan(ran, gate, Date.parse("2026-08-26T10:08:00.000Z"), now), "agent ran, stale");
+  // Edited before running is the ordinary case and says nothing.
+  assert.equal(agentRan(ran, gate, Date.parse("2026-08-26T10:05:00.000Z"), now), "agent ran 4m00s ago");
+  // Never run, and a gate with no command to match.
+  assert.equal(agentRan(new Map(), gate, undefined, now), "");
+  assert.equal(agentRan(ran, { ...gate, command: [] }, undefined, now), "");
+
+  // On the row, in place of "not run yet" — no second row, and only where
+  // srcy has no verdict of its own.
+  const said = render(<GateLine gate={gate} result={undefined} mark="m" running={false} width={44} ran={ran} now={now} />).lastFrame() ?? "";
+  assert.match(said, /not run · agent ran 4m00s ago/, said);
+  // And it fits: a rail is thirty to forty-four columns, and a line that
+  // clips is a line whose ending nobody reads.
+  assert.doesNotMatch(said, /…/, said);
+  const mine = { name: "tests", status: "pass" as const, problems: [], tail: "", ms: 12, mark: "m" };
+  const own = render(<GateLine gate={gate} result={mine} mark="m" running={false} width={44} ran={ran} now={now} />).lastFrame() ?? "";
+  assert.doesNotMatch(own, /agent ran/, own);
+});
+
+test("the commands remembered are a window, not a history", () => {
+  const ran = new Map<string, number>();
+  for (let i = 0; i < 70; i++) remember(ran, `cmd ${i}`, i);
+  assert.equal(ran.size, 64);
+  // The oldest go, the newest stay.
+  assert.equal(ran.has("cmd 0"), false);
+  assert.equal(ran.has("cmd 69"), true);
+  // Re-running a command is not a second entry, and makes it recent again.
+  remember(ran, "cmd 10", 100);
+  assert.equal(ran.size, 64);
+  assert.equal(ran.get("cmd 10"), 100);
+  assert.equal([...ran.keys()].pop(), "cmd 10");
 });

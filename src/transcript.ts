@@ -204,6 +204,8 @@ export interface State {
   at?: number;
   // When the plan's in-progress item became the in-progress item.
   doingAt?: number;
+  // Shell commands the agent has run, and when it last ran each.
+  ran: Map<string, number>;
 }
 
 // The subset of an Edit/Write/Read/Bash input worth putting in a one-line
@@ -267,6 +269,10 @@ export interface Fold {
   // The in-progress plan items, joined, and when they last changed.
   doing?: string;
   doingAt?: number;
+  // Shell commands the agent has run, and when it last ran each. The agent
+  // saying it ran the tests is the claim srcy takes on faith more than any
+  // other; this is the part of that claim the transcript can settle.
+  ran: Map<string, number>;
   // Set only by agents that record it. Codex writes the real number with
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
@@ -283,8 +289,24 @@ export interface Source {
   fold: (f: Fold, line: string) => void;
 }
 
+// How many distinct commands to keep. A session runs the same handful over
+// and over, and the ones worth answering a question about are the recent
+// ones — this is a window, not a history.
+const RAN_MAX = 64;
+
+export function remember(ran: Map<string, number>, command: string, at: number): void {
+  // Delete before set so the Map's insertion order is a recency order, which
+  // is what makes the eviction below evict the right one.
+  ran.delete(command);
+  ran.set(command, at);
+  if (ran.size > RAN_MAX) {
+    const oldest = ran.keys().next();
+    if (oldest.done !== true) ran.delete(oldest.value);
+  }
+}
+
 export function emptyFold(): Fold {
-  return { plan: [], open: new Map(), output: 0, last: null };
+  return { plan: [], open: new Map(), output: 0, last: null, ran: new Map() };
 }
 
 export function foldLine(f: Fold, line: string): void {
@@ -375,6 +397,10 @@ export function foldLine(f: Fold, line: string): void {
         }
       }
       const name = typeof b.name === "string" ? b.name : "?";
+      if (name === "Bash" && at !== undefined) {
+        const cmd = (b.input as { command?: unknown } | undefined)?.command;
+        if (typeof cmd === "string" && cmd !== "") remember(f.ran, cmd, at);
+      }
       if (at !== undefined && writes(name)) f.wrote = at;
       if (typeof b.id === "string") {
         f.open.set(b.id, { tool: name, target: targetOf(b.input), since: at });
@@ -396,7 +422,7 @@ export function stateOf(f: Fold): State {
   // one started is the one a reader is watching for.
   let activity: Activity | null = null;
   for (const v of f.open.values()) activity = v;
-  const s: State = { plan: f.plan, activity };
+  const s: State = { plan: f.plan, activity, ran: f.ran };
   if (f.turn !== undefined) s.turn = f.turn;
   if (f.wrote !== undefined) s.wrote = f.wrote;
   if (f.at !== undefined) s.at = f.at;

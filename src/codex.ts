@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { spoken, when, type Fold, type Source } from "./transcript.js";
+import { remember, spoken, when, type Fold, type Source } from "./transcript.js";
 
 // Reading Codex's session log.
 //
@@ -225,6 +225,20 @@ export function foldLine(f: Fold, line: string): void {
       }
     }
     const name = typeof p.name === "string" ? p.name : "?";
+    // Codex's shell takes an argv, where Claude Code's Bash takes a line.
+    // Joined, so both sides of this comparison are the same kind of string.
+    if (name === "shell" && at !== undefined) {
+      const raw = typeof p.arguments === "string" ? p.arguments : "";
+      try {
+        const argv = (JSON.parse(raw) as { command?: unknown }).command;
+        if (Array.isArray(argv) && argv.every((w) => typeof w === "string")) {
+          const cmd = (argv as string[]).join(" ");
+          if (cmd !== "") remember(f.ran, cmd, at);
+        }
+      } catch {
+        // not JSON we can read; the call still counts as a write below
+      }
+    }
     if (at !== undefined && !READS.has(name)) f.wrote = at;
     f.open.set(id, { tool: name, target: targetOf(p), since: at });
   } else if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
