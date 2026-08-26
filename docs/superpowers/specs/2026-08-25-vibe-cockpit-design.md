@@ -48,11 +48,11 @@ The existing multi-process design remains:
 - The dock process becomes an interactive review surface.
 - The rail is the single authoritative state writer. It publishes a versioned,
   atomically-written session snapshot in the temporary directory.
-- Interactive panels send small commands to the rail through an append-only
-  intent file. Each JSON line carries a session ID, writer PID, local sequence,
-  and bounded payload. `O_APPEND` keeps each sub-4 KB line indivisible; the rail
-  consumes from a byte offset, deduplicates `(pid, sequence)`, reduces intents
-  in order, and alone writes the resulting snapshot.
+- Interactive panels send small commands to the rail through a per-session
+  intent spool directory. Each intent carries a session ID, writer PID, local
+  sequence, creation time, and bounded payload. A panel writes one temporary
+  file and atomically renames it to `<time>-<pid>-<sequence>.json`; no process
+  truncates or rewrites another process's mailbox.
 
 There will be no central daemon. Focused pure modules will isolate configuration,
 Git scopes, gate execution, runtime lifecycle, task parsing, review navigation,
@@ -158,6 +158,11 @@ moves review to the latest modified file and its latest hunk. In pinned mode,
 the selected path remains stable. If a pinned file disappears, review returns
 to follow mode and says why for one frame.
 
+Initial review state is TURN plus FOLLOW when an exact automatic turn baseline
+is available. Otherwise it is HEAD plus FOLLOW. FOLLOW starts on the most
+recently modified changed file and its latest hunk; a clean scope has no file or
+hunk position.
+
 Empty and unavailable states are explicit:
 
 ```text
@@ -200,13 +205,21 @@ the worktree and real index remain unchanged. If baseline creation fails, the
 scope is unavailable and the UI explains the failure. It never silently falls
 back to `HEAD` while labelled TURN or SESSION.
 
-Claude and Codex adapters expose a stable user-turn marker plus whether a
-write-like tool (`Edit`, `Write`, patch application, or notebook edit) has
-started after it. The transcript is watched for appends rather than waiting for
-the normal repository poll. When a new marker is observed before any such tool
-has started, the rail snapshots the current tree and TURN becomes available.
+Claude and Codex adapters expose a stable user-turn marker plus every tool start
+after it. Tools are conservative: only calls the adapter explicitly classifies
+as read-only (for example file reads, search, listing, and inspection) are safe.
+Shell/exec calls, extension tools, unknown tools, edit/write/patch calls, and
+notebook operations are mutation-capable. The transcript is watched for appends
+rather than waiting for the normal repository poll.
 
-If the first observation already contains a write-like tool after the marker,
+When a new marker is observed with no mutation-capable tool after it, the rail
+records both the transcript position and repository fingerprint, snapshots the
+current tree, then immediately re-reads the transcript and repository. TURN is
+accepted only if no mutation-capable tool started during capture and the before
+and after fingerprints match. Otherwise the new tree object is discarded and
+TURN is unavailable.
+
+If the first observation already contains a mutation-capable tool after the marker,
 srcy cannot prove that the tree is still the pre-turn tree. TURN is therefore
 labelled unavailable instead of absorbing early edits into a dishonest
 baseline. The user may press `c` before the next change to establish an exact
@@ -342,7 +355,7 @@ GATES  1/4 passing  2 need attention
 ```
 
 The dock prints full messages for the reviewed file before diff content, as it
-does today. A gate timing out kills its process group and reports a failure.
+does today. A gate timing out kills its process group and reports `timeout`.
 
 ## Runtime surface
 
@@ -410,6 +423,8 @@ The current shared file becomes a versioned snapshot written only by the rail:
 ```ts
 interface SessionSnapshotV1 {
   version: 1;
+  sessionId: string;
+  intentAck: Record<string, number>; // highest reduced sequence by writer PID
   review: ReviewPosition;
   baselines: { session?: string; turn?: string; turnMarker?: string };
   goal?: GoalState;
@@ -425,11 +440,17 @@ Writes remain whole-file-plus-rename. Readers reject unknown major versions and
 retain their last good state. Snapshot fields use bounded strings and arrays so
 logs or error output cannot grow the file without limit.
 
-Panel-to-rail intents use a separate append-only JSONL file. The rail truncates
-it only after all complete lines have been reduced and a snapshot containing
-their effects has been atomically published. An incomplete final line is held
-for the next read. The intent file is reset when a brand-new session starts and
-reused on reattach.
+Panel-to-rail intents use the separate spool directory. The rail lists complete
+`.json` files and orders them by creation time, then PID and per-writer sequence.
+It reduces only intents whose `(pid, sequence)` exceed the acknowledgement map
+stored in the current snapshot. The new acknowledgement map and the intents'
+effects are published in the same atomic snapshot write; only then may those
+intent files be deleted.
+
+If the rail crashes before snapshot publication, the files replay. If it crashes
+after publication but before deletion, the acknowledgement map makes replay a
+no-op and the files are deleted on recovery. A brand-new session removes a
+spool carrying a different session ID; reattach reuses the matching spool.
 
 ## Error handling and safety
 
