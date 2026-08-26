@@ -26,6 +26,7 @@ interface Payload {
   input?: unknown;
   arguments?: unknown;
   cwd?: unknown;
+  model?: unknown;
   info?: {
     last_token_usage?: Record<string, unknown>;
     total_token_usage?: Record<string, unknown>;
@@ -148,18 +149,29 @@ export function foldLine(f: Fold, line: string): void {
   if (
     !line.includes('"token_count"') &&
     !line.includes('"call_id"') &&
-    !line.includes('"role":"user"')
+    !line.includes('"role":"user"') &&
+    !line.includes('"turn_context"')
   ) {
     return;
   }
   let p: Payload;
   let at: number | undefined;
+  let kind: unknown;
   try {
-    const rec = JSON.parse(line) as { payload?: Payload; timestamp?: unknown };
+    const rec = JSON.parse(line) as { type?: unknown; payload?: Payload; timestamp?: unknown };
     p = (rec.payload ?? {}) as Payload;
     at = when(rec.timestamp);
+    kind = rec.type;
   } catch {
     return; // a half-written last line is normal: the agent is still going
+  }
+
+  // Codex opens every turn with its context, and the model is in it. Unlike
+  // Claude Code it also records the window, so this is not load-bearing for
+  // the gauge's arithmetic — it is what puts a name next to the number.
+  if (kind === "turn_context") {
+    if (typeof p.model === "string" && p.model !== "") f.model = p.model;
+    return;
   }
 
   if (p.type === "token_count" && p.info) {

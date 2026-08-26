@@ -66,7 +66,7 @@ const STALE_SLACK_MS = 5_000;
 
 interface Line {
   isSidechain?: boolean;
-  message?: { usage?: Record<string, unknown> };
+  message?: { usage?: Record<string, unknown>; model?: unknown };
 }
 
 // Record timestamps are ISO strings. Undefined rather than a guess when one
@@ -246,10 +246,14 @@ export interface Fold {
   wrote?: number;
   output: number;
   last: { used: number; cached: number } | null;
-  // The highest occupancy this session has ever reached, which is what the
-  // window is inferred from. Optional so a hand-built fold in a test does
-  // not have to name it.
+  // The highest occupancy this session has reached under the model it is
+  // running now, which is what the window is inferred from. Optional so a
+  // hand-built fold in a test does not have to name it.
   peak?: number;
+  // The model of the last request. Recorded because it changes mid-session
+  // and the peak does not survive that: `/model` leaves the conversation in
+  // place and swaps the window under it.
+  model?: string;
   // Set only by agents that record it. Codex writes the real number with
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
@@ -294,6 +298,16 @@ export function foldLine(f: Fold, line: string): void {
     // gauge jump to a stranger's context and back.
     f.output += num(u.output_tokens);
     if (rec.isSidechain !== true) {
+      // `/model` swaps the window under a conversation that stays where it
+      // is. Everything the old model held is evidence about a window that is
+      // gone, so the peak restarts — and the first request the new model
+      // serves is immediately evidence about the new one, because the
+      // context came with it.
+      const model = typeof rec.message?.model === "string" ? rec.message.model : undefined;
+      if (model !== undefined && model !== f.model) {
+        f.model = model;
+        f.peak = 0;
+      }
       const used = num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens);
       if (used > 0) {
         f.last = { used, cached: num(u.cache_read_input_tokens) / used };
@@ -360,6 +374,7 @@ export function usageOf(f: Fold, override = envWindow()): Usage | null {
     // so nothing should override it; a reader who sets the variable knows
     // something the peak cannot show; the two buckets are the last resort.
     size: f.window ?? override ?? windowFor(Math.max(f.last.used, f.peak ?? 0)),
+    model: f.model,
     output: f.output,
     cached: f.last.cached,
   };

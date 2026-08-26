@@ -82,6 +82,40 @@ test("a compact empties the context, not the window", () => {
   assert.equal(after?.size, 1_000_000);
 });
 
+test("a model change is a new window, so the peak does not carry over", () => {
+  const under = (model: string, read: number): string =>
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", model, usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: read } },
+    });
+
+  // 400k held is proof of the larger window, for the model that held it.
+  assert.equal(parseUsage(under("claude-opus-5", 400_000))?.size, 1_000_000);
+
+  // `/model` leaves the conversation in place and swaps the window under it,
+  // so everything the old model held is evidence about a window that is
+  // gone. Claude Code compacts to fit before the smaller model's first
+  // request, which makes that request the evidence — and it is small.
+  const down = parseUsage([under("claude-opus-5", 400_000), under("claude-haiku-4-5-20251001", 30_000)].join("\n"));
+  assert.equal(down?.size, 200_000);
+  assert.equal(down?.model, "claude-haiku-4-5-20251001");
+
+  // Nothing is lost by restarting: a model that goes on serving a big
+  // context proves the big window again on its own first request.
+  const up = parseUsage(
+    [under("claude-opus-5", 400_000), under("claude-haiku-4-5-20251001", 30_000), under("claude-opus-5", 300_000)].join("\n"),
+  );
+  assert.equal(up?.size, 1_000_000);
+});
+
+test("Codex names the model in its turn context", () => {
+  // Codex records the window itself, so the model is not load-bearing here —
+  // it is what puts a name next to the number.
+  const f = emptyFold();
+  codexFold(f, JSON.stringify({ type: "turn_context", payload: { model: "gpt-5.3-codex", cwd: "/x" } }));
+  assert.equal(f.model, "gpt-5.3-codex");
+});
+
 test("a window that cannot be inferred can be stated", () => {
   // Nothing in a Claude transcript names the model's window, and the model
   // string is the same one a 200k session writes — so a reader who has

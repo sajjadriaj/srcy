@@ -512,7 +512,14 @@ export function NarrowUsage({ usage, width }: { usage: Usage | null; width: numb
   const frac = usage.used / usage.size;
   const color = frac >= 0.85 ? "red" : frac >= 0.6 ? "yellow" : "green";
   const cache = usage.cached === undefined ? "" : ` cache ${Math.round(usage.cached * 100)}%`;
-  const text = `${String(Math.round(frac * 100)).padStart(2)}% ${tokens(usage.used)}/${tokens(usage.size)}${cache}`;
+  // `claude-` is on every Claude model and so distinguishes none of them.
+  const model = usage.model === undefined ? "" : ` ${usage.model.replace(/^claude-/, "")}`;
+  const counts = `${String(Math.round(frac * 100)).padStart(2)}% ${tokens(usage.used)}/${tokens(usage.size)}${model}`;
+  // The model goes next to the denominator it explains — the same session
+  // reads 200k or 1M depending on it — and cache gives way when a narrow
+  // rail cannot hold both. Cache is consulted once a session; which model is
+  // answering is the thing that just changed.
+  const text = counts.length + cache.length + 2 <= width ? `${counts}${cache}` : counts;
   // The numbers are sized first and the bar takes what is left. A bar with a
   // fixed width pushes the counts off the right edge of a narrow rail, and
   // the counts are the half you read — the bar is only there to be glanced

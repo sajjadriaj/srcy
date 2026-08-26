@@ -228,6 +228,10 @@ export interface Usage {
   // which is what says whether a session is re-sending the world each turn.
   output?: number;
   cached?: number;
+  // The model serving the session, when the agent records one. It is on the
+  // gauge because it is what the denominator belongs to: the same session
+  // reads 200k or 1M depending on it, and `/model` changes it mid-flight.
+  model?: string;
 }
 
 

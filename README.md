@@ -155,7 +155,7 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 | **GOAL** | agent's session log | what you asked for, in your words, after forty tool calls buried it |
 | **PLAN** | agent's session log | still there 40 tool calls later |
 | **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
-| **gauge** | agent's session log | `53% 106k/200k cache 99%` |
+| **gauge** | agent's session log | `34% 343k/1.0M opus-5 cache 99%` |
 | **REVIEW** | `git` + GATES | every hunk of every changed file, scrollable. Follows the newest write until you pin a file. Heads the diff with what the gates actually said |
 
 **Details worth knowing**
@@ -181,13 +181,18 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **Occupancy is the last request's, never a running total.** Cumulative counts
   reach millions against a 200k window and would peg the gauge forever.
 - **The window is inferred from the session's peak, not its current fill.**
-  A Claude transcript never records how big the window is, and the model
-  string is identical for a 1M session and a 200k one — so the evidence is
+  A Claude transcript never records how big the window is, so the evidence is
   that a session has held more than 200k. Reading the current number instead
   meant every `/compact` snapped the denominator back and showed 25k of a
-  megabyte as 15% full. Switching models mid-session leaves no trace srcy can
-  read; state it with `SRCY_CONTEXT_WINDOW=400000 srcy` when the two buckets
-  are wrong. Codex needs none of this — it records the real number.
+  megabyte as 15% full. Codex needs none of this — it records the real number.
+- **The peak belongs to the model that set it.** `/model` leaves the
+  conversation in place and swaps the window under it, so srcy reads the
+  model off every request and starts the peak over when it changes — what the
+  old model held is evidence about a window that is gone. The name is on the
+  gauge, next to the denominator it explains. The model string alone can't be
+  mapped to a size (a 1M session writes `claude-opus-5`, byte for byte what a
+  200k one writes), so for a window neither bucket fits, say so:
+  `SRCY_CONTEXT_WINDOW=400000 srcy`.
 - **`cache` is the bloat reading.** Healthy sits near 99%; a session
   re-sending its whole context every turn shows it collapsing.
 - **New files count their whole length.** `+0 -0` on a file that didn't exist
@@ -273,7 +278,7 @@ checker work for every agent — and for a person with an editor open. Only
 
 | agent | `GOAL` | `PLAN` | gauge |
 |---|---|---|---|
-| `claude` | yes | yes | yes — window inferred (200k, or 1M once past it) |
+| `claude` | yes | yes | yes — window inferred (200k, or 1M once past it), per model |
 | `codex` | yes | when it calls `update_plan` | yes — against the window codex records itself |
 | anything else | blank | blank | blank |
 

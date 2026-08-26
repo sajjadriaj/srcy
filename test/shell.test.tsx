@@ -335,6 +335,27 @@ test("the gauge is one line and the counts survive every rail width", () => {
   assert.match(render(<NarrowUsage usage={null} width={30} />).lastFrame() ?? "", /not measured/);
 });
 
+test("the gauge names the model, and cache is what gives way for it", () => {
+  // The same session reads 200k or 1M depending on which model is answering,
+  // and `/model` changes that mid-flight — so the name belongs next to the
+  // denominator it explains.
+  const usage = { used: 105_000, size: 1_000_000, cached: 0.99, model: "claude-opus-5" };
+  const wide = render(<NarrowUsage usage={usage} width={44} />).lastFrame() ?? "";
+  assert.match(wide, /opus-5/, wide);
+  // The prefix every Claude model shares distinguishes none of them.
+  assert.doesNotMatch(wide, /claude-opus-5/, wide);
+  assert.match(wide, /cache 99%/, wide);
+
+  const narrow = render(<NarrowUsage usage={usage} width={30} />).lastFrame() ?? "";
+  const line = narrow.split("\n")[0] ?? "";
+  assert.ok(line.length <= 30, JSON.stringify(line));
+  assert.match(narrow, /105k\/1.0M/, narrow);
+  assert.match(narrow, /opus-5/, narrow);
+  // Dropped whole rather than clipped to `cach`: a half-written word reads
+  // as a rendering bug, and it is the one number here nobody acts on.
+  assert.doesNotMatch(narrow, /cache/, narrow);
+});
+
 const MANY = Array.from({ length: 12 }, (_, i) => ({
   path: `src/deep/nested/file${i}.ts`,
   touch: "wrote" as const,
