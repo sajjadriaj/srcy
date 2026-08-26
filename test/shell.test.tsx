@@ -14,7 +14,7 @@ import { Dock, GateRows, GoalLine, NarrowUsage, Rail, TreeLine, activityTitle, b
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
-import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
+import { TMUX, cmdline, compact, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
 import { CLAUDE, advance, emptyFold, foldLine as claudeFold, newReader, parseState, parseUsage, stateOf, usageOf, type Source } from "../src/transcript.js";
 import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
 import { sourceFor } from "../src/panels.js";
@@ -46,6 +46,26 @@ test("the dock is split off before the rail, which is what makes it full width",
   assert.equal(splits[1]!.includes("-h"), true, "second split must be horizontal (the rail)");
   assert.equal(splits[1]!.includes("-b"), true, "the rail goes before the agent, i.e. on the left");
   assert.match(splits[1]!.at(-1)!, /'panel' 'rail'/);
+});
+
+// A terminal too narrow for three panes gets one, and the panels stay one
+// `ctrl-b z` away rather than permanently eating a third of the width.
+test("a narrow terminal starts on the agent alone", () => {
+  const wide = plan(LAYOUT);
+  assert.equal(wide.some((c) => c[0] === "resize-pane" && c.includes("-Z")), false, "a wide window has room for all three");
+
+  const narrow = plan({ ...LAYOUT, cols: 60 });
+  const zoom = narrow.findIndex((c) => c[0] === "resize-pane" && c.includes("-Z"));
+  assert.ok(zoom > 0, "a 60-column window still laid out three panes side by side");
+  assert.deepEqual(narrow[zoom], ["resize-pane", "-t", "%AGENT%", "-Z"]);
+  // Recorded, because only a zoom srcy did is one srcy may undo: a window
+  // the reader zoomed by hand must survive them dragging its edge.
+  assert.ok(
+    narrow.some((c) => c[0] === "set-option" && c.includes("@srcy-auto-zoom") && c.at(-1) === "1"),
+    "nothing recorded that the zoom was automatic",
+  );
+  assert.equal(compact(72), false);
+  assert.equal(compact(71), true);
 });
 
 test("the keyboard lands on the agent, not on a panel", () => {

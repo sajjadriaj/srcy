@@ -101,6 +101,13 @@ const cxCall = (id: string, name: string, args: unknown, agoMs = 0): string =>
     payload: { type: "function_call", call_id: id, name, arguments: JSON.stringify(args) },
   });
 
+const cxSaid = (text: string, agoMs = 0): string =>
+  JSON.stringify({
+    timestamp: new Date(Date.now() - agoMs).toISOString(),
+    type: "response_item",
+    payload: { type: "message", role: "user", content: [{ type: "input_text", text }] },
+  });
+
 const cxDone = (id: string): string =>
   JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: id } });
 
@@ -133,6 +140,15 @@ const call = (id: string, name: string, input: unknown, agoMs = 0): string =>
     message: { role: "assistant", content: [{ type: "tool_use", id, name, input }] },
   });
 
+// What the reader asked for. The rail's GOAL line reads it, and the turn
+// baseline is taken from its timestamp.
+const said = (text: string, agoMs = 0): string =>
+  JSON.stringify({
+    type: "user",
+    timestamp: new Date(Date.now() - agoMs).toISOString(),
+    message: { role: "user", content: text },
+  });
+
 const result = (id: string): string =>
   JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
 
@@ -143,7 +159,7 @@ const todos = (...rows: [string, string][]): unknown => ({
 async function main(): Promise<void> {
   const repo = await mkdtemp(join(tmpdir(), "srcy-preview-"));
   const fakeHome = await mkdtemp(join(tmpdir(), "srcy-preview-home-"));
-  const transcript = projectDir(repo);
+  const transcript = projectDir(repo, fakeHome);
 
   try {
     await mkdir(join(repo, "src", "auth"), { recursive: true });
@@ -169,7 +185,7 @@ async function main(): Promise<void> {
     }
     // A checker that fails, because the red path is the one worth looking
     // at: it colours a row in the map, puts a count beside it, and fills
-    // CHECKS. A preview where everything passes exercises none of that.
+    // GATES. A preview where everything passes exercises none of that.
     await mkdir(join(repo, ".srcy"), { recursive: true });
     await writeFile(
       join(repo, ".srcy", "check"),
@@ -196,6 +212,7 @@ async function main(): Promise<void> {
     await writeFile(
       join(transcript, "preview.jsonl"),
       [
+        said("fix the token expiry off-by-one", 120_000),
         record({ input_tokens: 4, cache_creation_input_tokens: 18_400, cache_read_input_tokens: 0, output_tokens: 923 }),
         call("t1", "TodoWrite", todos(
           ["find the expiry comparison", "completed"],
@@ -223,6 +240,7 @@ async function main(): Promise<void> {
         join(day, "rollout-preview.jsonl"),
         [
           cxHead(repo),
+          cxSaid("fix the token expiry off-by-one", 120_000),
           cxTokens(14_890, 11_008, 261, 258_000),
           cxCall("c1", "update_plan", cxPlan(
             ["find the expiry comparison", "completed"],

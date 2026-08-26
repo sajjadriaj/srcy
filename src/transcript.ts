@@ -17,8 +17,12 @@ import type { PlanEntry, Usage } from "./cockpit.js";
 // Claude Code names a session's transcript directory after the working
 // directory it ran in, with every non-alphanumeric character replaced by a
 // dash: /home/u/p/.srcy/wt/s1 -> -home-u-p--srcy-wt-s1.
-export function projectDir(cwd: string): string {
-  return join(homedir(), ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
+// `home` is a parameter so a fixture can be written where a panel running
+// under a scratch HOME will actually look for it. The preview does exactly
+// that, and without it the transcript half of the picture — the plan, the
+// gauge, the goal — was blank in every frame it has ever produced.
+export function projectDir(cwd: string, home = homedir()): string {
+  return join(home, ".claude", "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"));
 }
 
 // The transcript never records how big the context window is, and the model

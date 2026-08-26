@@ -9,8 +9,8 @@ it.
 
 ![srcy](docs/demo.gif)
 
-<sub>Launch → the turn → CHECKS goes red → pin a file → zoom the agent full
-screen → drag the border → the fix lands green. Real layout, real git repo,
+<sub>Launch → the turn → GATES goes red → pin a file → read every hunk → zoom
+the agent full screen → drag the border → the fix lands green. Real layout, real git repo,
 real transcript, real checker, all changing while the panels read them. Only
 the agent's turn is scripted — `npm run demo` reproduces it.</sub>
 
@@ -25,7 +25,7 @@ whether it compiles *at this moment*.
 |  | agent's pane | srcy |
 |---|---|---|
 | the plan | printed once, 40 calls ago | on screen |
-| what changed | one hunk at a time | whole tree, marked |
+| what changed | one hunk at a time | whole tree, marked — and every hunk, scrollable |
 | does it build | whatever it said last | run against the tree that exists |
 | how long has this call been running | — | `⟳ 13s Bash npm test` |
 
@@ -85,10 +85,26 @@ With the keyboard in the sidebar:
 | key | |
 |---|---|
 | `j` `k` / `↓` `↑` | move the cursor |
-| `⏎` `space` | open/close a directory — on a file, pin the diff pane to it |
+| `⏎` `space` | open/close a directory — on a file, pin the review pane to it |
+| `r` | run every gate now, including the ones that don't run themselves |
+| `c` | checkpoint: everything after this is *this* turn |
 
-The agent keeps every other keystroke. The sidebar is inert until you move the
-keyboard to it.
+With the keyboard in the review pane:
+
+| key | |
+|---|---|
+| `n` `p` | next / previous changed file |
+| `]` `[` | next / previous hunk |
+| `j` `k` / `↓` `↑` / `PgDn` `PgUp` | scroll |
+| `g` `G` | top / bottom of the diff |
+| `f` | back to following the agent's newest write |
+| `1` `2` `3` | review this turn / this session / everything uncommitted |
+
+The agent keeps every other keystroke. Both panels are inert until you move
+the keyboard to them.
+
+Under 72 columns the agent starts zoomed — three panes that narrow are three
+unreadable ones — and `ctrl-b z` is the way back to the panels.
 
 ---
 
@@ -97,10 +113,11 @@ keyboard to it.
 | panel | reads | notes |
 |---|---|---|
 | **REPO** | `git` | whole project; directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
+| **GOAL** | agent's session log | what you asked for, in your words, after forty tool calls buried it |
 | **PLAN** | agent's session log | still there 40 tool calls later |
-| **CHECKS** | `.srcy/check` | runs when the diff *stops* moving. Stale verdicts say `code moved since` |
+| **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
 | **gauge** | agent's session log | `53% 106k/200k cache 99%` |
-| **DIFF** | `git` + CHECKS | follows the newest write until you pin a file. Heads the diff with what the checker actually said |
+| **REVIEW** | `git` + GATES | every hunk of every changed file, scrollable. Follows the newest write until you pin a file. Heads the diff with what the gates actually said |
 
 **Details worth knowing**
 
@@ -113,7 +130,15 @@ keyboard to it.
   not by churn counts. Otherwise the fix for the bug the agent introduced three
   seconds ago never re-runs the checker.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
-  `none configured`.
+  `none configured` ≠ `timed out`. A gate that ran out of time proved nothing
+  either way, so it is not rewritten to "failing".
+- **FOLLOW and PINNED are both visible, and both reversible.** Anything you
+  press in the review pane pins it — having the agent's next write yank the
+  pane mid-sentence is what makes a live pane useless for reading. `f` gives
+  it back.
+- **A scope with no baseline shows nothing and says why.** `TURN` never
+  quietly falls back to `HEAD`: a diff labelled "this turn" that is really
+  every uncommitted line is worth less than an empty pane that admits it.
 - **Occupancy is the last request's, never a running total.** Cumulative counts
   reach millions against a 200k window and would peg the gauge forever.
 - **`cache` is the bloat reading.** Healthy sits near 99%; a session
@@ -123,7 +148,7 @@ keyboard to it.
 - srcy adds **nothing** to the context window. Every token in there is the
   agent's.
 
-### Your own checker
+### What gets verified
 
 `.srcy/check` — any executable, any language. Non-zero means failing.
 `path:line: msg` and `path(line,col): msg` are parsed into the list.
@@ -136,8 +161,51 @@ EOF
 chmod +x .srcy/check
 ```
 
-Commit it — it's project config, like a lint file. Without one, srcy falls
-back to your `typecheck` or `build` npm script.
+Without one, srcy falls back to your `typecheck` or `build` npm script.
+
+For more than one, `.srcy/config.json`:
+
+```json
+{
+  "gates": [
+    { "name": "typecheck", "command": ["npm", "run", "typecheck"] },
+    { "name": "unit", "command": ["npm", "test"], "auto": false },
+    { "name": "lint", "command": ["npx", "eslint", "."], "timeoutMs": 60000 }
+  ]
+}
+```
+
+| field | |
+|---|---|
+| `command` | a list of words, never a shell line. Need a shell? That's what `.srcy/check` is |
+| `auto` | default `true` — runs itself once the tree stops moving. `false` waits for `r` |
+| `timeoutMs` | default 120000, capped at ten minutes |
+
+Gates run one at a time: they're your own commands, and two compilers over one
+tree cost more than they save. A malformed config is shown in GATES and falls
+back to the detected command — one bad gate invalidates the list rather than
+being silently skipped.
+
+Commit either — it's project config, like a lint file.
+
+### Three answers to "what changed"
+
+`1` `2` `3` in the review pane:
+
+| scope | since |
+|---|---|
+| `TURN` | the newest thing you asked for, or your last `c` |
+| `SESSION` | srcy opening this repo |
+| `HEAD` | the last commit — every uncommitted line, staged or not |
+
+A baseline is a git tree captured through a throwaway index: your real index
+and worktree are never touched, and srcy stages, commits and reverts nothing.
+
+`TURN` is taken the moment your request lands, then checked against the
+transcript again: if the agent had already started writing, the baseline is
+thrown away and the pane says so rather than hiding half the turn. Press `c`
+to set one by hand — which is also how `TURN` works for an agent whose
+session format srcy cannot read.
 
 ---
 
@@ -167,33 +235,40 @@ Blank, never another agent's numbers.
 <details>
 <summary>The same repo under <code>srcy --agent codex</code></summary>
 
-Same panels, no adapter. The gauge reads `161k/258k` because codex records the
+Same panels, no adapter — GOAL and PLAN come from codex's own session log. The
+gauge reads `161k/258k` because codex records the
 model's real context window with every token count — measured, where Claude
 Code's is inferred. `PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
 ──  ⟳ 52s shell bash -lc np…──┬──  codex  ──────────────────────────────────────────────────────────
 REPO                          │user
-▾  src/                       │  fix the token expiry off-by-one
-▾    auth/                    │
-▪►     expiry.test.ts +1 -0   │codex
-        hash.ts               │  The expiry check is exclusive: a token that expires on this exact
-✖      session.ts     ✖1      │  millisecond is still accepted. Changing < to <= in verify().
+▸  .srcy/                     │  fix the token expiry off-by-one
+▸  docs/                      │
+▾  src/                       │codex
+▾    auth/                    │  The expiry check is exclusive: a token that expires on this exact
+▪►     expiry.test.ts +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
+        hash.ts               │
+✖      session.ts     ✖1      │  exec  bash -lc "npm run typecheck"
+▪      token.ts       +1 -1   │
+▸    http/                    │
+─ GOAL ───────────────────────│
+  fix the token expiry off-by…│
 ─ PLAN ───────────────────────│
-  ✔ find the expiry comparison│  exec  bash -lc "npm run typecheck"
+  ✔ find the expiry comparison│
   ✔ fix the off-by-one        │
   ▸ add a regression test     │
-─ CHECKS ─────────────────────│
-  ✖ 1 in 1 file               │
+─ GATES 0/1  1 to look at ────│
+  check      ✖ 1 in 1         │
   session.ts:3                │
 ▮▮▯▯ 62% 161k/258k cache 100% │
-──  DIFF  src/auth/session.ts  ─────────────────────────────────────────────────────────────────────
+──  REVIEW  HEAD  FOLLOW  1/2 files  1/1 hunks  src/auth/session.ts  ───────────────────────────────
   ✖ src/auth/session.ts:3  error TS2532: Object is possibly 'undefined'.
-src/auth/session.ts:1
    1   export class Session {
    2 +   private renewals = 0
    3 +   renew() { this.renewals++ }
    4   }
+ ]/[ hunk · n/p file · j/k scroll · f follow · 1/2/3 turn/session/head
 ```
 </details>
 

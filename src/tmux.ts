@@ -39,6 +39,21 @@ export function cmdline(argv: string[]): string {
   return argv.map(shq).join(" ");
 }
 
+// Below this, three panes side by side are all too narrow to read: the rail
+// alone wants thirty columns, which is half a phone-width terminal. So the
+// agent starts zoomed and the panels are one `ctrl-b z` away, rather than
+// permanently taking a third of a window that has none to spare.
+export const COMPACT_COLS = 72;
+
+export function compact(cols: number): boolean {
+  return cols < COMPACT_COLS;
+}
+
+// Records that srcy zoomed the agent, rather than the reader doing it. Only
+// an automatic zoom is undone automatically: a window the reader zoomed by
+// hand must survive them dragging its edge.
+const AUTO_ZOOM = "@srcy-auto-zoom";
+
 // Rail wide enough for `src/auth/session.ts` plus its counts, without eating
 // an 80-column terminal alive. The clamp is the whole point: a percentage
 // alone is unreadable when narrow and wasteful when wide.
@@ -109,6 +124,13 @@ export function plan(l: Layout): string[][] {
     // Panels are read-only, and taking focus from the prompt to render a
     // file list would be the tail wagging the dog.
     ["select-pane", "-t", AGENT],
+    // In a terminal too narrow for three panes, the agent gets all of it.
+    ...(compact(l.cols)
+      ? [
+          ["resize-pane", "-t", AGENT, "-Z"],
+          ["set-option", "-t", S, AUTO_ZOOM, "1"],
+        ]
+      : []),
     // See resize(): tmux's proportional resize is wrong for a rail, and this
     // is the event that tells us it just happened.
     ["set-hook", "-t", S, "window-resized", `run-shell ${shq(`${cmdline(l.resize)} ${shq(S)}`)}`],
@@ -192,6 +214,28 @@ export function resize(session: string): void {
   const [w, h] = size.split(" ").map(Number);
   if (!Number.isFinite(w!) || !Number.isFinite(h!) || w! <= 0 || h! <= 0) return;
   const panes = identify(session);
+
+  const auto = tmux(["show-option", "-qv", "-t", session, AUTO_ZOOM]).out === "1";
+  if (compact(w!)) {
+    // Already zoomed by us, or zoomed by the reader — either way, leave it.
+    if (!auto && tmux(["display-message", "-p", "-t", session, "#{window_zoomed_flag}"]).out !== "1") {
+      if (panes.agent !== undefined) tmux(["resize-pane", "-t", panes.agent, "-Z"]);
+      tmux(["set-option", "-t", session, AUTO_ZOOM, "1"]);
+    }
+    // The panels are off screen; clamping widths nobody can see would only
+    // decide how the window looks the moment it is unzoomed, which the next
+    // resize does properly.
+    return;
+  }
+  if (auto) {
+    // Only what srcy zoomed is unzoomed. `resize-pane -Z` toggles, so the
+    // flag is checked first — otherwise a window the reader had already
+    // restored would zoom instead.
+    if (tmux(["display-message", "-p", "-t", session, "#{window_zoomed_flag}"]).out === "1") {
+      tmux(["resize-pane", "-t", session, "-Z"]);
+    }
+    tmux(["set-option", "-t", session, AUTO_ZOOM, "0"]);
+  }
   if (panes.rail !== undefined) tmux(["resize-pane", "-t", panes.rail, "-x", String(railWidth(w!))]);
   if (panes.dock !== undefined) tmux(["resize-pane", "-t", panes.dock, "-y", String(dockHeight(h!))]);
 }
