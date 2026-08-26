@@ -9,9 +9,10 @@ it.
 
 ![srcy](docs/demo.gif)
 
-<sub>Real layout, real git repo, real transcript, real checker — all changing
-while the panels read them. Only the agent's turn is scripted. `npm run demo`
-reproduces it.</sub>
+<sub>Launch → the turn → CHECKS goes red → pin a file → zoom the agent full
+screen → drag the border → the fix lands green. Real layout, real git repo,
+real transcript, real checker, all changing while the panels read them. Only
+the agent's turn is scripted — `npm run demo` reproduces it.</sub>
 
 ---
 
@@ -107,6 +108,10 @@ keyboard to it.
   while you read; a row number silently means a different file.
 - **Hand-opened directories are overrides.** Everything you haven't touched
   still opens itself for a change.
+- **An in-place edit counts as a change.** Replacing a line with a different
+  line leaves `+1 -1` exactly as it was — so the tree is identified by content,
+  not by churn counts. Otherwise the fix for the bug the agent introduced three
+  seconds ago never re-runs the checker.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
   `none configured`.
 - **Occupancy is the last request's, never a running total.** Cumulative counts
@@ -158,6 +163,39 @@ checker work for every agent — and for a person with an editor open. Only
 | anything else | blank | blank |
 
 Blank, never another agent's numbers.
+
+<details>
+<summary>The same repo under <code>srcy --agent codex</code></summary>
+
+Same panels, no adapter. The gauge reads `161k/258k` because codex records the
+model's real context window with every token count — measured, where Claude
+Code's is inferred. `PREVIEW_AGENT=codex npm run preview` prints this.
+
+```
+──  ⟳ 52s shell bash -lc np…──┬──  codex  ──────────────────────────────────────────────────────────
+REPO                          │user
+▾  src/                       │  fix the token expiry off-by-one
+▾    auth/                    │
+▪►     expiry.test.ts +1 -0   │codex
+        hash.ts               │  The expiry check is exclusive: a token that expires on this exact
+✖      session.ts     ✖1      │  millisecond is still accepted. Changing < to <= in verify().
+─ PLAN ───────────────────────│
+  ✔ find the expiry comparison│  exec  bash -lc "npm run typecheck"
+  ✔ fix the off-by-one        │
+  ▸ add a regression test     │
+─ CHECKS ─────────────────────│
+  ✖ 1 in 1 file               │
+  session.ts:3                │
+▮▮▯▯ 62% 161k/258k cache 100% │
+──  DIFF  src/auth/session.ts  ─────────────────────────────────────────────────────────────────────
+  ✖ src/auth/session.ts:3  error TS2532: Object is possibly 'undefined'.
+src/auth/session.ts:1
+   1   export class Session {
+   2 +   private renewals = 0
+   3 +   renew() { this.renewals++ }
+   4   }
+```
+</details>
 
 <details>
 <summary>Why the panels share a file instead of a tmux option</summary>

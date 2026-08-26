@@ -11,7 +11,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
@@ -966,4 +966,42 @@ test("a reopened session does not pin the dock to last time's file", async (t) =
   t.after(() => unmount());
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await readShared(session)).file, undefined);
+});
+
+test("an in-place edit re-runs the checker, even though the churn is identical", async (t) => {
+  // The commonest edit an agent makes is replacing a line with a different
+  // line: the fix for the bug it introduced three seconds ago. Churn counts
+  // cannot see it — `+1 -1` before, `+1 -1` after — so a fingerprint built
+  // from counts left the sidebar showing the verdict from before the fix, and
+  // not even marked stale, because nothing looked like it had moved.
+  const repo = await mkdtemp(join(tmpdir(), "srcy-mark-"));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  await writeFile(join(repo, "a.ts"), "const a = 1\n");
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+
+  await writeFile(join(repo, "a.ts"), "const a = 2\n");
+  const broke = await repoState(repo);
+  await writeFile(join(repo, "a.ts"), "const a = 3\n");
+  const fixed = await repoState(repo);
+
+  assert.deepEqual(
+    broke.files.map((f) => [f.added, f.removed]),
+    fixed.files.map((f) => [f.added, f.removed]),
+    "the churn is identical either way — that is the whole problem",
+  );
+  assert.notEqual(fingerprint(broke), fingerprint(fixed), "the checker would never run again");
+
+  // The same tree twice is the same mark, or the checker would run every poll.
+  assert.equal(fingerprint(await repoState(repo)), fingerprint(fixed));
+
+  // And the same holds for a file git has never seen, whose content is not in
+  // `git diff HEAD` at all.
+  await writeFile(join(repo, "new.ts"), "export const x = 1\n");
+  const before = fingerprint(await repoState(repo));
+  await writeFile(join(repo, "new.ts"), "export const x = 2\n");
+  assert.notEqual(fingerprint(await repoState(repo)), before);
 });

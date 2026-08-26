@@ -18,6 +18,12 @@ import { fileURLToPath } from "node:url";
 import { SOCKET, build } from "../src/tmux.js";
 import { projectDir } from "../src/transcript.js";
 
+// `PREVIEW_AGENT=codex` photographs the same repo with codex's session format
+// instead of Claude Code's. Worth having as more than a curiosity: codex is
+// the better-instrumented of the two — it records the model's real context
+// window with every token count, so that gauge is measured rather than
+// inferred, and this is the only way to see that on screen.
+const AGENT = process.env.PREVIEW_AGENT === "codex" ? "codex" : "claude";
 const SESSION = "srcy-preview";
 const CAMERA = "srcy-preview-camera";
 // Overridable so a frame can be captured at the size it will be pasted at.
@@ -65,6 +71,55 @@ const AGENT_SCRIPT = [
   `sleep 600`,
 ].join("; ");
 
+// ---------------------------------------------------------------------------
+// codex's session log
+//
+// Written under a scratch HOME, never the real ~/.codex — a preview has no
+// business leaving a session in anyone's actual codex history.
+
+const cxHead = (repo: string): string =>
+  JSON.stringify({ timestamp: new Date().toISOString(), type: "session_meta", payload: { id: "preview", cwd: repo } });
+
+const cxTokens = (used: number, cached: number, out: number, window: number): string =>
+  JSON.stringify({
+    timestamp: new Date().toISOString(),
+    type: "event_msg",
+    payload: {
+      type: "token_count",
+      info: {
+        last_token_usage: { input_tokens: used, cached_input_tokens: cached },
+        total_token_usage: { input_tokens: 20_987_367, output_tokens: out },
+        model_context_window: window,
+      },
+    },
+  });
+
+const cxCall = (id: string, name: string, args: unknown, agoMs = 0): string =>
+  JSON.stringify({
+    timestamp: new Date(Date.now() - agoMs).toISOString(),
+    type: "response_item",
+    payload: { type: "function_call", call_id: id, name, arguments: JSON.stringify(args) },
+  });
+
+const cxDone = (id: string): string =>
+  JSON.stringify({ type: "response_item", payload: { type: "function_call_output", call_id: id } });
+
+const cxPlan = (...rows: [string, string][]): unknown => ({ plan: rows.map(([step, status]) => ({ step, status })) });
+
+const CODEX_SCRIPT = [
+  `printf '\\033]2; codex \\007'`,
+  `echo 'user'`,
+  `echo '  fix the token expiry off-by-one'`,
+  `echo`,
+  `echo 'codex'`,
+  `echo '  The expiry check is exclusive: a token that expires on this exact'`,
+  `echo '  millisecond is still accepted. Changing < to <= in verify().'`,
+  `echo`,
+  `echo '  exec  bash -lc "npm run typecheck"'`,
+  `echo`,
+  `sleep 600`,
+].join("; ");
+
 const record = (usage: Record<string, number>): string =>
   JSON.stringify({ type: "assistant", message: { role: "assistant", model: "claude-opus-5", usage } });
 
@@ -87,6 +142,7 @@ const todos = (...rows: [string, string][]): unknown => ({
 
 async function main(): Promise<void> {
   const repo = await mkdtemp(join(tmpdir(), "srcy-preview-"));
+  const fakeHome = await mkdtemp(join(tmpdir(), "srcy-preview-home-"));
   const transcript = projectDir(repo);
 
   try {
@@ -157,6 +213,31 @@ async function main(): Promise<void> {
       ].join("\n"),
     );
 
+    // codex files its sessions by date under $HOME/.codex/sessions. The panel
+    // processes get a scratch HOME so the fixture lands there and not in the
+    // real one; os.homedir() follows $HOME, so that is all it takes.
+    if (AGENT === "codex") {
+      const day = join(fakeHome, ".codex", "sessions", "2026", "08", "25");
+      await mkdir(day, { recursive: true });
+      await writeFile(
+        join(day, "rollout-preview.jsonl"),
+        [
+          cxHead(repo),
+          cxTokens(14_890, 11_008, 261, 258_000),
+          cxCall("c1", "update_plan", cxPlan(
+            ["find the expiry comparison", "completed"],
+            ["fix the off-by-one", "completed"],
+            ["add a regression test", "in_progress"],
+          )),
+          cxDone("c1"),
+          cxTokens(161_209, 160_512, 34_012, 258_000),
+          // Left open: the border reads an unanswered call as running.
+          cxCall("c2", "shell", { command: ["bash", "-lc", "npm run typecheck"] }, 47_000),
+          "",
+        ].join("\n"),
+      );
+    }
+
     const self = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tsx = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
 
@@ -165,16 +246,16 @@ async function main(): Promise<void> {
       {
         session: SESSION,
         repo,
-        agent: ["sh", "-c", AGENT_SCRIPT],
-        // "claude" names the session format the fixture transcript is in;
-        // the pane itself runs a canned shell, since a real turn is the one
-        // thing a preview cannot have.
-        panel: (which) => [tsx, self, "panel", which, "claude", SESSION],
+        agent: ["sh", "-c", AGENT === "codex" ? CODEX_SCRIPT : AGENT_SCRIPT],
+        // The agent name selects which on-disk format the panels read; the
+        // pane itself runs a canned shell, since a real turn is the one thing
+        // a preview cannot have.
+        panel: (which) => ["env", `HOME=${fakeHome}`, tsx, self, "panel", which, AGENT, SESSION],
         resize: [tsx, self, "resize"],
         cols: COLS,
         rows: ROWS,
       },
-      { agent: " ✳ Claude Code ", rail: " starting… ", dock: " DIFF " },
+      { agent: AGENT === "codex" ? " codex " : " ✳ Claude Code ", rail: " starting… ", dock: " DIFF " },
     );
 
     // Photograph it from inside a second session sized exactly, so the pane
@@ -201,6 +282,7 @@ async function main(): Promise<void> {
     camQuiet(["kill-session", "-t", CAMERA]);
     srcyQuiet(["kill-session", "-t", SESSION]);
     await rm(repo, { recursive: true, force: true });
+    await rm(fakeHome, { recursive: true, force: true });
     await rm(transcript, { recursive: true, force: true });
   }
 }

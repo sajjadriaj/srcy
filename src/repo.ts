@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { splitDiff, type FileDiff } from "./diff.js";
@@ -16,6 +17,14 @@ import type { Problem } from "./checks.js";
 export interface RepoState {
   files: MapEntry[];
   diffs: FileDiff[];
+  // What the working tree contains, not just which lines moved. Churn counts
+  // alone cannot tell one edit from another: replacing a line with a different
+  // line of the same length leaves `+1 -1` exactly as it was, and that is the
+  // commonest edit an agent makes — the fix for the bug it just introduced.
+  //
+  // ponytail: hashes the whole diff each poll. The `git diff HEAD` that
+  // produced it costs more; revisit only if a repo turns up where it does not.
+  mark: string;
 }
 
 // A new file's churn is its whole length. Showing "+0 -0" for one — which
@@ -28,15 +37,29 @@ export interface RepoState {
 // reading the rail for.
 const MAX_COUNT_BYTES = 2_000_000;
 
-async function newFileChurn(repo: string, path: string): Promise<{ added: number; removed: number }> {
+interface Churn {
+  added: number;
+  removed: number;
+  // An untracked file is not in `git diff HEAD`, so it has to be marked
+  // separately. Its content is already read here to count the lines, so
+  // hashing it costs nothing extra — and unlike size and mtime it cannot miss
+  // two same-length writes inside one millisecond. A file too big to read
+  // falls back to the stat, which is all there is.
+  stamp: string;
+}
+
+async function newFileChurn(repo: string, path: string): Promise<Churn> {
+  const none = { added: 0, removed: 0, stamp: "" };
   try {
     const full = join(repo, path);
-    if ((await stat(full)).size > MAX_COUNT_BYTES) return { added: 0, removed: 0 };
+    const info = await stat(full);
+    if (info.size > MAX_COUNT_BYTES) return { ...none, stamp: `${info.size}:${info.mtimeMs}` };
     const text = await readFile(full, "utf8");
-    if (text === "") return { added: 0, removed: 0 };
-    return { added: text.split("\n").length - (text.endsWith("\n") ? 1 : 0), removed: 0 };
+    const stamp = createHash("sha1").update(text).digest("hex");
+    if (text === "") return { ...none, stamp };
+    return { added: text.split("\n").length - (text.endsWith("\n") ? 1 : 0), removed: 0, stamp };
   } catch {
-    return { added: 0, removed: 0 }; // binary, unreadable, or deleted since
+    return none; // binary, unreadable, or deleted since
   }
 }
 
@@ -54,13 +77,16 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
     return { path: f.path, touch: "wrote" as const, added, removed, problems: count.get(f.path) ?? 0 };
   });
 
+  const stamps: string[] = [];
   const seen = new Set(files.map((f) => f.path));
   const status = await git(repo, "status", "--porcelain", "-uall").catch(() => "");
   for (const line of status.split("\n")) {
     if (!line.startsWith("?? ")) continue;
     const path = line.slice(3).trim();
     if (path === "" || seen.has(path)) continue;
-    files.push({ path, touch: "wrote", ...(await newFileChurn(repo, path)), problems: count.get(path) ?? 0 });
+    const { added, removed, stamp } = await newFileChurn(repo, path);
+    stamps.push(`${path}:${stamp}`);
+    files.push({ path, touch: "wrote", added, removed, problems: count.get(path) ?? 0 });
   }
 
   // A failing file the agent has not touched still belongs on the map: the
@@ -72,7 +98,8 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path));
-  return { files, diffs };
+  const mark = createHash("sha1").update(raw).update("\u0000").update(stamps.sort().join("\u0000")).digest("hex");
+  return { files, diffs, mark };
 }
 
 // Every file in the project, for the rail's tree — tracked plus untracked,

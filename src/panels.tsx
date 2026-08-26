@@ -152,7 +152,7 @@ interface Watched {
 }
 
 const EMPTY: Watched = {
-  repo: { files: [], diffs: [] },
+  repo: { files: [], diffs: [], mark: "" },
   plan: [],
   usage: null,
   activity: null,
@@ -160,12 +160,15 @@ const EMPTY: Watched = {
   stale: false,
 };
 
-// A cheap identity for "has the working tree changed" — path plus churn per
-// file. Comparing full diff text would re-run the checker on a whitespace
-// edit inside an unchanged line count; comparing file names alone would miss
-// every edit that does not add or remove a file.
+// "Has the working tree changed" — by content, not by churn counts.
+//
+// Counts alone were wrong in the case that matters most: an agent replacing a
+// line with a different line leaves `+1 -1` exactly as it found it, so the
+// checker never re-ran and the sidebar kept showing the verdict from before
+// the fix — not even labelled stale, because as far as it could tell nothing
+// had moved. Which is the shape of every bug an agent fixes in place.
 export function fingerprint(s: RepoState): string {
-  return s.files.map((f) => `${f.path}:${f.added}:${f.removed}`).join("|");
+  return s.mark;
 }
 
 // When to run the project's checker. Pure, because the decision has three
