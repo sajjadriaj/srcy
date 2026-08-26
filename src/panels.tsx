@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
-import { KEYS, START, actionFor, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
+import { KEYS, START, actionFor, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
 import { loadGates, problemsOf, runGate, summarise, type Gate, type GateResult } from "./gates.js";
@@ -108,6 +108,10 @@ interface Shared {
   // again — and the dock would re-pin the pane every second, which is one
   // way of saying `f` does nothing.
   pickedAt?: number;
+  // The line to land on, when the pick came from a failing gate rather than
+  // from the tree. GATES names a file and a line; walking to it by hand was
+  // the last manual step between "something is broken" and reading it.
+  line?: number;
   // Every gate's verdict, so the dock can print the messages the rail has no
   // width for without running anything itself.
   gates?: GateResult[];
@@ -755,6 +759,8 @@ export function Rail({
   // Gates the reader asked for by hand, handed to the poll loop that owns
   // running them.
   const asked = useRef<string[]>([]);
+  // Which failing location `e` goes to next.
+  const nextProblem = useRef(0);
   const s = useWatch(cwd, true, source, session, asked);
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
@@ -799,6 +805,20 @@ export function Rail({
         void captureTree(cwd).then((tree) =>
           publish(session, tree === null ? { turnWhy: "baseline could not be created" } : { turn: tree, turnWhy: undefined }),
         );
+        return;
+      }
+      // Straight to the next thing that is broken. GATES already names the
+      // file and the line; this is the walk between reading that and
+      // reading the code, which was the last step still done by hand.
+      if (input === "e") {
+        const problems = problemsOf(s.results);
+        if (problems.length === 0) return;
+        // Modulo rather than a stored list: the set changes as gates re-run,
+        // and an index into a list that moved is a worse answer than the
+        // next problem in the list that exists now.
+        const p = problems[nextProblem.current++ % problems.length]!;
+        setPicked(p.path);
+        publish(session, { file: p.path, line: p.line, pickedAt: Date.now() });
         return;
       }
       // Back to following the agent. The dock has had this since it had a
@@ -906,6 +926,21 @@ function clipTo(s: string, width: number): string {
 // newest picks the file the agent touched last, by mtime. That is what a
 // reader wants the dock showing without having to steer it: the edit that
 // just scrolled past in the pane above.
+// Which rendered row shows a given line of the new file. Falls back to the
+// nearest row above it, because a failing line is often context the diff
+// does not include — landing on the hunk that precedes it beats landing on
+// the top of the file.
+export function rowFor(lines: ReviewLine[], line: number): number {
+  let best = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const num = Number(lines[i]!.right?.num ?? lines[i]!.num);
+    if (!Number.isFinite(num) || num === 0) continue;
+    if (num === line) return i;
+    if (num < line) best = i;
+  }
+  return best;
+}
+
 export async function newest(cwd: string, diffs: FileDiff[]): Promise<FileDiff | undefined> {
   let best: { f: FileDiff; at: number } | undefined;
   for (const f of diffs) {
@@ -972,7 +1007,7 @@ export function Dock({
 }): React.JSX.Element {
   const s = useWatch(cwd, false, null);
   const [pos, setPos] = useState<Position>(START);
-  const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
+  const [preview, setPreview] = useState<{ path: string; text: string; from: number } | null>(null);
   const [gates, setGates] = useState<GateResult[]>([]);
   // The file the agent wrote last, by mtime. Recomputed on the poll rather
   // than during render because it is a stat per changed file.
@@ -1026,9 +1061,10 @@ export function Dock({
         seenPick.current = at;
         // A file the reader picked in the rail outranks the file the agent
         // wrote last: they are looking at something on purpose.
-        if (list.some((f) => f.path === picked)) {
+        const hit = list.find((f) => f.path === picked);
+        if (hit !== undefined) {
           setPreview(null);
-          setPos({ path: picked, top: 0, pinned: true });
+          setPos({ path: picked, top: state.line === undefined ? 0 : rowFor(fileLines(hit, split), state.line), pinned: true });
           return;
         }
         // Picked, but unchanged. Showing "no diff" would make every
@@ -1036,7 +1072,9 @@ export function Dock({
         const text = await readFile(join(cwd, picked), "utf8").catch(() => null);
         if (live && text !== null) {
           setPos(START);
-          setPreview({ path: picked, text });
+          // A gate can fail on a line of a file nothing has touched, so the
+          // preview starts where the failure is rather than at line one.
+          setPreview({ path: picked, text, from: Math.max(0, (state.line ?? 1) - 1) });
         }
         return;
       }
@@ -1096,9 +1134,9 @@ export function Dock({
       <Box flexDirection="column">
         {preview.text
           .split("\n")
-          .slice(0, Math.min(PREVIEW_LINES, room))
+          .slice(preview.from, preview.from + Math.min(PREVIEW_LINES, room))
           .map((line, i) => (
-            <Text key={i} dimColor>{`${String(i + 1).padStart(4)}  ${line}`}</Text>
+            <Text key={i} dimColor>{`${String(preview.from + i + 1).padStart(4)}  ${line}`}</Text>
           ))}
       </Box>
     ) : v.file === undefined ? (

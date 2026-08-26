@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
-import { START, actionFor, move, scopeFor, view, type Review } from "../src/review.js";
+import { rowFor } from "../src/panels.js";
+import { START, actionFor, fileLines, move, scopeFor, view, type Review } from "../src/review.js";
 
 const raw = `diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -238,4 +239,21 @@ test("split is a view, so the pane still moves the way it did", () => {
   const unified = view({ ...base, pos: pinned }).lines.length;
   const side = view({ ...base, pos: pinned, split: true }).lines.length;
   assert.ok(side < unified, `${side} !< ${unified}`);
+});
+
+test("a failing line lands on the row that shows it", () => {
+  const lines = fileLines(rewrite[0]!);
+  // The line the gate named, exactly.
+  assert.equal(Number(lines[rowFor(lines, 6)]!.num), 6);
+  // A line the diff does not include lands on the nearest row above it, not
+  // at the top of the file: the hunk before a failure is context for it.
+  const above = rowFor(lines, 99);
+  assert.ok(above > 0, `${above} — a line past the diff should not reset to the top`);
+  assert.equal(rowFor(lines, 1), 0);
+  assert.equal(rowFor([], 4), 0);
+
+  // Split rows carry the new file on the right, which is the side a gate's
+  // line numbers are in.
+  const side = fileLines(rewrite[0]!, true);
+  assert.equal(Number(side[rowFor(side, 6)]!.right?.num), 6);
 });

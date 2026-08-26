@@ -125,6 +125,7 @@ With the keyboard in the sidebar:
 |---|---|
 | `j` `k` / `↓` `↑` | move the cursor |
 | `⏎` `space` | open/close a directory — on a file, pin the review pane to it |
+| `e` | jump the review pane to the next failing line |
 | `f` | back to following — the cursor tracks the file the agent has open |
 | `r` | run every gate now, including the ones that don't run themselves |
 | `c` | checkpoint: everything after this is *this* turn |
@@ -173,6 +174,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **The focused pane's title is lit and the rest are grey.** Three panes take
   keys and only one is listening; the panels do nothing until you move the
   keyboard to them, which is easier to believe when you can see where it is.
+- **`e` walks the failures.** GATES names a file and a line; `e` pins the
+  review pane to it and scrolls there — including into a file nothing has
+  touched, where the pane previews the source from that line instead of
+  starting at line one. A line the diff doesn't cover lands on the nearest
+  row above it.
 - **The sidebar's border says whether the agent is working or waiting on
   you.** `⟳ 52s Bash npm test` while a tool is in flight — the age is the
   wedged signal, since a still picture of `npm test` cannot say it has been
