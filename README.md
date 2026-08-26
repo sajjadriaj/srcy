@@ -142,6 +142,7 @@ With the keyboard in the review pane:
 | `s` | side by side — old on the left, new on the right |
 | `f` | back to following the agent's newest write |
 | `1` `2` `3` | review this turn / this session / everything uncommitted |
+| `,` `.` | back and forward through the last 8 turns |
 
 The agent keeps every other keystroke. Both panels are inert until you move
 the keyboard to them.
@@ -354,6 +355,11 @@ This is Make's job, technically. Nobody runs Make on a gif.
 | `TURN` | the newest thing you asked for, or your last `c` |
 | `SESSION` | srcy opening this repo |
 | `HEAD` | the last commit — every uncommitted line, staged or not |
+
+`,` steps back a turn and `.` forward, up to eight — the title says `TURN-2`.
+srcy keeps the tree each turn started from, so an older turn is a real diff
+rather than a reconstruction; a turn it no longer holds says so instead of
+quietly showing you another one. `c` checkpoints land in the same history.
 
 A baseline is a git tree captured through a throwaway index: your real index
 and worktree are never touched, and srcy stages, commits and reverts nothing.

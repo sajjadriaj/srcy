@@ -108,6 +108,10 @@ interface Shared {
   // again — and the dock would re-pin the pane every second, which is one
   // way of saying `f` does nothing.
   pickedAt?: number;
+  // The last few turn baselines, newest first. One tree is enough to review
+  // the turn you are in; a reader who steps away for twenty minutes comes
+  // back to four turns and no way to see any but the last.
+  turns?: Past[];
   // The line to land on, when the pick came from a failing gate rather than
   // from the tree. GATES names a file and a line; walking to it by hand was
   // the last manual step between "something is broken" and reading it.
@@ -164,6 +168,21 @@ export async function readShared(session: string): Promise<Shared> {
 // check exists to close. A baseline that cannot be shown to predate the work
 // is thrown away rather than shipped with a caveat — a diff labelled TURN
 // that already contains half the turn is worse than no TURN at all.
+// A turn, and the tree it started from.
+export interface Past {
+  at: number;
+  text: string;
+  tree: string;
+}
+
+// How many to keep. Enough to cover stepping away, few enough that the file
+// the panels pass between them stays small.
+export const PAST_MAX = 8;
+
+export function pushPast(list: Past[], turn: Past): Past[] {
+  return [turn, ...list.filter((p) => p.at !== turn.at)].slice(0, PAST_MAX);
+}
+
 export async function baseline(cwd: string, source: Source | null, marker: number): Promise<Shared> {
   const tree = await captureTree(cwd);
   if (tree === null) return { turn: undefined, turnWhy: "baseline could not be created" };
@@ -270,6 +289,9 @@ function useWatch(
   // Gates the reader asked for by hand. A ref rather than state: pressing
   // `r` is a request for work, not a reason to re-render.
   asked?: React.RefObject<string[]>,
+  // The turns seen so far, held by the rail so that `c` and the automatic
+  // baseline push onto the same history rather than two that drift.
+  past?: React.RefObject<Past[]>,
 ): Watched {
   const [state, setState] = useState<Watched>(EMPTY);
   // Refs, not state: these drive when work happens, and re-rendering because
@@ -287,6 +309,7 @@ function useWatch(
   const configError = useRef<string | undefined>(undefined);
   const configFor = useRef<string | null>(null);
   const task = useRef("");
+
   // Files the project builds from other files. Shown as gates because they
   // are the same claim, never queued because there is no command to run.
   const built = useRef<Gate[]>([]);
@@ -348,7 +371,14 @@ function useWatch(
           const marker = t?.turn?.at;
           if (marker !== undefined && marker !== turnMark.current) {
             turnMark.current = marker;
-            publish(session, await baseline(cwd, source, marker));
+            const made = await baseline(cwd, source, marker);
+            // A baseline that could not be trusted is not put in the history
+            // either: the whole point of the history is that every entry in
+            // it is a tree the turn really started from.
+            if (made.turn !== undefined && past !== undefined) {
+              past.current = pushPast(past.current, { at: marker, text: t?.turn?.text ?? "", tree: made.turn });
+            }
+            publish(session, { ...made, turns: past?.current });
           }
 
           // What this project verifies, re-read when the tree moves —
@@ -880,9 +910,13 @@ export function Rail({
   // Gates the reader asked for by hand, handed to the poll loop that owns
   // running them.
   const asked = useRef<string[]>([]);
+  // The turns this session has seen, newest first, each with the tree it
+  // started from. One tree is enough to review the turn you are in; a reader
+  // who steps away comes back to four turns and a way to see only the last.
+  const past = useRef<Past[]>([]);
   // Which failing location `e` goes to next.
   const nextProblem = useRef(0);
-  const s = useWatch(cwd, true, source, session, asked);
+  const s = useWatch(cwd, true, source, session, asked, past);
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
 
@@ -933,9 +967,13 @@ export function Rail({
         return;
       }
       if (input === "c") {
-        void captureTree(cwd).then((tree) =>
-          publish(session, tree === null ? { turnWhy: "baseline could not be created" } : { turn: tree, turnWhy: undefined }),
-        );
+        void captureTree(cwd).then((tree) => {
+          if (tree === null) return publish(session, { turnWhy: "baseline could not be created" });
+          // A checkpoint is a turn boundary the reader drew, so it belongs
+          // in the history the same way one the agent drew does.
+          past.current = pushPast(past.current, { at: Date.now(), text: "checkpoint", tree });
+          return publish(session, { turn: tree, turnWhy: undefined, turns: past.current });
+        });
         return;
       }
       if (input === "m") {
@@ -1176,6 +1214,9 @@ export function Dock({
   // split halves it — worth it when reading a rewrite, not when watching one
   // land.
   const [split, setSplit] = useState(false);
+  // How far back through the turns the pane is looking. Zero is the turn you
+  // are in, which is where it starts and where it stays until asked.
+  const [back, setBack] = useState(0);
   const [base, setBase] = useState<Shared>({});
   const [scoped, setScoped] = useState<FileDiff[]>([]);
   // The rail's last pick this pane has already acted on. Without it every
@@ -1183,7 +1224,13 @@ export function Dock({
   const seenPick = useRef(0);
 
   const head = s.repo.diffs;
-  const tree = scope === "turn" ? base.turn : scope === "session" ? base.session : undefined;
+  const past = base.turns ?? [];
+  // Stepping back is a TURN thing: every other scope has exactly one
+  // baseline, and "the session before this one" is not a question this pane
+  // can answer.
+  const era = scope === "turn" && back > 0 ? `-${back}` : "";
+  const tree =
+    scope === "turn" ? (back === 0 ? base.turn : past[back]?.tree) : scope === "session" ? base.session : undefined;
   // Worst first, not git's alphabetical order: the pane is for reading a
   // turn, and what broke is where reading should start.
   const files = useMemo(() => byRisk(scope === "head" ? head : scoped, problemsOf(gates)), [scope, head, scoped, gates]);
@@ -1192,7 +1239,9 @@ export function Dock({
     scope === "head" || tree !== undefined
       ? undefined
       : scope === "turn"
-        ? (base.turnWhy ?? "no request read yet — press c in the rail to start one")
+        ? back > 0
+          ? `nothing kept from ${back} turns back — srcy holds the last ${PAST_MAX}`
+          : (base.turnWhy ?? "no request read yet — press c in the rail to start one")
         : "session baseline could not be created";
 
   useEffect(() => {
@@ -1251,7 +1300,7 @@ export function Dock({
   const failures = problemLines(gates, preview?.path ?? pos.path, width);
   // Two for the border and title tmux draws, one for the key line below.
   const room = Math.max(3, rows - 3 - failures.length);
-  const v = view({ pos, files, rows: room, newest: newestPath, scope, note, split });
+  const v = view({ pos, files, rows: room, newest: newestPath, scope, note, split, era });
 
   useInput(
     (input, key) => {
@@ -1263,18 +1312,28 @@ export function Dock({
         setSplit((on) => !on);
         return;
       }
+      // Back and forward through the turns srcy kept. `,` implies the TURN
+      // scope, because a previous turn is a thing only that scope has.
+      if (input === "," || input === ".") {
+        const step = input === "," ? 1 : -1;
+        setBack((n) => Math.max(0, Math.min(n + step, PAST_MAX - 1)));
+        if (input === ",") setScope("turn");
+        return;
+      }
       const picked = scopeFor(input);
       if (picked !== undefined) {
         // The position survives the change: the same file is usually in the
         // next scope too, and `view` hands the pane back to follow when it
         // is not.
         setScope(picked);
+        // A scope is a fresh question: it starts at the turn you are in.
+        setBack(0);
         return;
       }
       const action = actionFor(input, key);
       if (action === undefined) return;
       setPreview(null);
-      setPos(move({ pos, files, rows: room, newest: newestPath, scope, note, split }, action));
+      setPos(move({ pos, files, rows: room, newest: newestPath, scope, note, split, era }, action));
     },
     // tmux only delivers keys to the focused pane, so this is inert until
     // the reader moves the keyboard here — the agent keeps every key

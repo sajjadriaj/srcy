@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
-import { rowFor } from "../src/panels.js";
+import { PAST_MAX, pushPast, rowFor, type Past } from "../src/panels.js";
 import { START, actionFor, byRisk, fileLines, move, scopeFor, spans, view, type Review } from "../src/review.js";
 
 const raw = `diff --git a/a.txt b/a.txt
@@ -333,4 +333,41 @@ new file mode 100644
   assert.deepEqual(byRisk(raw, []).map((f) => f.path), ["c-gone.ts", "d-new.ts", "a-clean.ts", "b-broken.ts"]);
   // Stable, and never mutating the list it was handed.
   assert.deepEqual(raw.map((f) => f.path), ["a-clean.ts", "b-broken.ts", "c-gone.ts", "d-new.ts"]);
+});
+
+test("the turn history keeps the last few, newest first, once each", () => {
+  let list: Past[] = [];
+  for (let i = 1; i <= 3; i++) list = pushPast(list, { at: i, text: `turn ${i}`, tree: `t${i}` });
+  // Newest first: `,` steps backwards through time from where you are.
+  assert.deepEqual(list.map((p) => p.text), ["turn 3", "turn 2", "turn 1"]);
+
+  // The same turn seen again is not a second entry — the rail re-reads the
+  // transcript every second and the newest request is the same request.
+  list = pushPast(list, { at: 3, text: "turn 3", tree: "t3-again" });
+  assert.equal(list.length, 3);
+  assert.equal(list[0]?.tree, "t3-again");
+
+  for (let i = 4; i <= 20; i++) list = pushPast(list, { at: i, text: `turn ${i}`, tree: `t${i}` });
+  assert.equal(list.length, PAST_MAX);
+  assert.equal(list[0]?.text, "turn 20");
+  assert.equal(list[PAST_MAX - 1]?.text, `turn ${20 - PAST_MAX + 1}`);
+});
+
+test("the review title says which turn back it is looking at", () => {
+  const files = splitDiff(`diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1,2 @@ f()
+ one
++two
+`);
+  const base = { pos: { path: "a.txt", top: 0, pinned: true }, files, rows: 40, newest: "a.txt", scope: "turn" as const };
+  assert.match(view(base).title, /REVIEW  TURN  /);
+  // The scope word carries it, because the pane has one line to say where it
+  // is and the diff below cannot say it at all.
+  assert.match(view({ ...base, era: "-2" }).title, /REVIEW  TURN-2  /);
+  // A turn srcy no longer holds says so rather than showing another scope.
+  const gone = view({ ...base, era: "-9", note: "nothing kept from 9 turns back — srcy holds the last 8" });
+  assert.match(gone.title, /TURN-9  nothing kept from 9 turns back/);
+  assert.equal(gone.file, undefined);
 });

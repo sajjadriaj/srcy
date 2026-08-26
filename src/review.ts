@@ -118,6 +118,9 @@ export interface Review {
   // Side-by-side rather than unified. A view, not a different diff: the same
   // hunks, paired up.
   split?: boolean;
+  // How far back through the turns this is, as the title should say it:
+  // "-2" on TURN. Empty for the turn you are in.
+  era?: string;
 }
 
 export type Action =
@@ -272,7 +275,7 @@ function clamp(n: number, lo: number, hi: number): number {
 }
 
 export function view(r: Review): View {
-  const scope = r.scope.toUpperCase();
+  const scope = r.scope.toUpperCase() + (r.era === undefined || r.era === "" ? "" : r.era);
   if (r.note !== undefined || r.files.length === 0) {
     return {
       index: 0,
@@ -404,7 +407,7 @@ export function actionFor(input: string, key: Chord = {}): Action | undefined {
 
 // The key line under the diff. Not hidden behind a `?`: the pane is one row
 // taller for it, and a binding nobody can see is a binding nobody presses.
-export const KEYS = " ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope";
+export const KEYS = " ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn";
 
 // The scope keys. Separate from `actionFor` because choosing what to review
 // is not moving around inside it: the position survives the change, and a
