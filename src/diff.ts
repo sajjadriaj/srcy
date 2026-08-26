@@ -7,6 +7,9 @@ export interface Hunk {
   func: string; // enclosing function, from git's xfuncname; may be empty
   newStart: number; // first line number on the new side
   newCount: number; // how many new-side lines this hunk covers
+  oldStart: number; // first line number on the old side, for the left column
+                    // of a side-by-side view. The unified view numbers by
+                    // the new file alone and never needs it.
 }
 
 // FileDiff is one file's section of a unified diff.
@@ -118,12 +121,14 @@ function readHunk(lines: string[], start: number): [Hunk, number] {
       func: "",
       newStart: 0,
       newCount: 0,
+      oldStart: 0,
     };
     return [h, i];
   }
   // JS leaves a non-participating optional group as `undefined`, where Go's
   // FindStringSubmatch would give "" — normalize before countOr1 sees it.
   let oldLeft = countOr1(m[2] ?? "");
+  const oldStart = atoi(m[1]);
   const newStart = atoi(m[3]);
   let newLeft = countOr1(m[4] ?? "");
   const newCount = newLeft;
@@ -159,6 +164,7 @@ function readHunk(lines: string[], start: number): [Hunk, number] {
     func,
     newStart,
     newCount,
+    oldStart,
   };
   return [h, i];
 }

@@ -188,3 +188,54 @@ test("1, 2 and 3 pick the three scopes and nothing else does", () => {
   assert.equal(scopeFor("4"), undefined);
   assert.equal(scopeFor("f"), undefined);
 });
+
+// Side by side. The pairing is the whole feature; everything else about the
+// pane is meant to carry over unchanged, which is what these check.
+const rewrite = splitDiff(`diff --git a/t.ts b/t.ts
+--- a/t.ts
++++ b/t.ts
+@@ -3,5 +3,6 @@ func verify()
+   const exp = decode(t).exp
+-  if (exp < now())
+-    return null
++  if (exp <= now())
++    return null
++  audit(t)
+   return session
+`);
+
+test("split pairs the change and numbers each column by its own file", () => {
+  const v = view({ pos: { path: "t.ts", top: 0, pinned: true }, files: rewrite, rows: 40, newest: "t.ts", scope: "head", split: true });
+  const rows = v.lines.filter((l) => l.sign !== "@");
+
+  // The left column is the old file and the right is the new one — the whole
+  // reason there are two. Unified numbers both by the new file, which is
+  // right for one column and wrong for two.
+  assert.deepEqual(rows.map((l) => l.num), ["3", "4", "5", "", "6"]);
+  assert.deepEqual(rows.map((l) => l.right?.num), ["3", "4", "5", "6", "7"]);
+
+  // One replaced line sits opposite the line that replaced it, on one row.
+  const changed = rows.find((l) => l.sign === "-")!;
+  assert.equal(changed.text.trim(), "if (exp < now())");
+  assert.equal(changed.right?.text.trim(), "if (exp <= now())");
+
+  // The addition with nothing to replace gets a blank, not a borrowed line:
+  // sliding the rest of the column up by one would misalign every row after
+  // it, which is the one thing this view cannot survive.
+  const odd = rows.find((l) => l.right?.text.trim() === "audit(t)")!;
+  assert.equal(odd.num, "");
+  assert.equal(odd.text, "");
+});
+
+test("split is a view, so the pane still moves the way it did", () => {
+  const pinned = { path: "t.ts", top: 0, pinned: true };
+  const base = { files: rewrite, rows: 3, newest: "t.ts", scope: "head" as const };
+  // A heading is still a heading, so hunk counting and jumps read it the
+  // same way — the row list is the same type either way, only shorter.
+  assert.equal(view({ ...base, pos: pinned, split: true }).hunks, 1);
+  assert.equal(move({ ...base, pos: pinned, split: true }, "down").top, 1);
+  // Fewer rows, because two lines of a rewrite are now one row.
+  const unified = view({ ...base, pos: pinned }).lines.length;
+  const side = view({ ...base, pos: pinned, split: true }).lines.length;
+  assert.ok(side < unified, `${side} !< ${unified}`);
+});

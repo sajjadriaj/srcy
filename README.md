@@ -136,6 +136,7 @@ With the keyboard in the review pane:
 | `]` `[` | next / previous hunk |
 | `j` `k` / `↓` `↑` / `PgDn` `PgUp` | scroll |
 | `g` `G` | top / bottom of the diff |
+| `s` | side by side — old on the left, new on the right |
 | `f` | back to following the agent's newest write |
 | `1` `2` `3` | review this turn / this session / everything uncommitted |
 
@@ -156,7 +157,7 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 | **PLAN** | agent's session log | still there 40 tool calls later |
 | **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
 | **gauge** | agent's session log | `34% 343k/1.0M opus-5 cache 99%` |
-| **REVIEW** | `git` + GATES | every hunk of every changed file, scrollable. Follows the newest write until you pin a file. Heads the diff with what the gates actually said |
+| **REVIEW** | `git` + GATES | every hunk of every changed file, scrollable, unified or side by side. Follows the newest write until you pin a file. Heads the diff with what the gates actually said |
 
 **Details worth knowing**
 
@@ -171,6 +172,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
   `none configured` ≠ `timed out`. A gate that ran out of time proved nothing
   either way, so it is not rewritten to "failing".
+- **Side by side is a key, not the default.** The dock is a short pane
+  spanning the window, so unified gets the whole width for the line and `s`
+  halves it — worth it reading a rewrite, not watching one land. Each column
+  is numbered by its own file, which unified cannot do: there, a deleted line
+  carries the number of whatever replaced it.
 - **FOLLOW and PINNED are both visible, and both reversible.** Anything you
   press in the review pane pins it — having the agent's next write yank the
   pane mid-sentence is what makes a live pane useless for reading. `f` gives

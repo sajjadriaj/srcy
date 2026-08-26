@@ -19,10 +19,20 @@ export type Scope = "turn" | "session" | "head";
 
 // One rendered row. `sign` is a diff prefix — ' ', '+', '-' — or '@' for a
 // hunk heading, which is not a line of the file and so carries no number.
-export interface ReviewLine {
+export interface Side {
   num: string;
   sign: string;
   text: string;
+}
+
+// One row of the pane. `right` is the new side of a side-by-side row: absent
+// in the unified view, and absent on a hunk heading, which spans both columns
+// because it describes them both. Split rows keep the same list type as
+// unified ones, which is what lets scrolling, hunk jumps and the title work
+// on either view without knowing which is on screen — they count rows and
+// look for `@`.
+export interface ReviewLine extends Side {
+  right?: Side;
 }
 
 // Where the reader is. The file is held by path, not by index: the list is
@@ -49,6 +59,9 @@ export interface Review {
   // diff labelled TURN that is really every uncommitted line is worth less
   // than an empty pane that admits it.
   note?: string;
+  // Side-by-side rather than unified. A view, not a different diff: the same
+  // hunks, paired up.
+  split?: boolean;
 }
 
 export type Action =
@@ -67,12 +80,66 @@ export type Action =
 // Every row of one file's diff, hunk headings included. Headings are part of
 // the same list rather than drawn separately so that scrolling, hunk jumps
 // and the hunk counter all measure the same thing.
-export function fileLines(f: FileDiff): ReviewLine[] {
+const BLANK: Side = { num: "", sign: " ", text: "" };
+
+// splitHunk pairs a hunk's removals with its additions, one row each.
+//
+// A unified hunk is a run of `-` followed by a run of `+`, separated by
+// context. Pairing by position within the run is what makes the columns line
+// up on the edit — the common case is one line replaced by one line, and an
+// uneven run leaves blanks on the short side rather than sliding the rest of
+// the file out of step.
+//
+// Numbering is per side: the left column is the old file and the right is the
+// new one, which is the whole reason there are two. The unified view numbers
+// everything by the new file, so a deleted line there carries the number of
+// whatever replaced it — right for one column, wrong for two.
+function splitHunk(body: string, oldStart: number, newStart: number): ReviewLine[] {
+  const out: ReviewLine[] = [];
+  let o = oldStart;
+  let n = newStart;
+  let dels: Side[] = [];
+  let adds: Side[] = [];
+  const flush = (): void => {
+    for (let i = 0; i < Math.max(dels.length, adds.length); i++) {
+      out.push({ ...(dels[i] ?? BLANK), right: adds[i] ?? BLANK });
+    }
+    dels = [];
+    adds = [];
+  };
+  for (const line of body.split("\n")) {
+    if (line === "") continue;
+    const sign = line[0]!;
+    const text = line.slice(1);
+    // "\ No newline at end of file" describes the line above rather than
+    // being one. The unified view has a spare column for it; a split row
+    // would have to pick a side, and either choice is a line the file does
+    // not contain.
+    if (sign === "\\") continue;
+    if (sign === "+") {
+      adds.push({ num: String(n++), sign: "+", text });
+      continue;
+    }
+    // A `-` after a `+` starts a second change block rather than continuing
+    // the first.
+    if (sign === "-") {
+      if (adds.length > 0) flush();
+      dels.push({ num: String(o++), sign: "-", text });
+      continue;
+    }
+    flush();
+    out.push({ num: String(o++), sign: " ", text, right: { num: String(n++), sign: " ", text } });
+  }
+  flush();
+  return out;
+}
+
+export function fileLines(f: FileDiff, split = false): ReviewLine[] {
   if (f.binary) return [{ num: "", sign: " ", text: `${f.path} — binary` }];
   const out: ReviewLine[] = [];
   for (const h of f.hunks) {
     out.push({ num: "", sign: "@", text: `${h.newStart}  ${h.func === "" ? TOP_LEVEL : h.func}` });
-    out.push(...hunkLines(h.body, h.newStart));
+    out.push(...(split ? splitHunk(h.body, h.oldStart, h.newStart) : hunkLines(h.body, h.newStart)));
   }
   // A rename or a mode change has no hunks at all. Saying so beats an empty
   // pane, which reads as "nothing happened" about a file that moved.
@@ -128,7 +195,7 @@ export function view(r: Review): View {
   }
   const { index, pinned } = locate(r);
   const file = r.files[index]!;
-  const lines = fileLines(file);
+  const lines = fileLines(file, r.split === true);
   const rows = Math.max(1, r.rows);
   const maxTop = Math.max(0, lines.length - rows);
   // Following means the newest edit is on screen. For a change longer than
@@ -245,7 +312,7 @@ export function actionFor(input: string, key: Chord = {}): Action | undefined {
 
 // The key line under the diff. Not hidden behind a `?`: the pane is one row
 // taller for it, and a binding nobody can see is a binding nobody presses.
-export const KEYS = " ]/[ hunk · n/p file · j/k scroll · f follow · 1/2/3 turn/session/head";
+export const KEYS = " ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope";
 
 // The scope keys. Separate from `actionFor` because choosing what to review
 // is not moving around inside it: the position survives the change, and a

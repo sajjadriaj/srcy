@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
-import { KEYS, START, actionFor, move, scopeFor, view, type Position, type ReviewLine, type Scope } from "./review.js";
+import { KEYS, START, actionFor, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
 import { loadGates, problemsOf, runGate, summarise, type Gate, type GateResult } from "./gates.js";
@@ -888,6 +888,11 @@ export function Dock({
   // Which change is under review, and the baselines the rail captured for
   // the two scopes that are not simply "everything uncommitted".
   const [scope, setScope] = useState<Scope>("head");
+  // Side by side, old on the left. Off by default: the dock is a short pane
+  // spanning the window, so unified gets the full width for the line and
+  // split halves it — worth it when reading a rewrite, not when watching one
+  // land.
+  const [split, setSplit] = useState(false);
   const [base, setBase] = useState<Shared>({});
   const [scoped, setScoped] = useState<FileDiff[]>([]);
   // The rail's last pick this pane has already acted on. Without it every
@@ -958,10 +963,18 @@ export function Dock({
   const failures = problemLines(gates, preview?.path ?? pos.path, width);
   // Two for the border and title tmux draws, one for the key line below.
   const room = Math.max(3, rows - 3 - failures.length);
-  const v = view({ pos, files, rows: room, newest: newestPath, scope, note });
+  const v = view({ pos, files, rows: room, newest: newestPath, scope, note, split });
 
   useInput(
     (input, key) => {
+      // A view, not a movement: the row the pane is on stays where it is,
+      // and the pairing changes under it. Handled here rather than as an
+      // Action for the same reason the scope keys are — `move` returns a
+      // position, and neither of these moves.
+      if (input === "s") {
+        setSplit((on) => !on);
+        return;
+      }
       const picked = scopeFor(input);
       if (picked !== undefined) {
         // The position survives the change: the same file is usually in the
@@ -973,7 +986,7 @@ export function Dock({
       const action = actionFor(input, key);
       if (action === undefined) return;
       setPreview(null);
-      setPos(move({ pos, files, rows: room, newest: newestPath, scope, note }, action));
+      setPos(move({ pos, files, rows: room, newest: newestPath, scope, note, split }, action));
     },
     // tmux only delivers keys to the focused pane, so this is inert until
     // the reader moves the keyboard here — the agent keeps every key
@@ -1025,14 +1038,45 @@ export function Dock({
 // which is context for them rather than content of its own.
 export function ReviewRow({ line, width }: { line: ReviewLine; width: number }): React.JSX.Element {
   if (line.sign === "@") {
+    // The heading spans both columns in either view: it says where the rows
+    // under it are, which is as true of the left one as the right.
     return <Text dimColor>{clipTo(`  @@ ${line.text}`, width)}</Text>;
   }
+  if (line.right === undefined) {
+    return (
+      <Text color={signColor(line.sign)}>{clipTo(`${line.num.padStart(4)} ${line.sign} ${line.text}`, width)}</Text>
+    );
+  }
+  // Halves, with one cell for the divider between them. Padded to exactly
+  // half rather than left to Ink's layout: the divider has to land in the
+  // same column on every row, including the rows whose left side is blank
+  // because the change added more lines than it removed.
+  const half = Math.floor((width - 1) / 2);
   return (
-    <Text color={line.sign === "+" ? "green" : line.sign === "-" ? "red" : undefined}>
-      {clipTo(`${line.num.padStart(4)} ${line.sign} ${line.text}`, width)}
-    </Text>
+    <Box>
+      <Text color={signColor(line.sign)}>{cell(line, half).padEnd(half)}</Text>
+      <Text dimColor>{DIVIDER}</Text>
+      <Text color={signColor(line.right.sign)}>{cell(line.right, width - half - 1)}</Text>
+    </Box>
   );
 }
+
+function signColor(sign: string): string | undefined {
+  return sign === "+" ? "green" : sign === "-" ? "red" : undefined;
+}
+
+// A blank side is blank, not an empty line number and a sign: half a row of
+// punctuation is what makes an uneven change look like it edited lines that
+// are not there.
+function cell(side: Side, width: number): string {
+  if (side.num === "" && side.text === "") return "";
+  return clipTo(`${side.num.padStart(4)} ${side.sign} ${side.text}`, width);
+}
+
+// One cell in every terminal. `│` is East-Asian Ambiguous, and a divider
+// that renders two cells wide puts the right column one place out on every
+// row — which is the one thing a side-by-side view cannot survive.
+const DIVIDER = "\u254e";
 
 // ---------------------------------------------------------------------------
 

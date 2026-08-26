@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -745,6 +745,10 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
     render(<TreeLine row={{ path: "a.ts", name: "a.ts", depth: 1, dir: false,
       entry: { path: "a.ts", touch: "wrote" as const, added: 2, removed: 1, problems: 3 } }} width={24} cursor={false} />).lastFrame(),
     render(<NarrowUsage usage={{ used: 104_800, size: 200_000, output: 12_000, cached: 0.99 }} width={30} />).lastFrame(),
+    // The split view's divider is held to the same rule, and harder: a two-
+    // cell rule shortens a line, a two-cell divider puts the whole right
+    // column one place out on every row.
+    render(<ReviewRow line={{ num: "5", sign: "-", text: "was", right: { num: "5", sign: "+", text: "is" } }} width={40} />).lastFrame(),
     render(
       <GateRows
         gates={[{ name: "check", command: ["c"], auto: true, timeoutMs: 1000 }]}
@@ -761,6 +765,25 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
       assert.equal(w, 1, `${JSON.stringify(ch)} (U+${ch.codePointAt(0)!.toString(16)}) is not one cell:\n${frame}`);
     }
   }
+});
+
+test("the split view keeps its columns in the same place on every row", () => {
+  // Blank means blank. A line number and a sign on the side that has no line
+  // reads as an edit to something that is not there.
+  const row = { num: "", sign: " ", text: "", right: { num: "7", sign: "+", text: "audit(t)" } };
+  const frame = render(<ReviewRow line={row} width={40} />).lastFrame() ?? "";
+  assert.match(frame, /7 \+ audit\(t\)/, frame);
+  assert.doesNotMatch(frame, /^\s+\+\s+\u254e/, frame);
+
+  // Every row puts the divider in the same column, whichever sides are
+  // filled — that column is the only thing telling the two files apart.
+  const rows = [
+    row,
+    { num: "5", sign: "-", text: "if (exp < now())", right: { num: "5", sign: "+", text: "if (exp <= now())" } },
+    { num: "6", sign: " ", text: "return session", right: { num: "8", sign: " ", text: "return session" } },
+  ];
+  const at = rows.map((l) => (render(<ReviewRow line={l} width={40} />).lastFrame() ?? "").indexOf("\u254e"));
+  assert.ok(at.every((i) => i > 0 && i === at[0]), `divider wanders: ${JSON.stringify(at)}`);
 });
 
 test("the cursor follows a file, not a row number", () => {
