@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -1179,4 +1179,31 @@ test("a header takes a verdict's colour only when there is a verdict", () => {
   assert.equal(gatesTone(gates, [at("types", "timeout", "m"), at("tests", "pass", "m")], "m"), "red");
   // No gates at all is not a state worth a colour.
   assert.equal(gatesTone([], [], "m"), undefined);
+});
+
+test("the rail cursor follows what the agent has open, and lets go when pinned", () => {
+  const rows = [
+    { path: "src", name: "src", depth: 0, dir: true, open: true },
+    { path: "src/a.ts", name: "a.ts", depth: 1, dir: false, entry: { path: "src/a.ts", touch: "wrote" as const, added: 1, removed: 0, problems: 0 } },
+    { path: "src/b.ts", name: "b.ts", depth: 1, dir: false },
+    { path: "src/c.ts", name: "c.ts", depth: 1, dir: false, entry: { path: "src/c.ts", touch: "wrote" as const, added: 1, removed: 0, problems: 0 } },
+  ];
+  // Following: the file the agent has open now, not the first changed one in
+  // tree order — which is where the cursor used to sit whatever the agent
+  // was doing.
+  assert.equal(cursorAt(rows, null, "src/c.ts"), 3);
+  assert.equal(cursorAt(rows, null, ""), 1);
+  // A file the agent has open but the tree has not listed yet falls back
+  // rather than losing the cursor.
+  assert.equal(cursorAt(rows, null, "src/new.ts"), 1);
+  // Pinned outranks following: they are looking at something on purpose.
+  assert.equal(cursorAt(rows, "src/b.ts", "src/c.ts"), 2);
+
+  // Bash carries a description or a command line, and neither is a file.
+  assert.equal(following({ tool: "Bash", target: "Typecheck the worktree" }, "/repo"), "");
+  assert.equal(following({ tool: "Bash", target: "npm run typecheck" }, "/repo"), "");
+  assert.equal(following(null, "/repo"), "");
+  // Tool inputs name files absolutely; tree rows are repo-relative.
+  assert.equal(following({ tool: "Edit", target: "/repo/src/a.ts" }, "/repo"), "src/a.ts");
+  assert.equal(following({ tool: "Edit", target: "src/a.ts" }, "/repo"), "src/a.ts");
 });

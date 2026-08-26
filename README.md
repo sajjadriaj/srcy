@@ -125,6 +125,7 @@ With the keyboard in the sidebar:
 |---|---|
 | `j` `k` / `↓` `↑` | move the cursor |
 | `⏎` `space` | open/close a directory — on a file, pin the review pane to it |
+| `f` | back to following — the cursor tracks the file the agent has open |
 | `r` | run every gate now, including the ones that don't run themselves |
 | `c` | checkpoint: everything after this is *this* turn |
 
@@ -152,7 +153,7 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 
 | panel | reads | notes |
 |---|---|---|
-| **REPO** | `git` | whole project; directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
+| **REPO** | `git` | `FOLLOW`/`PINNED`; whole project; directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
 | **GOAL** | agent's session log | what you asked for, in your words, after forty tool calls buried it |
 | **PLAN** | agent's session log | still there 40 tool calls later |
 | **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
@@ -174,6 +175,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   keyboard to them, which is easier to believe when you can see where it is.
 - **The cursor holds a file, not a row.** The agent creates and deletes files
   while you read; a row number silently means a different file.
+- **The sidebar says FOLLOW or PINNED, like the review pane.** Untouched, the
+  cursor tracks the file the agent has open right now. The first key you press
+  pins it — you are looking at something on purpose — and `f` hands it back.
+  Pinning survives every write: the agent cannot pull the cursor off what you
+  are reading.
 - **Hand-opened directories are overrides.** Everything you haven't touched
   still opens itself for a change.
 - **An in-place edit counts as a change.** Replacing a line with a different

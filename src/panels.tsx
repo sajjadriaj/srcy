@@ -686,12 +686,34 @@ function useTree(cwd: string): string[] {
 // file the agent deleted, or one hidden when a directory closed — and an
 // untouched cursor, which starts on the session's work rather than on
 // whichever dotfile directory sorts first.
-export function cursorAt(visible: Row[], picked: string | null): number {
+export function cursorAt(visible: Row[], picked: string | null, following = ""): number {
   if (picked !== null) {
     const found = visible.findIndex((r) => r.path === picked);
     if (found >= 0) return found;
   }
+  // Unpinned, the cursor follows the file the agent has open right now —
+  // which is what "following" should mean, and what the dock has always
+  // meant by it. The first changed file in tree order is the fallback: it is
+  // where the cursor has to be when the agent is thinking rather than
+  // writing, and it is arbitrary, which is the reason not to make it the
+  // whole behaviour.
+  if (following !== "") {
+    const live = visible.findIndex((r) => r.path === following);
+    if (live >= 0) return live;
+  }
   return Math.max(0, visible.findIndex((r) => r.entry !== undefined));
+}
+
+// The repo-relative path the agent is working on, or "" when it is not
+// working on a path. Bash carries a description or a command line, neither of
+// which is a file, and `targetOf` puts the description first precisely
+// because it is the better thing to show — so anything with a space in it is
+// not what this is looking for.
+export function following(activity: Activity | null, cwd: string): string {
+  const target = activity?.target ?? "";
+  if (target === "" || target.includes(" ") || !target.includes("/")) return "";
+  const prefix = `${cwd}/`;
+  return target.startsWith(prefix) ? target.slice(prefix.length) : target;
 }
 
 export function Rail({
@@ -728,7 +750,8 @@ export function Rail({
   const visible = useMemo(() => treeRows(paths, open, changed), [paths, open, changed]);
 
   const [picked, setPicked] = useState<string | null>(null);
-  const at = cursorAt(visible, picked);
+  const live = following(s.activity, cwd);
+  const at = cursorAt(visible, picked, live);
 
   const now = useNow(s.activity !== null);
   useEffect(() => {
@@ -758,6 +781,13 @@ export function Rail({
         );
         return;
       }
+      // Back to following the agent. The dock has had this since it had a
+      // cursor; the rail's cursor pinned itself on the first `j` and then
+      // stayed pinned with nothing on screen saying so and no way back.
+      if (input === "f") {
+        setPicked(null);
+        return;
+      }
       if (visible.length === 0) return;
       const row = visible[at];
       const go = (i: number): void => setPicked(visible[Math.max(0, Math.min(i, visible.length - 1))]?.path ?? null);
@@ -784,7 +814,7 @@ export function Rail({
 
   return (
     <Box flexDirection="column" height={height}>
-      <Rule label="REPO" width={width} color={GIT} />
+      <Rule label={picked === null ? "REPO  FOLLOW" : "REPO  PINNED"} width={width} color={GIT} />
       {visible.length === 0 ? (
         <Text dimColor>{"  (reading the project…)"}</Text>
       ) : (
