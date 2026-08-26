@@ -70,6 +70,44 @@ tmux -L srcy ls            # what srcy has running
 tmux -L srcy kill-server   # stop all of it
 ```
 
+### The agent's own flags
+
+Everything after `--` is the agent's argv, untouched. srcy wraps nothing and
+adds no permission layer of its own, so resuming a conversation and loosening
+approvals are the agent's flags, not srcy's.
+
+| | |
+|---|---|
+| `srcy -- claude --resume` | pick an earlier conversation |
+| `srcy -- claude -c` | continue the last one |
+| `srcy -- codex resume --last` | the same, for codex |
+
+The panels come back with it. srcy reads whichever transcript was written
+most recently, with no "started after srcy" filter, so a resumed session
+restores its PLAN, its gauge and its GOAL. The `TURN` baseline is a fresh git
+tree either way — it comes from the repo, not the transcript.
+
+Approvals travel the same road:
+
+| | |
+|---|---|
+| `srcy -- claude --permission-mode acceptEdits` | edits land, shell still asks |
+| `srcy -- codex -s workspace-write -a on-request` | writes confined to the repo |
+| `srcy -- claude --dangerously-skip-permissions` | nothing asks |
+| `srcy -- codex --dangerously-bypass-approvals-and-sandbox` | nothing asks |
+
+**The last two let the agent run any command, write any file and reach the
+network without a prompt.** Run them somewhere you can throw away — a
+container, a scratch worktree, a branch you can `git reset --hard` — and not
+in a shell holding credentials. What srcy adds there is visibility, not a
+seatbelt: gates still run and the review pane still shows every file the turn
+touched, which is worth more when nothing else is asking.
+
+They combine: `srcy -- claude --resume --dangerously-skip-permissions`.
+
+Flag names drift between agent releases. `claude --help` and `codex --help`
+are the authority; the ones above were read off both.
+
 ### Keys
 
 Keys are tmux's, because it *is* tmux.
