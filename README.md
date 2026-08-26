@@ -214,8 +214,8 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   not by churn counts. Otherwise the fix for the bug the agent introduced three
   seconds ago never re-runs the checker.
 - **Where srcy hasn't run a gate, the agent's own run is the evidence.**
-  `not run · agent ran 4m00s ago`, or `not run · agent ran, stale` when it
-  went on editing afterwards. "I ran the tests" is the claim taken on faith
+  `not run · agent 4m00s`, or `not run · agent stale` when it went on editing
+  afterwards. "I ran the tests" is the claim taken on faith
   more than any other, and both timestamps are the agent's own — so this holds
   up on a transcript read hours later. Where srcy *has* run the gate its own
   verdict is the better answer, and this stays out of the way.
@@ -340,7 +340,7 @@ one. Declare them next to the gates:
 ```
 
 They appear in GATES — same claim, same staleness language — as
-`demo.cast  older than src/panels.tsx`, or `never built`. `from` entries are
+`demo.cast  older than panels.tsx`, or `never built`. `from` entries are
 paths or directory prefixes, not globs; there is no command to run, so `r`
 skips them and the comparison is re-made whenever the tree moves.
 

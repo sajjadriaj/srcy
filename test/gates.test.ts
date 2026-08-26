@@ -184,7 +184,7 @@ test("a derived file is stale when it is older than what it is built from", asyn
   await utimes(join(repo, "src/panels.tsx"), later, later);
   const stale = await checkDerived(repo, spec, paths, "m");
   assert.equal(stale[0]?.status, "fail");
-  assert.equal(stale[0]?.tail, "older than src/panels.tsx");
+  assert.equal(stale[0]?.tail, "older than panels.tsx");
 
   // Never a problem row: a stale gif has no line for `e` to jump to.
   assert.deepEqual(stale[0]?.problems, []);

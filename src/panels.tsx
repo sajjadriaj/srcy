@@ -596,11 +596,12 @@ export function agentRan(ran: Map<string, number>, gate: Gate, wrote: number | u
   // "stale" is the word the rest of this pane uses for a verdict measured
   // against a tree that has moved on, and this is the same thing said about
   // the agent's run instead of srcy's.
-  if (wrote !== undefined && wrote > at) return "agent ran, stale";
-  // Short because the row is thirteen columns of name and marker before it
-  // gets here, on a rail that can be thirty wide. A line that clips is a line
-  // whose ending nobody reads.
-  return now === 0 ? "agent ran" : `agent ran ${elapsed(now - at)} ago`;
+  if (wrote !== undefined && wrote > at) return "agent stale";
+  // Eleven columns, because that is what is left. The row spends thirteen on
+  // marker and name and ten more on `not run · ` before this gets a say, on a
+  // rail that is thirty-four wide at a typical terminal — and a line that
+  // clips is a line whose ending nobody reads.
+  return now === 0 ? "agent ran" : `agent ${elapsed(now - at)}`;
 }
 
 export function GateLine({

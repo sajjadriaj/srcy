@@ -109,7 +109,9 @@ export async function checkDerived(cwd: string, list: Derived[], paths: string[]
     }
     out.push(
       newest.at > built
-        ? { name, status: "fail", problems: [], tail: `older than ${newest.path}`, ms: 0, mark }
+        ? // Basename: the rail is a narrow column, and the whole path clips —
+          // which loses more than the directory does.
+          { name, status: "fail", problems: [], tail: `older than ${newest.path.split("/").pop() ?? newest.path}`, ms: 0, mark }
         : { name, status: "pass", problems: [], tail: "", ms: 0, mark },
     );
   }
