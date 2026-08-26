@@ -3,11 +3,17 @@ import { Box, Text } from "ink";
 import type { Problem } from "./checks.js";
 import type { FileDiff } from "./diff.js";
 
-// The two things a file can be to a session: changed against the base
-// commit, or merely opened. There is deliberately no "untouched" state —
-// the map shows what this session actually did, not the whole repo, so an
-// untouched file is an absent row rather than a dimmer one.
-export type Touch = "wrote" | "read";
+// What a file is to a session: created, edited, deleted, or merely opened.
+// There is deliberately no "untouched" state — the map shows what this
+// session actually did, not the whole repo, so an untouched file is an absent
+// row rather than a dimmer one.
+//
+// The three write states were one for a long time, which made a file the
+// agent deleted look exactly like a file it edited heavily: same marker, and
+// `+0 -37` where an edit reads `+2 -37`. Deleting the wrong file is a
+// different mistake from editing it, and it was the one the tree could not
+// show you.
+export type Touch = "wrote" | "read" | "added" | "deleted";
 
 export interface MapEntry {
   path: string; // repo-relative, POSIX separators (as git and ACP both give)
@@ -78,7 +84,11 @@ export function mapEntries(
 
 
 
-const MARK: Record<Touch, string> = { wrote: "▪", read: "▫" };
+// ASCII for the two new states rather than more box glyphs: `+` and `-` are
+// one cell in every terminal by construction, where the shapes that would
+// look better are East-Asian Ambiguous and would tear the column they are
+// meant to line up.
+const MARK: Record<Touch, string> = { wrote: "▪", read: "▫", added: "+", deleted: "-" };
 
 // Column the +/- counts line up in, measured from the start of the name.
 const NAME_WIDTH = 17;

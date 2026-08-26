@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -236,7 +236,41 @@ test("a new file's churn is its whole length, never a +0 -0 that reads as unchan
   const entry = s.files.find((f) => f.path === "src/new.ts");
   assert.ok(entry, `untracked file missing from the map: ${JSON.stringify(s.files)}`);
   assert.equal(entry.added, 3);
-  assert.equal(entry.touch, "wrote");
+  // It did not exist at HEAD, which is the thing to know about it.
+  assert.equal(entry.touch, "added");
+});
+
+test("created, edited and deleted are three different things on the map", async (t) => {
+  const repo = await newRepo(t);
+  await writeFile(join(repo, "gone.txt"), "one\ntwo\n");
+  await writeFile(join(repo, "kept.txt"), "one\n");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-m", "base");
+
+  await rm(join(repo, "gone.txt"));
+  await writeFile(join(repo, "kept.txt"), "one\ntwo\n");
+  await writeFile(join(repo, "fresh.txt"), "new\n");
+  // Staged, so git writes `new file mode` rather than listing it untracked —
+  // the other half of the same question.
+  await git(repo, "add", "fresh.txt");
+
+  const by = new Map((await repoState(repo)).files.map((f) => [f.path, f]));
+  // Deleting the wrong file is a different mistake from editing it, and it
+  // was the one the tree could not show: both were `wrote`, and `+0 -2` is
+  // the same shape as an edit that removed two lines.
+  assert.equal(by.get("gone.txt")?.touch, "deleted");
+  assert.equal(by.get("kept.txt")?.touch, "wrote");
+  assert.equal(by.get("fresh.txt")?.touch, "added");
+
+  assert.equal(touchMark(by.get("gone.txt")!), "-");
+  assert.equal(touchMark(by.get("fresh.txt")!), "+");
+  assert.equal(touchMark(by.get("kept.txt")!), "\u25aa");
+  // A failure outranks the state: what is broken is the more urgent fact.
+  assert.equal(touchMark({ ...by.get("kept.txt")!, problems: 2 }), "\u2716");
+
+  const frame = render(<TreeLine row={{ path: "gone.txt", name: "gone.txt", depth: 0, dir: false, entry: by.get("gone.txt")! }} width={34} cursor={false} />).lastFrame() ?? "";
+  assert.match(frame, /deleted/, frame);
+  assert.doesNotMatch(frame, /\+0/, frame);
 });
 
 test("a tracked edit is measured against HEAD, staged or not", async (t) => {

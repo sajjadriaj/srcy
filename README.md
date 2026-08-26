@@ -242,6 +242,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   re-sending its whole context every turn shows it collapsing.
 - **New files count their whole length.** `+0 -0` on a file that didn't exist
   an hour ago reads as "nothing happened here".
+- **Created, edited and deleted are three different markers.** `+` `▪` `-`,
+  and a deletion says `deleted` instead of `+0 -37` — which is the same shape
+  as an edit that removed thirty-seven lines. Deleting the wrong file is a
+  different mistake from editing it, and it was the one the tree couldn't
+  show.
 - srcy adds **nothing** to the context window. Every token in there is the
   agent's.
 

@@ -74,7 +74,15 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
 
   const files: MapEntry[] = diffs.map((f) => {
     const { added, removed } = diffStats(f);
-    return { path: f.path, touch: "wrote" as const, added, removed, problems: count.get(f.path) ?? 0 };
+    // git says which of the three this is in the file's own header, so the
+    // distinction costs no extra call: `deleted file mode` and `new file
+    // mode` are lines git writes there and nowhere else.
+    const touch = f.header.includes("deleted file mode ")
+      ? ("deleted" as const)
+      : f.header.includes("new file mode ")
+        ? ("added" as const)
+        : ("wrote" as const);
+    return { path: f.path, touch, added, removed, problems: count.get(f.path) ?? 0 };
   });
 
   const stamps: string[] = [];
@@ -86,7 +94,9 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
     if (path === "" || seen.has(path)) continue;
     const { added, removed, stamp } = await newFileChurn(repo, path);
     stamps.push(`${path}:${stamp}`);
-    files.push({ path, touch: "wrote", added, removed, problems: count.get(path) ?? 0 });
+    // Untracked: it did not exist at HEAD, which is the same thing `new file
+    // mode` says about a staged one.
+    files.push({ path, touch: "added", added, removed, problems: count.get(path) ?? 0 });
   }
 
   // A failing file the agent has not touched still belongs on the map: the

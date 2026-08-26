@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
-import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
+import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } from "./cockpit.js";
 import { KEYS, START, actionFor, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
@@ -932,6 +932,18 @@ export function Rail({
 // One row of the tree. The marker column is the same width whether or not a
 // file changed, so nesting reads straight down and does not jog when the
 // agent touches something.
+// The marker column. ASCII for the three write states, for the reason MARK
+// gives next door: the shapes that would look better are East-Asian
+// Ambiguous, and a marker that renders two cells tears the column it is
+// meant to line up.
+export function touchMark(e: MapEntry): string {
+  if (e.problems > 0) return "\u2716";
+  if (e.touch === "added") return "+";
+  if (e.touch === "deleted") return "-";
+  if (e.touch === "read") return " ";
+  return "\u25aa";
+}
+
 export function TreeLine({ row, width, cursor }: { row: Row; width: number; cursor: boolean }): React.JSX.Element {
   const indent = "  ".repeat(row.depth);
   const caret = cursor ? "\u25ba" : " ";
@@ -950,11 +962,13 @@ export function TreeLine({ row, width, cursor }: { row: Row; width: number; curs
       </Text>
     );
   }
-  const stat = e.problems > 0 ? `\u2716${e.problems}` : `+${e.added} -${e.removed}`;
+  // A deletion has no line counts worth reading: `+0 -37` is the same shape
+  // as an edit, and the word is the thing you need to see.
+  const stat = e.problems > 0 ? `\u2716${e.problems}` : e.touch === "deleted" ? "deleted" : `+${e.added} -${e.removed}`;
   const label = `${indent}${row.name}`.padEnd(Math.max(0, width - 12));
   return (
     <Text color={e.problems > 0 ? "red" : "green"} inverse={cursor}>
-      {clipTo(`${e.problems > 0 ? "\u2716" : "\u25aa"}${caret} ${label} ${stat}`, width)}
+      {clipTo(`${touchMark(e)}${caret} ${label} ${stat}`, width)}
     </Text>
   );
 }
