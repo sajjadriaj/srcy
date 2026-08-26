@@ -312,6 +312,28 @@ being silently skipped.
 
 Commit either — it's project config, like a lint file.
 
+### Files built from other files
+
+A gif built from a script, a frame pasted into a README, a generated client —
+nothing tells you they went stale, so you find out when someone reads the old
+one. Declare them next to the gates:
+
+```json
+{
+  "derived": [
+    { "from": ["src", "scripts/demo.ts"], "to": "docs/demo.cast" },
+    { "from": ["docs/demo.cast"], "to": "docs/demo.gif" }
+  ]
+}
+```
+
+They appear in GATES — same claim, same staleness language — as
+`demo.cast  older than src/panels.tsx`, or `never built`. `from` entries are
+paths or directory prefixes, not globs; there is no command to run, so `r`
+skips them and the comparison is re-made whenever the tree moves.
+
+This is Make's job, technically. Nobody runs Make on a gif.
+
 ### Three answers to "what changed"
 
 `1` `2` `3` in the review pane:

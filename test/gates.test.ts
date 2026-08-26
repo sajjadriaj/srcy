@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { DEFAULT_TIMEOUT_MS, loadGates, parseConfig, problemsOf, runGate, summarise, type GateResult } from "../src/gates.js";
+import { DEFAULT_TIMEOUT_MS, loadGates, parseConfig, problemsOf, runGate, summarise, type GateResult, checkDerived, derivedGates, parseDerived } from "../src/gates.js";
 import { newRepo } from "./helpers.js";
 
 async function config(repo: string, body: unknown): Promise<void> {
@@ -155,4 +155,48 @@ test("problems come from every failing gate, once each", () => {
     { path: "b.ts", line: 2, message: "new" },
     { path: "a.ts", line: 1, message: "old" },
   ]);
+});
+
+test("a derived file is stale when it is older than what it is built from", async (t) => {
+  const repo = await newRepo(t);
+  await mkdir(join(repo, "src"), { recursive: true });
+  await mkdir(join(repo, "docs"), { recursive: true });
+  await writeFile(join(repo, "src/panels.tsx"), "x\n");
+  await writeFile(join(repo, "scripts.ts"), "y\n");
+
+  const spec = [{ from: ["src", "scripts.ts"], to: "docs/demo.gif" }];
+  const paths = ["src/panels.tsx", "scripts.ts", "docs/demo.gif"];
+
+  // Never built is a different thing to say than out of date, and is said
+  // differently.
+  const missing = await checkDerived(repo, spec, paths, "m");
+  assert.equal(missing[0]?.status, "fail");
+  assert.equal(missing[0]?.tail, "never built");
+  assert.equal(missing[0]?.name, "demo.gif");
+
+  // Built after its sources: nothing to say.
+  await writeFile(join(repo, "docs/demo.gif"), "gif\n");
+  const fresh = await checkDerived(repo, spec, paths, "m");
+  assert.equal(fresh[0]?.status, "pass");
+
+  // A source touched afterwards makes it stale, and it names which one.
+  const later = new Date(Date.now() + 5000);
+  await utimes(join(repo, "src/panels.tsx"), later, later);
+  const stale = await checkDerived(repo, spec, paths, "m");
+  assert.equal(stale[0]?.status, "fail");
+  assert.equal(stale[0]?.tail, "older than src/panels.tsx");
+
+  // Never a problem row: a stale gif has no line for `e` to jump to.
+  assert.deepEqual(stale[0]?.problems, []);
+  // Shown as a gate, never runnable as one.
+  assert.deepEqual(derivedGates(spec).map((g) => [g.name, g.command.length, g.auto]), [["demo.gif", 0, false]]);
+});
+
+test("a derived entry is refused the same way a bad gate is", () => {
+  assert.deepEqual(parseDerived({}), { derived: [] });
+  assert.equal(parseDerived({ derived: "src" }).error, "derived must be a list");
+  assert.match(parseDerived({ derived: [{ from: ["src"] }] }).error ?? "", /needs a `to` path/);
+  assert.match(parseDerived({ derived: [{ to: "a.gif", from: [] }] }).error ?? "", /non-empty list of paths/);
+  assert.match(parseDerived({ derived: [{ to: "a.gif", from: "src" }] }).error ?? "", /non-empty list of paths/);
+  assert.deepEqual(parseDerived({ derived: [{ to: "a.gif", from: ["src"] }] }).derived, [{ to: "a.gif", from: ["src"] }]);
 });

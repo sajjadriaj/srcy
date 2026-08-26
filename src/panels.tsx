@@ -8,7 +8,7 @@ import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } fro
 import { KEYS, START, actionFor, byRisk, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
-import { loadGates, problemsOf, runGate, summarise, type Gate, type GateResult } from "./gates.js";
+import { checkDerived, derivedGates, loadGates, problemsOf, runGate, summarise, type Derived, type Gate, type GateResult } from "./gates.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
@@ -280,6 +280,11 @@ function useWatch(
   const configError = useRef<string | undefined>(undefined);
   const configFor = useRef<string | null>(null);
   const task = useRef("");
+  // Files the project builds from other files. Shown as gates because they
+  // are the same claim, never queued because there is no command to run.
+  const built = useRef<Gate[]>([]);
+  const builtFrom = useRef<Derived[]>([]);
+  const builtResults = useRef<GateResult[]>([]);
   const results = useRef<GateResult[]>([]);
   const queue = useRef<string[]>([]);
   const running = useRef("");
@@ -308,8 +313,8 @@ function useWatch(
           activity: t?.activity ?? null,
           turn: t?.turn ?? null,
           at: t?.at,
-          gates: config.current,
-          results: results.current,
+          gates: [...config.current, ...built.current],
+          results: [...results.current, ...builtResults.current],
           gateError: configError.current,
           task: task.current,
           running: running.current,
@@ -343,9 +348,18 @@ function useWatch(
             const loaded = await loadGates(cwd);
             config.current = loaded.gates;
             configError.current = loaded.error;
+            builtFrom.current = loaded.derived;
+            built.current = derivedGates(loaded.derived);
             // Same gate as the config: editing either is a change to the
             // tree, which is the thing this branch is watching for.
             task.current = await loadTask(cwd);
+          }
+          // Freshness is a question about the tree, so it is re-asked
+          // whenever the tree moves — not only when the config does.
+          if (built.current.length > 0) {
+            builtResults.current = await checkDerived(cwd, builtFrom.current, await listPaths(cwd), fp);
+          } else {
+            builtResults.current = [];
           }
 
           const step = checkStep(fp, mark.current, quietSince.current, Date.now(), running.current !== "");
@@ -534,9 +548,12 @@ export function GateLine({
   const verdict =
     result.status === "timeout"
       ? "timed out"
-      : result.problems.length === 0
-        ? "failing"
-        : `✖ ${result.problems.length} in ${new Set(result.problems.map((p) => p.path)).size}`;
+      : result.problems.length > 0
+        ? `✖ ${result.problems.length} in ${new Set(result.problems.map((p) => p.path)).size}`
+        : // Nothing parseable to point at. The first line of what it printed
+          // is a better answer than "failing", and it is the whole answer for
+          // a derived file, which prints nothing and fails for one reason.
+          (result.tail.split("\n").find((l) => l.trim() !== "") ?? "failing");
   const text = `  ${name} ${verdict}${age}`;
   return (
     <Text color={stale ? undefined : "red"} dimColor={stale}>
@@ -833,7 +850,10 @@ export function Rail({
       // opted out of running themselves, which is the whole reason to have
       // a key for this: the slow ones are the ones you ask for.
       if (input === "r") {
-        asked.current.push(...s.gates.map((g) => g.name));
+        // Derived files are in this list because they are the same claim,
+        // but there is nothing to run: they are two timestamps, re-compared
+        // whenever the tree moves.
+        asked.current.push(...s.gates.filter((g) => g.command.length > 0).map((g) => g.name));
         return;
       }
       if (input === "c") {

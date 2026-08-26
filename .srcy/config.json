@@ -1,0 +1,10 @@
+{
+  "gates": [
+    { "name": "types", "command": ["npm", "run", "typecheck"] },
+    { "name": "tests", "command": ["npm", "test"], "timeoutMs": 180000 }
+  ],
+  "derived": [
+    { "from": ["src", "scripts/demo.ts"], "to": "docs/demo.cast" },
+    { "from": ["docs/demo.cast"], "to": "docs/demo.gif" }
+  ]
+}

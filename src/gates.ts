@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { checkCommand, parseProblems, runCommand, tailOf, type Problem } from "./checks.js";
 
@@ -47,6 +47,81 @@ const MAX_TIMEOUT_MS = 600_000;
 // silently drops the gate you thought was running is the same lie as a pane
 // that reports a pass it never measured. The error is shown, and srcy falls
 // back to the command it can detect on its own.
+// A file the project builds from other files, and the files it is built
+// from. Not a gate: there is no command to run and nothing to wait for, only
+// two timestamps to compare. But it is the same kind of claim -- something
+// the project says should be true of the tree -- so it lands in the same
+// place, with the same staleness language.
+//
+// `from` entries are paths or directory prefixes rather than globs. A glob
+// engine is a lot of code to avoid writing `src` where you meant `src/**`,
+// and the difference has never been the thing anyone got wrong.
+export interface Derived {
+  from: string[];
+  to: string;
+}
+
+export function parseDerived(raw: unknown): { derived: Derived[]; error?: string } {
+  const list = (raw as { derived?: unknown } | null)?.derived;
+  if (list === undefined) return { derived: [] };
+  if (!Array.isArray(list)) return { derived: [], error: "derived must be a list" };
+  const out: Derived[] = [];
+  for (const item of list) {
+    const o = item as { from?: unknown; to?: unknown } | null;
+    const to = typeof o?.to === "string" ? o.to.trim() : "";
+    if (to === "") return { derived: [], error: "every derived entry needs a `to` path" };
+    const from = o?.from;
+    if (!Array.isArray(from) || from.length === 0 || !from.every((f) => typeof f === "string" && f !== "")) {
+      return { derived: [], error: `${to}: from must be a non-empty list of paths` };
+    }
+    out.push({ to, from: from as string[] });
+  }
+  return { derived: out };
+}
+
+// Is each derived file newer than everything it is built from?
+//
+// A missing one has never been built, which is a different thing to say than
+// "out of date" and is said differently. `paths` is the repo's file list,
+// already read for the tree, so this costs a stat per candidate rather than a
+// walk.
+export async function checkDerived(cwd: string, list: Derived[], paths: string[], mark: string): Promise<GateResult[]> {
+  const out: GateResult[] = [];
+  for (const d of list) {
+    const name = d.to.split("/").pop() ?? d.to;
+    let built: number;
+    try {
+      built = (await stat(join(cwd, d.to))).mtimeMs;
+    } catch {
+      out.push({ name, status: "fail", problems: [], tail: "never built", ms: 0, mark });
+      continue;
+    }
+    let newest = { path: "", at: 0 };
+    for (const p of paths) {
+      if (p === d.to) continue;
+      if (!d.from.some((f) => p === f || p.startsWith(`${f}/`))) continue;
+      try {
+        const at = (await stat(join(cwd, p))).mtimeMs;
+        if (at > newest.at) newest = { path: p, at };
+      } catch {
+        continue; // deleted between the listing and the stat
+      }
+    }
+    out.push(
+      newest.at > built
+        ? { name, status: "fail", problems: [], tail: `older than ${newest.path}`, ms: 0, mark }
+        : { name, status: "pass", problems: [], tail: "", ms: 0, mark },
+    );
+  }
+  return out;
+}
+
+// Derived files are shown as gates because they are the same claim, but they
+// are never queued: there is no command, and `runGate` would spawn nothing.
+export function derivedGates(list: Derived[]): Gate[] {
+  return list.map((d) => ({ name: d.to.split("/").pop() ?? d.to, command: [], auto: false, timeoutMs: 0 }));
+}
+
 export function parseConfig(raw: unknown): { gates: Gate[]; error?: string } {
   const list = (raw as { gates?: unknown } | null)?.gates;
   if (list === undefined) return { gates: [] };
@@ -106,23 +181,25 @@ async function detected(repo: string): Promise<Gate[]> {
   ];
 }
 
-export async function loadGates(repo: string): Promise<{ gates: Gate[]; error?: string }> {
+export async function loadGates(repo: string): Promise<{ gates: Gate[]; derived: Derived[]; error?: string }> {
   let text: string;
   try {
     text = await readFile(join(repo, ".srcy", "config.json"), "utf8");
   } catch {
-    return { gates: await detected(repo) };
+    return { gates: await detected(repo), derived: [] };
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { gates: await detected(repo), error: ".srcy/config.json is not valid JSON" };
+    return { gates: await detected(repo), derived: [], error: ".srcy/config.json is not valid JSON" };
   }
   const parsed = parseConfig(raw);
-  if (parsed.error !== undefined) return { gates: await detected(repo), error: parsed.error };
-  if (parsed.gates.length > 0) return parsed;
-  return { gates: await detected(repo) };
+  const built = parseDerived(raw);
+  const error = parsed.error ?? built.error;
+  if (error !== undefined) return { gates: await detected(repo), derived: [], error };
+  const gates = parsed.gates.length > 0 ? parsed.gates : await detected(repo);
+  return { gates, derived: built.derived };
 }
 
 export async function runGate(repo: string, gate: Gate, mark: string): Promise<GateResult> {
