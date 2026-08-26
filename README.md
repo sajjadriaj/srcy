@@ -9,9 +9,9 @@ it.
 
 ![srcy](docs/demo.gif)
 
-<sub>Launch → the turn → GATES goes red → pin a file → walk its hunks and the
-file before it → zoom the agent full screen → drag the border → the fix lands
-green. Real layout, real git repo, real transcript, real checker, all changing
+<sub>Launch → the turn → GATES goes red → pin a file → walk its hunks, side
+by side and back → the file before it → zoom the agent full screen → drag the
+border → the fix lands green. Real layout, real git repo, real transcript, real checker, all changing
 while the panels read them. Only the agent's turn is scripted — `npm run demo`
 reproduces it.</sub>
 
