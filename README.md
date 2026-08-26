@@ -125,6 +125,7 @@ With the keyboard in the sidebar:
 |---|---|
 | `j` `k` / `↓` `↑` | move the cursor |
 | `⏎` `space` | open/close a directory — on a file, pin the review pane to it |
+| `m` | show only what changed, and back |
 | `e` | jump the review pane to the next failing line |
 | `f` | back to following — the cursor tracks the file the agent has open |
 | `r` | run every gate now, including the ones that don't run themselves |
@@ -174,6 +175,9 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **The focused pane's title is lit and the rest are grey.** Three panes take
   keys and only one is listening; the panels do nothing until you move the
   keyboard to them, which is easier to believe when you can see where it is.
+- **`m` collapses the tree to what moved.** On a real repo most of the tree
+  is files the turn never went near. The header says `CHANGED` instead of
+  `REPO` so a short list is never mistaken for a small project.
 - **`e` walks the failures.** GATES names a file and a line; `e` pins the
   review pane to it and scrolls there — including into a file nothing has
   touched, where the pane previews the source from that line instead of

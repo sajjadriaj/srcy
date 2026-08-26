@@ -771,7 +771,14 @@ export function Rail({
   const auto = useMemo(() => openForChanges(changed.keys()), [changed]);
   const open = useMemo(() => openSet(auto, manual), [auto, manual]);
 
-  const visible = useMemo(() => treeRows(paths, open, changed), [paths, open, changed]);
+  // Whole project, or only what moved. On a real repo the tree is mostly
+  // files this turn never went near, and during a turn that is noise around
+  // the four rows worth reading. Filtering the path list rather than the
+  // rows is what keeps the directories right: a directory exists here
+  // because something under it changed.
+  const [onlyChanged, setOnlyChanged] = useState(false);
+  const shown = useMemo(() => (onlyChanged ? paths.filter((p) => changed.has(p)) : paths), [paths, changed, onlyChanged]);
+  const visible = useMemo(() => treeRows(shown, open, changed), [shown, open, changed]);
 
   const [picked, setPicked] = useState<string | null>(null);
   const live = following(s.activity, cwd);
@@ -805,6 +812,10 @@ export function Rail({
         void captureTree(cwd).then((tree) =>
           publish(session, tree === null ? { turnWhy: "baseline could not be created" } : { turn: tree, turnWhy: undefined }),
         );
+        return;
+      }
+      if (input === "m") {
+        setOnlyChanged((on) => !on);
         return;
       }
       // Straight to the next thing that is broken. GATES already names the
@@ -854,9 +865,13 @@ export function Rail({
 
   return (
     <Box flexDirection="column" height={height}>
-      <Rule label={picked === null ? "REPO  FOLLOW" : "REPO  PINNED"} width={width} color={GIT} />
+      <Rule
+        label={`${onlyChanged ? "CHANGED" : "REPO"}  ${picked === null ? "FOLLOW" : "PINNED"}`}
+        width={width}
+        color={GIT}
+      />
       {visible.length === 0 ? (
-        <Text dimColor>{"  (reading the project…)"}</Text>
+        <Text dimColor>{onlyChanged ? "  (nothing changed yet)" : "  (reading the project…)"}</Text>
       ) : (
         visible.slice(view.start, view.end).map((row, i) => (
           <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
