@@ -94,6 +94,12 @@ const cxTokens = (used: number, cached: number, out: number, window: number): st
     },
   });
 
+// Codex opens every turn with its context, and the model is in it. Without
+// one the preview's gauge is missing the name every real codex session puts
+// there.
+const cxTurn = (model: string): string =>
+  JSON.stringify({ timestamp: new Date().toISOString(), type: "turn_context", payload: { model, cwd: "." } });
+
 const cxCall = (id: string, name: string, args: unknown, agoMs = 0): string =>
   JSON.stringify({
     timestamp: new Date(Date.now() - agoMs).toISOString(),
@@ -240,6 +246,7 @@ async function main(): Promise<void> {
         join(day, "rollout-preview.jsonl"),
         [
           cxHead(repo),
+    cxTurn("gpt-5.3-codex"),
           cxSaid("fix the token expiry off-by-one", 120_000),
           cxTokens(14_890, 11_008, 261, 258_000),
           cxCall("c1", "update_plan", cxPlan(
@@ -295,7 +302,12 @@ async function main(): Promise<void> {
     srcyQuiet(["resize-window", "-t", SESSION, "-x", String(COLS), "-y", String(ROWS)]);
     // Long enough for a poll, a debounce and a check run to have happened.
     await new Promise((r) => setTimeout(r, 6000));
-    console.log(cam(["capture-pane", "-p", "-t", CAMERA]).replace(/\s+$/gm, ""));
+    // Plain text by default: the frame goes into the README as a code block.
+// `PREVIEW_ANSI=1` keeps the escapes instead, which is the only way to check
+// colour work — the panels draw colour only when their stdout is a terminal,
+// so a component render in a test sees none of it.
+const ansi = process.env.PREVIEW_ANSI === "1" ? ["-e"] : [];
+console.log(cam(["capture-pane", "-p", ...ansi, "-t", CAMERA]).replace(/\s+$/gm, ""));
   } finally {
     camQuiet(["kill-session", "-t", CAMERA]);
     srcyQuiet(["kill-session", "-t", SESSION]);

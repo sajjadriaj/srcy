@@ -382,8 +382,50 @@ function useWatch(
 // ---------------------------------------------------------------------------
 // Rail
 
-export function Rule({ label, width }: { label: string; width: number }): React.JSX.Element {
-  return <Text dimColor>{`─ ${label} ${"─".repeat(Math.max(0, width - label.length - 3))}`}</Text>;
+// A section head. The rule itself stays dim — it is structure, and structure
+// that shouts competes with the thing it is separating — while the label
+// takes a colour naming where its section's information comes from. The rail
+// stacks four unrelated sources in one narrow column, and "which of these am
+// I looking at" was costing a read of the words every time.
+export function Rule({ label, width, color }: { label: string; width: number; color?: string }): React.JSX.Element {
+  const tail = "─".repeat(Math.max(0, width - label.length - 3));
+  return (
+    <Box>
+      <Text dimColor>{"─ "}</Text>
+      <Text color={color} bold>
+        {label}
+      </Text>
+      <Text dimColor>{` ${tail}`}</Text>
+    </Box>
+  );
+}
+
+// Where a section's information comes from, as a colour. Three sources, and
+// the rail's whole job is keeping them straight: git says what changed, the
+// agent's transcript says what it is trying to do, and the gates say whether
+// any of it holds. GATES is the one that also carries a state, so it is the
+// one that changes colour — the others name a source, which does not.
+export const GIT = "cyan";
+export const AGENT = "magenta";
+
+export function gatesTone(gates: Gate[], results: GateResult[], mark: string): string | undefined {
+  if (gates.length === 0) return undefined;
+  const by = new Map(results.map((r) => [r.name, r]));
+  let broken = 0;
+  let fresh = 0;
+  for (const g of gates) {
+    const r = by.get(g.name);
+    if (r === undefined) continue;
+    if (r.status === "fail" || r.status === "timeout") broken++;
+    else if (r.status === "pass" && r.mark === mark) fresh++;
+  }
+  if (broken > 0) return "red";
+  // Green is a claim about every gate, so it waits for every gate to have
+  // made it against the tree that is there now. Everything else — not run,
+  // still running, a pass measured against a tree that has moved on — is an
+  // unknown, and an unknown takes no colour rather than borrowing one of the
+  // two verdicts. The label already says how many are worth a look.
+  return fresh === gates.length ? "green" : undefined;
 }
 
 // How many failing locations fit in a column this narrow before the list is
@@ -742,7 +784,7 @@ export function Rail({
 
   return (
     <Box flexDirection="column" height={height}>
-      <Text dimColor>REPO</Text>
+      <Rule label="REPO" width={width} color={GIT} />
       {visible.length === 0 ? (
         <Text dimColor>{"  (reading the project…)"}</Text>
       ) : (
@@ -750,11 +792,11 @@ export function Rail({
           <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
         ))
       )}
-      <Rule label="GOAL" width={width} />
+      <Rule label="GOAL" width={width} color={AGENT} />
       <GoalLine turn={s.turn} width={width} />
-      <Rule label="PLAN" width={width} />
+      <Rule label="PLAN" width={width} color={AGENT} />
       <PlanBody entries={s.plan} />
-      <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} />
+      <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} color={gatesTone(s.gates, s.results, s.repo.mark)} />
       <GateRows
         gates={s.gates}
         results={s.results}

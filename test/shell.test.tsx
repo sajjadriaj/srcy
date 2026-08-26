@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -1157,4 +1157,26 @@ test("an in-place edit re-runs the checker, even though the churn is identical",
   const before = fingerprint(await repoState(repo));
   await writeFile(join(repo, "new.ts"), "export const x = 2\n");
   assert.notEqual(fingerprint(await repoState(repo)), before);
+});
+
+test("a header takes a verdict's colour only when there is a verdict", () => {
+  const gates = [
+    { name: "types", command: ["tsc"], auto: true, timeoutMs: 1000 },
+    { name: "tests", command: ["t"], auto: true, timeoutMs: 1000 },
+  ];
+  const at = (name: string, status: "pass" | "fail" | "timeout", mark: string) => ({ name, status, tail: "", ms: 1, mark, problems: [] });
+
+  // Nothing measured yet is not a pass and not a failure.
+  assert.equal(gatesTone(gates, [], "m"), undefined);
+  // Half a list is not a passing list.
+  assert.equal(gatesTone(gates, [at("types", "pass", "m")], "m"), undefined);
+  assert.equal(gatesTone(gates, [at("types", "pass", "m"), at("tests", "pass", "m")], "m"), "green");
+  // A pass measured against a tree that has moved on says nothing yet, so it
+  // says it in no colour — red would call an unknown a failure.
+  assert.equal(gatesTone(gates, [at("types", "pass", "old"), at("tests", "pass", "old")], "m"), undefined);
+  assert.equal(gatesTone(gates, [at("types", "fail", "m"), at("tests", "pass", "m")], "m"), "red");
+  // A gate that ran out of time has not passed, and is worth the same look.
+  assert.equal(gatesTone(gates, [at("types", "timeout", "m"), at("tests", "pass", "m")], "m"), "red");
+  // No gates at all is not a state worth a colour.
+  assert.equal(gatesTone([], [], "m"), undefined);
 });

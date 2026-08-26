@@ -161,6 +161,17 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 
 **Details worth knowing**
 
+- **A header's colour is its source, not decoration.** The rail stacks four
+  unrelated things in one narrow column, so `REPO` is cyan because it comes
+  from git, `GOAL` and `PLAN` are magenta because they come from the agent's
+  own log, and `GATES` takes a verdict's colour: red when a gate failed or
+  timed out, green when every gate has passed against the tree that is there
+  now, and no colour at all while any of it is unrun, running, or measured
+  against a tree that has moved on. The rule itself stays dim — it separates,
+  it doesn't announce.
+- **The focused pane's title is lit and the rest are grey.** Three panes take
+  keys and only one is listening; the panels do nothing until you move the
+  keyboard to them, which is easier to believe when you can see where it is.
 - **The cursor holds a file, not a row.** The agent creates and deletes files
   while you read; a row number silently means a different file.
 - **Hand-opened directories are overrides.** Everything you haven't touched
@@ -300,34 +311,38 @@ window with every token count — measured, where Claude Code's is inferred.
 `PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
-──  ⟳ 52s shell bash -lc np…──┬──  codex  ──────────────────────────────────────────────────────────
-REPO                          │user
-▸  .srcy/                     │  fix the token expiry off-by-one
-▸  docs/                      │
-▾  src/                       │codex
-▾    auth/                    │  The expiry check is exclusive: a token that expires on this exact
-▪►     expiry.test.ts +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
-        hash.ts               │
-✖      session.ts     ✖1      │  exec  bash -lc "npm run typecheck"
-▪      token.ts       +1 -1   │
-▸    http/                    │
-─ GOAL ───────────────────────│
-  fix the token expiry off-by…│
-─ PLAN ───────────────────────│
-  ✔ find the expiry comparison│
-  ✔ fix the off-by-one        │
-  ▸ add a regression test     │
-─ GATES 0/1  1 to look at ────│
-  check      ✖ 1 in 1         │
-  session.ts:3                │
-▮▮▯▯ 62% 161k/258k cache 100% │
-──  REVIEW  HEAD  FOLLOW  1/2 files  1/1 hunks  src/auth/session.ts  ───────────────────────────────
+──  ⟳ 52s shell bash -lc npm run…──┬──  codex  ───────────────────────────────────────────────────────────────────────
+─ REPO ────────────────────────────│user
+▸  .srcy/                          │  fix the token expiry off-by-one
+▸  docs/                           │
+▾  src/                            │codex
+▾    auth/                         │  The expiry check is exclusive: a token that expires on this exact
+▪►     expiry.test.ts      +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
+        hash.ts                    │
+✖      session.ts          ✖1      │  exec  bash -lc "npm run typecheck"
+▪      token.ts            +1 -1   │
+▸    http/                         │
+▸    util/                         │
+      index.ts                     │
+    README.md                      │
+─ GOAL ────────────────────────────│
+  fix the token expiry off-by-one  │
+─ PLAN ────────────────────────────│
+  ✔ find the expiry comparison     │
+  ✔ fix the off-by-one             │
+  ▸ add a regression test          │
+─ GATES 0/1  1 to look at ─────────│
+  check      ✖ 1 in 1              │
+  session.ts:3                     │
+▮▮▮▮▯▯ 62% 161k/258k gpt-5.3-codex │
+──  REVIEW  HEAD  FOLLOW  1/2 files  1/1 hunks  src/auth/session.ts  ─────────────────────────────────────────────────
   ✖ src/auth/session.ts:3  error TS2532: Object is possibly 'undefined'.
+  @@ 1  (top level)
    1   export class Session {
    2 +   private renewals = 0
    3 +   renew() { this.renewals++ }
    4   }
- ]/[ hunk · n/p file · j/k scroll · f follow · 1/2/3 turn/session/head
+ ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope
 ```
 </details>
 

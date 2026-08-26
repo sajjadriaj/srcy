@@ -100,9 +100,10 @@ export function plan(l: Layout): string[][] {
     ["split-window", "-t", AGENT, "-h", "-b", "-l", String(railWidth(l.cols)), "-c", l.repo, cmdline(l.panel("rail"))],
     // Our panels draw their own section headers; tmux draws the pane titles.
     ["set-option", "-t", S, "pane-border-status", "top"],
-    ["set-option", "-t", S, "pane-border-format", " #{pane_title} "],
-    ["set-option", "-t", S, "pane-border-style", "fg=colour238"],
-    ["set-option", "-t", S, "pane-active-border-style", "fg=cyan"],
+    // The focused pane's title is lit and the others are not, because which
+    // pane has the keyboard is the question this layout raises most often:
+    // three panes that all take keys, and only one of them is listening.
+    ["set-option", "-t", S, "pane-border-format", "#{?pane_active,#[fg=colour78 bold],#[fg=colour245]} #{pane_title} "],
     // We have four panels; tmux's own status bar is a fifth row saying
     // nothing this layout doesn't already say.
     ["set-option", "-t", S, "status", "off"],
