@@ -4,7 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { parseState, parseUsage, projectDir } from "../src/transcript.js";
+import { parseState, parseUsage, projectDir, usageOf } from "../src/transcript.js";
 import { foldLine as codexFold } from "../src/codex.js";
 import { emptyFold, stateOf } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
@@ -65,6 +65,32 @@ test("a window already past 200k is proof of the larger one", () => {
   // full — the one reading that changes what a user does next.
   assert.equal(parseUsage(rec({ ...TURN_ONE, cache_read_input_tokens: 24_217 }))?.size, 200_000);
   assert.equal(parseUsage(rec({ ...TURN_ONE, cache_read_input_tokens: 400_000 }))?.size, 1_000_000);
+});
+
+test("a compact empties the context, not the window", () => {
+  // Real numbers off a compact boundary: 495k held, 25k left afterwards.
+  // Inferring the window from the current occupancy read that 25k against
+  // 200k — 15% full, of a window that is 2.5% full. A window does not
+  // shrink, so the evidence is the session's peak.
+  const after = parseUsage(
+    [
+      rec({ ...TURN_ONE, cache_read_input_tokens: 495_529 }),
+      rec({ ...TURN_ONE, cache_read_input_tokens: 25_644 }),
+    ].join("\n"),
+  );
+  assert.equal(after?.used, 2 + 17_255 + 25_644);
+  assert.equal(after?.size, 1_000_000);
+});
+
+test("a window that cannot be inferred can be stated", () => {
+  // Nothing in a Claude transcript names the model's window, and the model
+  // string is the same one a 200k session writes — so a reader who has
+  // switched models is the only one who knows.
+  const fold = { plan: [], open: new Map(), output: 0, last: { used: 50_000, cached: 0 } };
+  assert.equal(usageOf(fold, 400_000)?.size, 400_000);
+  assert.equal(usageOf(fold, undefined)?.size, 200_000);
+  // What the agent recorded itself still wins: codex writes the real number.
+  assert.equal(usageOf({ ...fold, window: 272_000 }, 400_000)?.size, 272_000);
 });
 
 test("the transcript directory is named the way Claude Code names it", () => {

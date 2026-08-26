@@ -26,16 +26,34 @@ export function projectDir(cwd: string, home = homedir()): string {
 }
 
 // The transcript never records how big the context window is, and the model
-// string does not distinguish a 1M-context session from a 200k one. 200k is
-// every current Claude model's default, and a session that has already
-// passed it is its own proof of the larger window — which is the only
-// evidence available. Guessing 200k unconditionally would paint a 1M session
-// as permanently full, which is the one reading that changes what a user
-// does next.
+// string does not distinguish a 1M-context session from a 200k one: a 1M
+// session writes `claude-opus-5`, exactly what a 200k one writes. So a model
+// table would not help, and switching models mid-session leaves no trace the
+// gauge could read. 200k is every current Claude model's default, and a
+// session that has already passed it is its own proof of the larger window —
+// which is the only evidence available. Guessing 200k unconditionally would
+// paint a 1M session as permanently full, which is the one reading that
+// changes what a user does next.
+//
+// The evidence is the session's peak, not its current occupancy. A window is
+// not a thing that shrinks: once a session has held 495k, it is a 1M session
+// for good, including after the compact that drops it to 30k. Reading the
+// current number instead made the denominator snap back to 200k after every
+// compact, which showed 30k of a megabyte as 15% full.
 // ponytail: two buckets. If a third window size ships, read it from wherever
 // the CLI starts recording it rather than growing a model table here.
-function windowFor(used: number): number {
-  return used > 200_000 ? 1_000_000 : 200_000;
+function windowFor(peak: number): number {
+  return peak > 200_000 ? 1_000_000 : 200_000;
+}
+
+// The escape hatch for what cannot be inferred: a model whose window is
+// neither of the two, or a session downgraded to a smaller one, where the
+// peak is now evidence about a window that is gone. Env rather than
+// .srcy/config.json because the window belongs to the model you launched
+// with, not to the project — `SRCY_CONTEXT_WINDOW=400000 srcy`.
+function envWindow(): number | undefined {
+  const n = Number(process.env.SRCY_CONTEXT_WINDOW);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
 
 // mtime is compared with slack because the two clocks are not the same one:
@@ -228,6 +246,10 @@ export interface Fold {
   wrote?: number;
   output: number;
   last: { used: number; cached: number } | null;
+  // The highest occupancy this session has ever reached, which is what the
+  // window is inferred from. Optional so a hand-built fold in a test does
+  // not have to name it.
+  peak?: number;
   // Set only by agents that record it. Codex writes the real number with
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
@@ -273,7 +295,10 @@ export function foldLine(f: Fold, line: string): void {
     f.output += num(u.output_tokens);
     if (rec.isSidechain !== true) {
       const used = num(u.input_tokens) + num(u.cache_creation_input_tokens) + num(u.cache_read_input_tokens);
-      if (used > 0) f.last = { used, cached: num(u.cache_read_input_tokens) / used };
+      if (used > 0) {
+        f.last = { used, cached: num(u.cache_read_input_tokens) / used };
+        if (used > (f.peak ?? 0)) f.peak = used;
+      }
     }
   }
 
@@ -327,11 +352,14 @@ export function stateOf(f: Fold): State {
   return s;
 }
 
-export function usageOf(f: Fold): Usage | null {
+export function usageOf(f: Fold, override = envWindow()): Usage | null {
   if (f.last === null) return null;
   return {
     used: f.last.used,
-    size: f.window ?? windowFor(f.last.used),
+    // Recorded, then asserted, then inferred: codex writes the real number,
+    // so nothing should override it; a reader who sets the variable knows
+    // something the peak cannot show; the two buckets are the last resort.
+    size: f.window ?? override ?? windowFor(Math.max(f.last.used, f.peak ?? 0)),
     output: f.output,
     cached: f.last.cached,
   };

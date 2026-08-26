@@ -180,6 +180,14 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   every uncommitted line is worth less than an empty pane that admits it.
 - **Occupancy is the last request's, never a running total.** Cumulative counts
   reach millions against a 200k window and would peg the gauge forever.
+- **The window is inferred from the session's peak, not its current fill.**
+  A Claude transcript never records how big the window is, and the model
+  string is identical for a 1M session and a 200k one — so the evidence is
+  that a session has held more than 200k. Reading the current number instead
+  meant every `/compact` snapped the denominator back and showed 25k of a
+  megabyte as 15% full. Switching models mid-session leaves no trace srcy can
+  read; state it with `SRCY_CONTEXT_WINDOW=400000 srcy` when the two buckets
+  are wrong. Codex needs none of this — it records the real number.
 - **`cache` is the bloat reading.** Healthy sits near 99%; a session
   re-sending its whole context every turn shows it collapsing.
 - **New files count their whole length.** `+0 -0` on a file that didn't exist
