@@ -5,7 +5,6 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { LiveDiff } from "../src/cockpit.js";
 import { splitDiff } from "../src/diff.js";
 import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
 import { git } from "../src/git.js";
@@ -314,20 +313,6 @@ test("the gauge is one line and the counts survive every rail width", () => {
   }
   // An unmeasured window is not an empty one.
   assert.match(render(<NarrowUsage usage={null} width={30} />).lastFrame() ?? "", /not measured/);
-});
-
-test("the dock's heading names a line that is actually on screen", () => {
-  // With a hunk longer than the pane, showing the tail while heading it with
-  // the hunk's start points the reader a hundred lines above anything drawn.
-  const body = Array.from({ length: 30 }, (_, i) => ` line ${i}`).join("\n");
-  const raw = `diff --git a/f.ts b/f.ts\n--- a/f.ts\n+++ b/f.ts\n@@ -100,30 +100,30 @@\n${body}\n`;
-  const file = splitDiff(raw)[0]!;
-  const frame = render(<LiveDiff file={file} maxLines={5} />).lastFrame() ?? "";
-  const heading = frame.split("\n")[0]!;
-  const named = Number(heading.split(":")[1]);
-  const firstShown = Number(frame.split("\n")[1]!.trim().split(" ")[0]);
-  assert.equal(named, firstShown, `heading says ${named} but the first row shown is ${firstShown}`);
-  assert.notEqual(named, 100, "heading still points at the hunk start the reader cannot see");
 });
 
 const MANY = Array.from({ length: 12 }, (_, i) => ({
@@ -941,6 +926,38 @@ test("the dock gives the diff the rows the failures took", async (t) => {
   assert.match(frame, /const v11 = 11/, frame);
   // The three failure rows came out of the diff's budget, not out of the pane.
   assert.ok(frame.split("\n").length <= 8, `${frame.split("\n").length} rows in a pane of 8:\n${frame}`);
+});
+
+// The pane the whole upgrade is for: not the tail of the newest hunk, the
+// whole change. Every row carries its own new-side number, so there is no
+// heading left to point at a line the reader cannot see.
+test("the dock shows every hunk of the file, and says how to move", async (t) => {
+  const repo = await mkdtemp(join(tmpdir(), "srcy-review-"));
+  const session = `srcy-test-review-${process.pid}`;
+  t.after(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(join(tmpdir(), `${session}.json`), { force: true });
+  });
+  const base = Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n");
+  await writeFile(join(repo, "a.ts"), `${base}\n`);
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+  // Two edits far enough apart that git makes two hunks of them. The old
+  // pane could only ever draw the second.
+  const edited = base.replace("line 1\n", "line 1\nFIRST EDIT\n").replace("line 18", "line 18\nSECOND EDIT");
+  await writeFile(join(repo, "a.ts"), `${edited}\n`);
+
+  const { lastFrame, unmount } = render(<Dock cwd={repo} rows={40} width={70} session={session} />);
+  t.after(() => unmount());
+  await new Promise((r) => setTimeout(r, 900));
+  const frame = lastFrame() ?? "";
+  assert.match(frame, /FIRST EDIT/, frame);
+  assert.match(frame, /SECOND EDIT/, frame);
+  // And the keys are on screen rather than behind a `?` nobody presses.
+  assert.match(frame, /n\/p file/, frame);
 });
 
 test("a reopened session does not pin the dock to last time's file", async (t) => {

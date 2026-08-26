@@ -4,7 +4,8 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
-import { LiveDiff, PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
+import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
+import { KEYS, START, actionFor, move, view, type Position, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import { runChecks, type CheckResult, type Problem } from "./checks.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
@@ -95,6 +96,11 @@ export function useSize(): { cols: number; rows: number } {
 
 interface Shared {
   file?: string;
+  // When that pick was made. The dock re-reads this file on a timer, so a
+  // pick with no timestamp is indistinguishable from the same pick seen
+  // again — and the dock would re-pin the pane every second, which is one
+  // way of saying `f` does nothing.
+  pickedAt?: number;
   checks?: CheckResult | null;
 }
 
@@ -523,7 +529,7 @@ export function Rail({
         if (row.dir) setManual(toggle(manual, row.path, open.has(row.path)));
         // A file the reader picked outranks the file the agent wrote last:
         // they are looking at something on purpose.
-        else publish(session, { file: row.path });
+        else publish(session, { file: row.path, pickedAt: Date.now() });
       }
     },
     // Ink turns on raw mode to read keys, which a pane that is not a
@@ -670,9 +676,20 @@ export function Dock({
   session?: string;
 }): React.JSX.Element {
   const s = useWatch(cwd, false, null);
-  const [file, setFile] = useState<FileDiff | undefined>(undefined);
+  const [pos, setPos] = useState<Position>(START);
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
   const [checks, setChecks] = useState<CheckResult | null | undefined>(undefined);
+  // The file the agent wrote last, by mtime. Recomputed on the poll rather
+  // than during render because it is a stat per changed file.
+  const [newestPath, setNewestPath] = useState("");
+  // The rail's last pick this pane has already acted on. Without it every
+  // poll re-pins the pane to the same file and `f` never sticks.
+  const seenPick = useRef(0);
+
+  // ponytail: HEAD only. TURN and SESSION need baselines the rail owns; the
+  // scope is threaded through everything here so adding them is wiring.
+  const scope: Scope = "head";
+  const files = s.repo.diffs;
 
   useEffect(() => {
     let live = true;
@@ -680,49 +697,67 @@ export function Dock({
       const state = await readShared(session);
       if (!live) return;
       setChecks(state.checks);
-      // A file the reader picked in the rail outranks the file the agent
-      // wrote last: they are looking at something on purpose.
+      const n = await newest(cwd, files);
+      if (!live) return;
+      setNewestPath(n?.path ?? "");
+
       const picked = state.file ?? "";
-      if (picked !== "") {
-        const diff = s.repo.diffs.find((f) => f.path === picked);
-        if (diff !== undefined) {
-          if (live) {
-            setFile(diff);
-            setPreview(null);
-          }
+      const at = state.pickedAt ?? 0;
+      if (picked !== "" && at > seenPick.current) {
+        seenPick.current = at;
+        // A file the reader picked in the rail outranks the file the agent
+        // wrote last: they are looking at something on purpose.
+        if (files.some((f) => f.path === picked)) {
+          setPreview(null);
+          setPos({ path: picked, top: 0, pinned: true });
           return;
         }
         // Picked, but unchanged. Showing "no diff" would make every
         // unmodified file a dead end, so the dock reads it instead.
         const text = await readFile(join(cwd, picked), "utf8").catch(() => null);
-        if (live) {
-          setFile(undefined);
-          setPreview(text === null ? null : { path: picked, text });
+        if (live && text !== null) {
+          setPos(START);
+          setPreview({ path: picked, text });
         }
         return;
       }
-      const newestFile = await newest(cwd, s.repo.diffs);
-      if (live) {
-        setFile(newestFile);
+      // A previewed file the agent has since edited becomes a diff: the
+      // reader picked that path, and the change to it is the newer answer.
+      if (preview !== null && files.some((f) => f.path === preview.path)) {
         setPreview(null);
+        setPos({ path: preview.path, top: 0, pinned: true });
       }
     })();
     return () => {
       live = false;
     };
-  }, [cwd, session, s.repo.diffs]);
+  }, [cwd, session, files, preview]);
 
-  const title = file?.path ?? preview?.path;
+  const failures = problemLines(checks, preview?.path ?? pos.path, width);
+  // Two for the border and title tmux draws, one for the key line below.
+  const room = Math.max(3, rows - 3 - failures.length);
+  const v = view({ pos, files, rows: room, newest: newestPath, scope });
+
+  useInput(
+    (input, key) => {
+      const action = actionFor(input, key);
+      if (action === undefined) return;
+      setPreview(null);
+      setPos(move({ pos, files, rows: room, newest: newestPath, scope }, action));
+    },
+    // tmux only delivers keys to the focused pane, so this is inert until
+    // the reader moves the keyboard here — the agent keeps every key
+    // otherwise, which is the point.
+    { isActive: process.stdin.isTTY === true },
+  );
+
+  const title = preview !== null ? `FILE  ${preview.path}` : v.title;
   useEffect(() => {
-    setPaneTitle(title === undefined ? " DIFF  (clean) " : ` ${file === undefined ? "FILE" : "DIFF"}  ${title} `);
-  }, [title, file === undefined]);
+    setPaneTitle(` ${title} `);
+  }, [title]);
 
-  const failures = problemLines(checks, title, width);
-  const room = Math.max(3, rows - 2 - failures.length);
   const body =
-    file !== undefined ? (
-      <LiveDiff file={file} maxLines={room} />
-    ) : preview !== null ? (
+    preview !== null ? (
       <Box flexDirection="column">
         {preview.text
           .split("\n")
@@ -731,11 +766,16 @@ export function Dock({
             <Text key={i} dimColor>{`${String(i + 1).padStart(4)}  ${line}`}</Text>
           ))}
       </Box>
-    ) : (
+    ) : v.file === undefined ? (
       <Text dimColor>{"  working tree clean — nothing to review"}</Text>
+    ) : (
+      <Box flexDirection="column">
+        {v.lines.slice(v.top, v.top + room).map((line, i) => (
+          <ReviewRow key={v.top + i} line={line} width={width} />
+        ))}
+      </Box>
     );
 
-  if (failures.length === 0) return body;
   return (
     <Box flexDirection="column">
       {failures.map((line, i) => (
@@ -744,7 +784,23 @@ export function Dock({
         </Text>
       ))}
       {body}
+      <Box flexGrow={1} />
+      <Text dimColor>{clipTo(KEYS, width)}</Text>
     </Box>
+  );
+}
+
+// One row of the review. A hunk heading is not a line of the file, so it
+// gets no number and is dimmed: what it says is where the next rows are,
+// which is context for them rather than content of its own.
+export function ReviewRow({ line, width }: { line: ReviewLine; width: number }): React.JSX.Element {
+  if (line.sign === "@") {
+    return <Text dimColor>{clipTo(`  @@ ${line.text}`, width)}</Text>;
+  }
+  return (
+    <Text color={line.sign === "+" ? "green" : line.sign === "-" ? "red" : undefined}>
+      {clipTo(`${line.num.padStart(4)} ${line.sign} ${line.text}`, width)}
+    </Text>
   );
 }
 

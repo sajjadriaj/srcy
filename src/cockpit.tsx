@@ -112,37 +112,6 @@ export function hunkLines(body: string, newStart: number): DiffLine[] {
   return out;
 }
 
-// LiveDiff is the right column's lower half: the file the agent is editing
-// right now, changing as it edits. Showing the tail (not the head) keeps
-// the most recent edit on screen, which is the one being explained.
-export function LiveDiff({ file, maxLines = 12 }: { file?: FileDiff; maxLines?: number }): React.JSX.Element {
-  if (!file) {
-    return <Text dimColor>(no changes yet)</Text>;
-  }
-  if (file.binary) {
-    return <Text dimColor>{`${file.path} — binary`}</Text>;
-  }
-  const hunk = file.hunks[file.hunks.length - 1];
-  if (!hunk) {
-    return <Text dimColor>{`${file.path} — metadata only`}</Text>;
-  }
-  const lines = hunkLines(hunk.body, hunk.newStart).slice(-maxLines);
-  // The heading names the first line actually on screen, not the hunk's
-  // start: with a hunk longer than the pane, slicing the tail leaves a
-  // heading pointing a hundred lines above anything the reader can see.
-  const first = lines.find((l) => l.num.trim() !== "")?.num.trim() ?? String(hunk.newStart);
-  return (
-    <Box flexDirection="column">
-      <Text dimColor>{`${file.path}:${first}`}</Text>
-      {lines.map((line, i) => (
-        <Text key={i} color={line.sign === "+" ? "green" : line.sign === "-" ? "red" : undefined}>
-          {`${line.num.padStart(4)} ${line.sign} ${line.text}`}
-        </Text>
-      ))}
-    </Box>
-  );
-}
-
 // PlanBar renders the agent's own plan as a live checklist. ACP sends the
 // whole plan on every update, so this always reflects the current one
 // rather than accumulating stale entries.

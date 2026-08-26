@@ -1,0 +1,243 @@
+import { TOP_LEVEL, hunkLines } from "./cockpit.js";
+import type { FileDiff } from "./diff.js";
+
+// The dock, as a reviewer rather than a preview.
+//
+// It used to draw the tail of the newest hunk of the newest file, which
+// answers "what is the agent typing" and nothing else. Everything below is
+// the rest of the question: the whole change, every hunk, navigable, with
+// the pane saying which part of it you are looking at and whether it is
+// still following the agent or holding still because you asked it to.
+//
+// Pure on purpose — no ink, no git, no timers. What the dock owns is
+// keystrokes and rows; what this owns is where those land.
+
+// Which change is under review. The agent's turn, the session, or every
+// uncommitted line — three different questions, and answering one while
+// labelled as another is the failure this whole module exists to avoid.
+export type Scope = "turn" | "session" | "head";
+
+// One rendered row. `sign` is a diff prefix — ' ', '+', '-' — or '@' for a
+// hunk heading, which is not a line of the file and so carries no number.
+export interface ReviewLine {
+  num: string;
+  sign: string;
+  text: string;
+}
+
+// Where the reader is. The file is held by path, not by index: the list is
+// rewritten every time the agent writes anything, and an index quietly means
+// a different file each time it shifts.
+export interface Position {
+  path: string;
+  top: number;
+  pinned: boolean;
+}
+
+export const START: Position = { path: "", top: 0, pinned: false };
+
+export interface Review {
+  pos: Position;
+  files: FileDiff[];
+  // How many rows the pane has for diff content.
+  rows: number;
+  // The file the agent wrote last, which is what FOLLOW follows.
+  newest: string;
+  scope: Scope;
+}
+
+export type Action =
+  | "next-file"
+  | "prev-file"
+  | "next-hunk"
+  | "prev-hunk"
+  | "down"
+  | "up"
+  | "page-down"
+  | "page-up"
+  | "top"
+  | "bottom"
+  | "follow";
+
+// Every row of one file's diff, hunk headings included. Headings are part of
+// the same list rather than drawn separately so that scrolling, hunk jumps
+// and the hunk counter all measure the same thing.
+export function fileLines(f: FileDiff): ReviewLine[] {
+  if (f.binary) return [{ num: "", sign: " ", text: `${f.path} — binary` }];
+  const out: ReviewLine[] = [];
+  for (const h of f.hunks) {
+    out.push({ num: "", sign: "@", text: `${h.newStart}  ${h.func === "" ? TOP_LEVEL : h.func}` });
+    out.push(...hunkLines(h.body, h.newStart));
+  }
+  // A rename or a mode change has no hunks at all. Saying so beats an empty
+  // pane, which reads as "nothing happened" about a file that moved.
+  if (out.length === 0) out.push({ num: "", sign: " ", text: `${f.path} — metadata only` });
+  return out;
+}
+
+export interface View {
+  file?: FileDiff;
+  index: number; // 0-based position of `file` in the scoped file list
+  files: number;
+  lines: ReviewLine[];
+  top: number;
+  hunk: number; // 1-based, of `hunks`; 0 when the file has none
+  hunks: number;
+  pinned: boolean;
+  title: string;
+}
+
+// Which file is on screen, and whether the pane is following or held.
+//
+// A pinned path that is no longer in the list — the agent reverted the file,
+// or the scope changed under it — falls back to following rather than to an
+// empty pane. There is no way to show a diff that does not exist, and a
+// reviewer left staring at nothing while the agent works is the worse of the
+// two failures.
+function locate(r: Review): { index: number; pinned: boolean } {
+  if (r.pos.pinned) {
+    const found = r.files.findIndex((f) => f.path === r.pos.path);
+    if (found >= 0) return { index: found, pinned: true };
+  }
+  const newest = r.files.findIndex((f) => f.path === r.newest);
+  return { index: newest >= 0 ? newest : 0, pinned: false };
+}
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(n, hi));
+}
+
+export function view(r: Review): View {
+  const scope = r.scope.toUpperCase();
+  if (r.files.length === 0) {
+    return {
+      index: 0,
+      files: 0,
+      lines: [],
+      top: 0,
+      hunk: 0,
+      hunks: 0,
+      pinned: false,
+      title: `REVIEW  ${scope}  clean — nothing to review`,
+    };
+  }
+  const { index, pinned } = locate(r);
+  const file = r.files[index]!;
+  const lines = fileLines(file);
+  const rows = Math.max(1, r.rows);
+  const maxTop = Math.max(0, lines.length - rows);
+  // Following means the newest edit is on screen. For a change longer than
+  // the pane that is its tail — the same view the pane gave before it could
+  // scroll, and the one the agent's last keystroke is in.
+  //
+  // A held position is clamped to a line rather than to `maxTop`, because a
+  // hunk jump is allowed to put a heading at the top of a short tail: the
+  // alternative is pressing `]` on the last hunk and having nothing move.
+  const top = pinned ? clamp(r.pos.top, 0, Math.max(0, lines.length - 1)) : maxTop;
+  const heads = lines.reduce<number[]>((acc, l, i) => (l.sign === "@" ? [...acc, i] : acc), []);
+  const hunk = heads.length === 0 ? 0 : Math.max(1, heads.filter((i) => i <= top).length);
+  const where = heads.length === 0 ? "" : `  ${hunk}/${heads.length} hunks`;
+  return {
+    file,
+    index,
+    files: r.files.length,
+    lines,
+    top,
+    hunk,
+    hunks: heads.length,
+    pinned,
+    title: `REVIEW  ${scope}  ${pinned ? "PINNED" : "FOLLOW"}  ${index + 1}/${r.files.length} files${where}  ${file.path}`,
+  };
+}
+
+// Every action except `follow` pins. A reader who scrolled is reading: having
+// the agent's next write yank the pane to another file mid-sentence is the
+// behaviour that makes a live pane useless for review.
+export function move(r: Review, action: Action): Position {
+  const v = view(r);
+  if (action === "follow" || v.file === undefined) return START;
+
+  const rows = Math.max(1, r.rows);
+  const maxTop = Math.max(0, v.lines.length - rows);
+  const held = (path: string, top: number): Position => ({ path, top: clamp(top, 0, maxTop), pinned: true });
+  // Scrolling stops where the last line reaches the bottom of the pane; a
+  // hunk jump is allowed past that, so that the hunk you asked for is the
+  // row you are looking at rather than one somewhere in the middle.
+  const jump = (path: string, top: number): Position => ({ path, top: clamp(top, 0, Math.max(0, v.lines.length - 1)), pinned: true });
+
+  if (action === "next-file" || action === "prev-file") {
+    const i = clamp(v.index + (action === "next-file" ? 1 : -1), 0, r.files.length - 1);
+    // Deliberately no wrap: arriving back at the first file after the last
+    // one reads as "there is more below" when there is not.
+    return { path: r.files[i]!.path, top: 0, pinned: true };
+  }
+
+  const path = v.file.path;
+  const heads = v.lines.reduce<number[]>((acc, l, i) => (l.sign === "@" ? [...acc, i] : acc), []);
+  switch (action) {
+    case "next-hunk":
+      return jump(path, heads.find((i) => i > v.top) ?? v.top);
+    case "prev-hunk":
+      return jump(path, [...heads].reverse().find((i) => i < v.top) ?? 0);
+    case "down":
+      return held(path, v.top + 1);
+    case "up":
+      return held(path, v.top - 1);
+    case "page-down":
+      return held(path, v.top + rows);
+    case "page-up":
+      return held(path, v.top - rows);
+    case "top":
+      return held(path, 0);
+    case "bottom":
+      return held(path, maxTop);
+  }
+}
+
+// Which key does what.
+//
+// Split out of the pane so the bindings are testable without a terminal:
+// Ink only reads keys from a real tty, and a keymap that quietly binds `[`
+// to nothing looks exactly like a working pane until someone presses it.
+//
+// The names are a pager's, because that is what the reader already knows:
+// j/k and the arrows scroll, g/G are the ends, PageUp/PageDown are pages.
+// n/p walk files and ]/[ walk hunks, the way a review tool does.
+export interface Chord {
+  downArrow?: boolean;
+  upArrow?: boolean;
+  pageDown?: boolean;
+  pageUp?: boolean;
+}
+
+export function actionFor(input: string, key: Chord = {}): Action | undefined {
+  switch (input) {
+    case "n":
+      return "next-file";
+    case "p":
+      return "prev-file";
+    case "]":
+      return "next-hunk";
+    case "[":
+      return "prev-hunk";
+    case "j":
+      return "down";
+    case "k":
+      return "up";
+    case "g":
+      return "top";
+    case "G":
+      return "bottom";
+    case "f":
+      return "follow";
+  }
+  if (key.downArrow === true) return "down";
+  if (key.upArrow === true) return "up";
+  if (key.pageDown === true) return "page-down";
+  if (key.pageUp === true) return "page-up";
+  return undefined;
+}
+
+// The key line under the diff. Not hidden behind a `?`: the pane is one row
+// taller for it, and a binding nobody can see is a binding nobody presses.
+export const KEYS = " ]/[ hunk · n/p file · j/k scroll · g/G ends · f follow";

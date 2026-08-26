@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { ChecksPane, diffStats, hunkLines, LiveDiff, mapEntries, PlanBar, planFrom,  } from "../src/cockpit.js";
+import { ChecksPane, diffStats, hunkLines, mapEntries, PlanBar, planFrom } from "../src/cockpit.js";
 import { splitDiff, type FileDiff } from "../src/diff.js";
 
 // A real two-file diff, the shape splitDiff actually produces — writing the
@@ -71,36 +71,6 @@ test("hunkLines shows the new-side number against a removed line too", () => {
 test("hunkLines gives the no-newline marker no line number", () => {
   const lines = hunkLines(" a\n\\ No newline at end of file\n", 7);
   assert.deepEqual(lines.map((l) => l.num), ["7", ""]);
-});
-
-test("LiveDiff renders the current file's changed lines", () => {
-  const token = files().find((f) => f.path === "src/auth/token.ts")!;
-  const { lastFrame } = render(<LiveDiff file={token} />);
-  const frame = lastFrame() ?? "";
-  assert.match(frame, /src\/auth\/token\.ts:39/);
-  assert.match(frame, /40 - {3}if \(exp < now\)/);
-  assert.match(frame, /40 \+ {3}if \(exp <= now\)/);
-});
-
-test("LiveDiff keeps the newest lines when a hunk is longer than the pane", () => {
-  const body = Array.from({ length: 30 }, (_, i) => `+line ${i + 1}`).join("\n") + "\n";
-  const file: FileDiff = {
-    path: "big.txt",
-    header: "",
-    binary: false,
-    hunks: [{ header: "@@ -1,0 +1,30 @@", body, func: "", newStart: 1, newCount: 30 }],
-  };
-  const frame = render(<LiveDiff file={file} maxLines={5} />).lastFrame() ?? "";
-  assert.match(frame, /line 30/);
-  assert.doesNotMatch(frame, /line 25\b/);
-});
-
-test("LiveDiff says something useful with no diff, a binary file, or no hunks", () => {
-  assert.match(render(<LiveDiff />).lastFrame() ?? "", /no changes yet/);
-  const bin: FileDiff = { path: "logo.png", header: "", binary: true, hunks: [] };
-  assert.match(render(<LiveDiff file={bin} />).lastFrame() ?? "", /binary/);
-  const renamed: FileDiff = { path: "b.txt", header: "", binary: false, hunks: [] };
-  assert.match(render(<LiveDiff file={renamed} />).lastFrame() ?? "", /metadata only/);
 });
 
 test("PlanBar marks done, current, and pending steps differently", () => {
