@@ -356,8 +356,9 @@ window with every token count — measured, where Claude Code's is inferred.
 `PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
+
 ──  ⟳ 52s shell bash -lc npm run…──┬──  codex  ───────────────────────────────────────────────────────────────────────
-─ REPO ────────────────────────────│user
+─ REPO  FOLLOW ────────────────────│user
 ▸  .srcy/                          │  fix the token expiry off-by-one
 ▸  docs/                           │
 ▾  src/                            │codex
