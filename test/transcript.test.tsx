@@ -194,3 +194,30 @@ test("Codex's request and its writes read the same way", () => {
   assert.equal(s.turn?.text, "make it green");
   assert.equal(s.wrote, Date.parse("2026-08-25T10:00:03.000Z"));
 });
+
+test("a synthetic record is not a model, and does not reset anything", () => {
+  // Claude Code writes rate-limit notices, interrupts and API errors as
+  // assistant records with `model: "<synthetic>"` and a usage block of
+  // zeroes. Reading one as a model change wiped the peak, which put the
+  // window back on the current occupancy — and after a compact that is the
+  // whole bug the peak was added to fix.
+  const real = (read: number): string =>
+    JSON.stringify({
+      type: "assistant",
+      message: { role: "assistant", model: "claude-opus-5", usage: { input_tokens: 2, cache_creation_input_tokens: 0, cache_read_input_tokens: read } },
+    });
+  const synthetic = JSON.stringify({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      model: "<synthetic>",
+      usage: { input_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      content: [{ type: "text", text: "You've hit your session limit" }],
+    },
+  });
+
+  const u = parseUsage([real(495_529), synthetic, real(25_644)].join("\n"));
+  assert.equal(u?.size, 1_000_000);
+  // And the notice never gets to call itself the model on the gauge.
+  assert.equal(u?.model, "claude-opus-5");
+});

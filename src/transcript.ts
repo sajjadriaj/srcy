@@ -303,7 +303,15 @@ export function foldLine(f: Fold, line: string): void {
       // gone, so the peak restarts — and the first request the new model
       // serves is immediately evidence about the new one, because the
       // context came with it.
-      const model = typeof rec.message?.model === "string" ? rec.message.model : undefined;
+      // `<synthetic>` is Claude Code's marker for a record no model produced:
+      // a rate-limit notice, an interrupt, an API error. It is an assistant
+      // record with a usage block of zeroes, and reading it as a model change
+      // wiped the peak — which put the window straight back on the current
+      // occupancy, the flap the peak exists to end — and printed
+      // `<synthetic>` on the gauge as the name of the model answering.
+      // Angle brackets are that marker's shape; a real model id has none.
+      const named = rec.message?.model;
+      const model = typeof named === "string" && !named.startsWith("<") ? named : undefined;
       if (model !== undefined && model !== f.model) {
         f.model = model;
         f.peak = 0;
