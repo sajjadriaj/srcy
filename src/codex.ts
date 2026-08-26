@@ -169,6 +169,8 @@ export function foldLine(f: Fold, line: string): void {
   // Codex opens every turn with its context, and the model is in it. Unlike
   // Claude Code it also records the window, so this is not load-bearing for
   // the gauge's arithmetic — it is what puts a name next to the number.
+  if (at !== undefined && at > (f.at ?? 0)) f.at = at;
+
   if (kind === "turn_context") {
     if (typeof p.model === "string" && p.model !== "") f.model = p.model;
     return;

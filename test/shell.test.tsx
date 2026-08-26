@@ -1207,3 +1207,28 @@ test("the rail cursor follows what the agent has open, and lets go when pinned",
   assert.equal(following({ tool: "Edit", target: "/repo/src/a.ts" }, "/repo"), "src/a.ts");
   assert.equal(following({ tool: "Edit", target: "src/a.ts" }, "/repo"), "src/a.ts");
 });
+
+test("the border says the agent is working, or that it is your turn", () => {
+  const now = Date.parse("2026-08-26T10:05:00.000Z");
+  const started = Date.parse("2026-08-26T10:04:08.000Z");
+
+  // Working. The age leads, because a still picture of `npm test` cannot say
+  // it has been running fifty-two seconds.
+  const busy = activityTitle({ tool: "Bash", target: "npm test", since: started }, now, 40);
+  assert.match(busy, /⟳ 52s Bash npm test/);
+
+  // Stopped. `idle` covered both "just finished" and "finished while you
+  // were in another window", which are not the same thing to act on.
+  const done = activityTitle(null, now, 40, Date.parse("2026-08-26T10:00:00.000Z"));
+  assert.match(done, /your turn · waiting 5m00s/);
+  const justDone = activityTitle(null, now, 40, Date.parse("2026-08-26T10:04:57.000Z"));
+  assert.match(justDone, /your turn · waiting 3.0s/);
+
+  // A transcript srcy cannot date gets no invented duration.
+  assert.equal(activityTitle(null, now, 40, undefined), " idle ");
+  assert.equal(activityTitle(null, 0, 40, started), " idle ");
+
+  // tmux truncates a border to the pane's width, so the title has to fit.
+  const narrow = activityTitle(null, now, 12, Date.parse("2026-08-26T10:00:00.000Z"));
+  assert.ok(narrow.length <= 14, JSON.stringify(narrow));
+});

@@ -179,6 +179,8 @@ interface Watched {
   usage: Usage | null;
   activity: Activity | null;
   turn: Turn | null;
+  // When the agent last did anything, for the pane border's waiting clock.
+  at?: number;
   // What this project verifies, and what each of those has said. The
   // verdicts carry the tree they were measured against, so "passing" and
   // "passed, before the last three edits" are different things on screen.
@@ -297,6 +299,7 @@ function useWatch(
           usage: t?.usage ?? null,
           activity: t?.activity ?? null,
           turn: t?.turn ?? null,
+          at: t?.at,
           gates: config.current,
           results: results.current,
           gateError: configError.current,
@@ -601,8 +604,24 @@ export function elapsed(ms: number): string {
   return `${m}m${String(Math.round((ms % 60_000) / 1000)).padStart(2, "0")}s`;
 }
 
-export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX): string {
-  if (a === null) return " idle ";
+function fit(body: string, width: number): string {
+  return ` ${body.length <= width ? body : `${body.slice(0, Math.max(1, width - 1))}…`} `;
+}
+
+// What the pane border says the agent is doing. Three states, and the third
+// is the one this existed without for too long: `idle` covered both "finished
+// and waiting on you" and "stopped four minutes ago and you did not notice".
+// A tool call in flight is WORKING, and its age is the wedged signal — a
+// still picture of `npm test` cannot tell you it has been running twelve
+// minutes. Nothing in flight means the agent has stopped and the ball is with
+// you, and how long says which kind of stopped that is.
+export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX, at?: number): string {
+  if (a === null) {
+    // No timestamp means no honest number: a transcript srcy cannot date
+    // gets the word it has always had rather than an invented duration.
+    if (at === undefined || now === 0) return " idle ";
+    return fit(`your turn · waiting ${elapsed(Math.max(0, now - at))}`, width);
+  }
   // A path gets its basename — the directory is already on screen in the
   // rail. A command keeps its head: `npm run build` identifies itself in
   // its first words, where a pipeline's tail identifies nothing.
@@ -613,8 +632,7 @@ export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX): s
   // long this has been running is the one part you cannot get by looking at
   // the agent's own pane.
   const age = a.since === undefined || now === 0 ? "" : `${elapsed(now - a.since)} `;
-  const body = `⟳ ${age}${a.tool}${short === "" ? "" : ` ${short}`}`;
-  return ` ${body.length <= width ? body : `${body.slice(0, Math.max(1, width - 1))}…`} `;
+  return fit(`⟳ ${age}${a.tool}${short === "" ? "" : ` ${short}`}`, width);
 }
 
 // How many lines each fixed section will occupy. Exported and used by the
@@ -753,11 +771,13 @@ export function Rail({
   const live = following(s.activity, cwd);
   const at = cursorAt(visible, picked, live);
 
-  const now = useNow(s.activity !== null);
+  // Ticking whenever the agent has done anything, not only while it is
+  // working: "waiting 4m" is a number that has to keep counting.
+  const now = useNow(s.activity !== null || s.at !== undefined);
   useEffect(() => {
     // Sized to the pane, minus the corners and padding tmux draws around it.
-    setPaneTitle(activityTitle(s.activity, now, Math.max(8, width - 6)));
-  }, [s.activity?.tool, s.activity?.target, now, width]);
+    setPaneTitle(activityTitle(s.activity, now, Math.max(8, width - 6), s.at));
+  }, [s.activity?.tool, s.activity?.target, now, width, s.at]);
 
   // tmux only delivers keystrokes to the focused pane, so this is inert
   // until the reader moves the keyboard here — the agent keeps every key

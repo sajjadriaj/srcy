@@ -173,6 +173,12 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **The focused pane's title is lit and the rest are grey.** Three panes take
   keys and only one is listening; the panels do nothing until you move the
   keyboard to them, which is easier to believe when you can see where it is.
+- **The sidebar's border says whether the agent is working or waiting on
+  you.** `⟳ 52s Bash npm test` while a tool is in flight — the age is the
+  wedged signal, since a still picture of `npm test` cannot say it has been
+  running twelve minutes — and `your turn · waiting 5m00s` once it stops.
+  `idle` covered both, and "just finished" and "finished while you were in
+  another window" are not the same thing to act on.
 - **The cursor holds a file, not a row.** The agent creates and deletes files
   while you read; a row number silently means a different file.
 - **The sidebar says FOLLOW or PINNED, like the review pane.** Untouched, the

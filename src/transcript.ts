@@ -199,6 +199,9 @@ export interface State {
   // baseline is only honest if nothing like this happened after the request
   // it claims to start from.
   wrote?: number;
+  // When the agent last did anything. Undefined for a transcript with no
+  // usable timestamps, where "waiting 4m" would be a number made up.
+  at?: number;
 }
 
 // The subset of an Edit/Write/Read/Bash input worth putting in a one-line
@@ -254,6 +257,11 @@ export interface Fold {
   // and the peak does not survive that: `/model` leaves the conversation in
   // place and swaps the window under it.
   model?: string;
+  // The newest timestamp in the transcript: when the agent last did
+  // anything at all. With no tool call in flight, this is how long it has
+  // been waiting on you, which is the difference between a turn that just
+  // ended and one that ended while you were in another window.
+  at?: number;
   // Set only by agents that record it. Codex writes the real number with
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
@@ -289,6 +297,7 @@ export function foldLine(f: Fold, line: string): void {
     return; // a half-written last line is normal: the agent is still going
   }
   const at = when(rec.timestamp);
+  if (at !== undefined && at > (f.at ?? 0)) f.at = at;
 
   const u = rec.message?.usage;
   if (u !== undefined) {
@@ -371,6 +380,7 @@ export function stateOf(f: Fold): State {
   const s: State = { plan: f.plan, activity };
   if (f.turn !== undefined) s.turn = f.turn;
   if (f.wrote !== undefined) s.wrote = f.wrote;
+  if (f.at !== undefined) s.at = f.at;
   return s;
 }
 
