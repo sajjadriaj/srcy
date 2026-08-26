@@ -347,11 +347,21 @@ async function main(): Promise<void> {
     await wait(CHECK_MS);
 
     // -----------------------------------------------------------------------
-    // Pinning a file. The dock is on session.ts because that is what the agent
-    // wrote last; the reader wants token.ts.
+    // Straight to what broke. GATES names a file and a line; `e` is the walk
+    // between reading that and reading the code.
 
     srcyQuiet(["select-pane", "-t", RAIL]);
-    await wait(1200);
+    await wait(1400);
+    srcyQuiet(["send-keys", "-t", RAIL, "e"]);
+    await wait(2600);
+
+    // -----------------------------------------------------------------------
+    // Pinning a file. The dock is on session.ts because that is what broke;
+    // the reader wants token.ts, and the tree is quicker to read with
+    // everything the turn never touched out of it.
+
+    srcyQuiet(["send-keys", "-t", RAIL, "m"]);
+    await wait(2000);
     for (let i = 0; i < 3; i++) {
       srcyQuiet(["send-keys", "-t", RAIL, "j"]);
       await wait(480);
