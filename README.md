@@ -9,10 +9,11 @@ it.
 
 ![srcy](docs/demo.gif)
 
-<sub>Launch → the turn → GATES goes red → pin a file → read every hunk → zoom
-the agent full screen → drag the border → the fix lands green. Real layout, real git repo,
-real transcript, real checker, all changing while the panels read them. Only
-the agent's turn is scripted — `npm run demo` reproduces it.</sub>
+<sub>Launch → the turn → GATES goes red → pin a file → walk its hunks and the
+file before it → zoom the agent full screen → drag the border → the fix lands
+green. Real layout, real git repo, real transcript, real checker, all changing
+while the panels read them. Only the agent's turn is scripted — `npm run demo`
+reproduces it.</sub>
 
 ---
 
@@ -222,23 +223,24 @@ open and stay on after srcy exits. Your `~/.tmux.conf` still loads.
 
 **The panels never speak to the agent.** No protocol, no adapter. git and your
 checker work for every agent — and for a person with an editor open. Only
-`PLAN` and the gauge are per-agent:
+`GOAL`, `PLAN`, the gauge and the automatic `TURN` baseline are per-agent:
 
-| agent | `PLAN` | gauge |
-|---|---|---|
-| `claude` | yes | yes — window inferred (200k, or 1M once past it) |
-| `codex` | when it calls `update_plan` | yes — against the window codex records itself |
-| anything else | blank | blank |
+| agent | `GOAL` | `PLAN` | gauge |
+|---|---|---|---|
+| `claude` | yes | yes | yes — window inferred (200k, or 1M once past it) |
+| `codex` | yes | when it calls `update_plan` | yes — against the window codex records itself |
+| anything else | blank | blank | blank |
 
-Blank, never another agent's numbers.
+Blank, never another agent's numbers — and `c` sets the turn baseline by hand
+wherever srcy cannot read one.
 
 <details>
 <summary>The same repo under <code>srcy --agent codex</code></summary>
 
-Same panels, no adapter — GOAL and PLAN come from codex's own session log. The
-gauge reads `161k/258k` because codex records the
-model's real context window with every token count — measured, where Claude
-Code's is inferred. `PREVIEW_AGENT=codex npm run preview` prints this.
+Same panels, no adapter — GOAL and PLAN come from codex's own session log.
+The gauge reads `161k/258k` because codex records the model's real context
+window with every token count — measured, where Claude Code's is inferred.
+`PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
 ──  ⟳ 52s shell bash -lc np…──┬──  codex  ──────────────────────────────────────────────────────────
