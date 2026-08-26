@@ -10,7 +10,7 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, following, elapsed, loadTask, planAge, PlanBody, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -1309,4 +1309,30 @@ test("a pinned task outranks the newest request, and says which it is", async (t
   // An empty file is not a task, and does not silence the request.
   await writeFile(join(repo, ".srcy", "task.md"), "\n\n");
   assert.equal(await loadTask(repo), "");
+});
+
+test("a plan item that has not moved in a while says how long", () => {
+  const now = Date.parse("2026-08-26T10:20:00.000Z");
+  // The plan is rewritten whole on every update, so most updates change
+  // nothing about which item is in flight. Twenty seconds on a step is the
+  // agent working; twenty minutes is a step nobody is coming back to, and
+  // without a clock the two look identical.
+  assert.equal(planAge(Date.parse("2026-08-26T10:19:30.000Z"), now), "");
+  assert.equal(planAge(Date.parse("2026-08-26T10:00:00.000Z"), now), "20m00s");
+  assert.equal(planAge(undefined, now), "");
+  // No clock yet is not an age of zero.
+  assert.equal(planAge(Date.parse("2026-08-26T10:00:00.000Z"), 0), "");
+
+  const entries = [
+    { content: "find the expiry comparison", status: "completed" },
+    { content: "add a regression test", status: "in_progress" },
+    { content: "update the README", status: "pending" },
+  ];
+  const old = render(<PlanBody entries={entries} since={Date.parse("2026-08-26T10:00:00.000Z")} now={now} />).lastFrame() ?? "";
+  assert.match(old, /add a regression test\s+20m00s/, old);
+  // The age belongs to the step in flight, never to a finished one.
+  assert.doesNotMatch(old, /find the expiry comparison\s+20m/, old);
+
+  const fresh = render(<PlanBody entries={entries} since={now - 1000} now={now} />).lastFrame() ?? "";
+  assert.doesNotMatch(fresh, /[0-9]+m[0-9]+s/, fresh);
 });

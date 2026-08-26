@@ -188,6 +188,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
   touched, where the pane previews the source from that line instead of
   starting at line one. A line the diff doesn't cover lands on the nearest
   row above it.
+- **A plan step that hasn't moved says how long.** Past two minutes the
+  in-progress row carries its age. The plan is rewritten whole on every
+  update, so the clock is reset by the *item* changing, not by the list being
+  written again — twenty minutes on one step is a signal, twenty seconds
+  isn't, and they look identical without it.
 - **The sidebar's border says whether the agent is working or waiting on
   you.** `⟳ 52s Bash npm test` while a tool is in flight — the age is the
   wedged signal, since a still picture of `npm test` cannot say it has been

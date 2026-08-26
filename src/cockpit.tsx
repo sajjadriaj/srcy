@@ -125,7 +125,7 @@ export function hunkLines(body: string, newStart: number): DiffLine[] {
 // PlanBar renders the agent's own plan as a live checklist. ACP sends the
 // whole plan on every update, so this always reflects the current one
 // rather than accumulating stale entries.
-export function PlanBar({ entries }: { entries: PlanEntry[] }): React.JSX.Element | null {
+export function PlanBar({ entries, age = "" }: { entries: PlanEntry[]; age?: string }): React.JSX.Element | null {
   if (entries.length === 0) return null;
   return (
     <Box flexDirection="column">
@@ -143,6 +143,7 @@ export function PlanBar({ entries }: { entries: PlanEntry[] }): React.JSX.Elemen
             <Box>
               <Text dimColor={done} color={color}>
                 {entry.content}
+                {active && age !== "" ? <Text dimColor>{`  ${age}`}</Text> : null}
               </Text>
             </Box>
           </Box>

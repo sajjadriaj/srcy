@@ -185,6 +185,8 @@ interface Watched {
   turn: Turn | null;
   // When the agent last did anything, for the pane border's waiting clock.
   at?: number;
+  // When the plan's in-progress item became the in-progress item.
+  doingAt?: number;
   // What this project verifies, and what each of those has said. The
   // verdicts carry the tree they were measured against, so "passing" and
   // "passed, before the last three edits" are different things on screen.
@@ -313,6 +315,7 @@ function useWatch(
           activity: t?.activity ?? null,
           turn: t?.turn ?? null,
           at: t?.at,
+          doingAt: t?.doingAt,
           gates: [...config.current, ...built.current],
           results: [...results.current, ...builtResults.current],
           gateError: configError.current,
@@ -610,9 +613,19 @@ export function NarrowUsage({ usage, width }: { usage: Usage | null; width: numb
 // PlanBar draws its own "PLAN" heading, which the rule above already drew.
 // Dropping it here keeps one labelling style down the whole rail instead of
 // two that disagree about capitalisation and spacing.
-export function PlanBody({ entries }: { entries: PlanEntry[] }): React.JSX.Element {
+// How long a plan item has to have been in flight before its age is worth a
+// reader's attention. Under this it is just the agent working; over it, it is
+// the difference between a step and a step nobody is coming back to.
+export const STUCK_MS = 120_000;
+
+export function planAge(since: number | undefined, now: number): string {
+  if (since === undefined || now === 0 || now - since < STUCK_MS) return "";
+  return elapsed(now - since);
+}
+
+export function PlanBody({ entries, since, now = 0 }: { entries: PlanEntry[]; since?: number; now?: number }): React.JSX.Element {
   if (entries.length === 0) return <Text dimColor>{"  (no plan)"}</Text>;
-  const bar = PlanBar({ entries });
+  const bar = PlanBar({ entries, age: planAge(since, now) });
   if (bar === null) return <Text dimColor>{"  (no plan)"}</Text>;
   const kids = React.Children.toArray((bar.props as { children?: React.ReactNode }).children);
   return <Box flexDirection="column">{kids.slice(1)}</Box>;
@@ -928,7 +941,7 @@ export function Rail({
       <Rule label={s.task === "" ? "GOAL" : "GOAL  task.md"} width={width} color={AGENT} />
       <GoalLine turn={s.turn} task={s.task} width={width} />
       <Rule label="PLAN" width={width} color={AGENT} />
-      <PlanBody entries={s.plan} />
+      <PlanBody entries={s.plan} since={s.doingAt} now={now} />
       <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} color={gatesTone(s.gates, s.results, s.repo.mark)} />
       <GateRows
         gates={s.gates}

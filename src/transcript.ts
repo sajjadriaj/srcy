@@ -202,6 +202,8 @@ export interface State {
   // When the agent last did anything. Undefined for a transcript with no
   // usable timestamps, where "waiting 4m" would be a number made up.
   at?: number;
+  // When the plan's in-progress item became the in-progress item.
+  doingAt?: number;
 }
 
 // The subset of an Edit/Write/Read/Bash input worth putting in a one-line
@@ -262,6 +264,9 @@ export interface Fold {
   // been waiting on you, which is the difference between a turn that just
   // ended and one that ended while you were in another window.
   at?: number;
+  // The in-progress plan items, joined, and when they last changed.
+  doing?: string;
+  doingAt?: number;
   // Set only by agents that record it. Codex writes the real number with
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
@@ -353,6 +358,20 @@ export function foldLine(f: Fold, line: string): void {
             .map((t) => t as Todo)
             .filter((t): t is Todo & { content: string } => typeof t.content === "string" && t.content !== "")
             .map((t) => ({ content: t.content, status: typeof t.status === "string" ? t.status : "pending" }));
+          // When the agent started on what it is on now. The plan is
+          // rewritten whole on every update, so most updates change nothing
+          // about which item is in flight — the clock is reset by the item
+          // changing, not by the list being written again. Twenty minutes on
+          // one line is a signal; twenty seconds is not, and they look
+          // identical without this.
+          const doing = f.plan
+            .filter((e) => e.status === "in_progress")
+            .map((e) => e.content)
+            .join("\u0000");
+          if (doing !== f.doing) {
+            f.doing = doing;
+            f.doingAt = at;
+          }
         }
       }
       const name = typeof b.name === "string" ? b.name : "?";
@@ -381,6 +400,7 @@ export function stateOf(f: Fold): State {
   if (f.turn !== undefined) s.turn = f.turn;
   if (f.wrote !== undefined) s.wrote = f.wrote;
   if (f.at !== undefined) s.at = f.at;
+  if (f.doingAt !== undefined) s.doingAt = f.doingAt;
   return s;
 }
 
