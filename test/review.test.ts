@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
 import { rowFor } from "../src/panels.js";
-import { START, actionFor, fileLines, move, scopeFor, spans, view, type Review } from "../src/review.js";
+import { START, actionFor, byRisk, fileLines, move, scopeFor, spans, view, type Review } from "../src/review.js";
 
 const raw = `diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -289,4 +289,48 @@ test("the part that actually changed is the part that gets marked", () => {
     const add = split ? rows.find((l) => l.right?.sign === "+")!.right! : rows.find((l) => l.sign === "+")!;
     assert.equal(add.text.slice(add.mark!.from, add.mark!.to), "=");
   }
+});
+
+test("the review pane reads worst first, not alphabetically", () => {
+  const raw = splitDiff(`diff --git a/a-clean.ts b/a-clean.ts
+--- a/a-clean.ts
++++ b/a-clean.ts
+@@ -1,2 +1,3 @@ f()
+ one
++two
+ three
+diff --git a/b-broken.ts b/b-broken.ts
+--- a/b-broken.ts
++++ b/b-broken.ts
+@@ -1 +1,2 @@ g()
+ x
++y
+diff --git a/c-gone.ts b/c-gone.ts
+deleted file mode 100644
+--- a/c-gone.ts
++++ /dev/null
+@@ -1,2 +0,0 @@ h()
+-one
+-two
+diff --git a/d-new.ts b/d-new.ts
+new file mode 100644
+--- /dev/null
++++ b/d-new.ts
+@@ -0,0 +1 @@ i()
++fresh
+`);
+  // git hands them over alphabetically, which has nothing to do with what
+  // deserves a reader first.
+  assert.deepEqual(raw.map((f) => f.path), ["a-clean.ts", "b-broken.ts", "c-gone.ts", "d-new.ts"]);
+
+  const order = byRisk(raw, [{ path: "b-broken.ts", line: 1, message: "boom" }]).map((f) => f.path);
+  // A failing gate is a fact, not a guess about risk. A deletion is the
+  // hardest change to notice by reading what is left. A new file has no
+  // previous version and so has never been read by anyone.
+  assert.deepEqual(order, ["b-broken.ts", "c-gone.ts", "d-new.ts", "a-clean.ts"]);
+
+  // Nothing broken: the same order minus the promotion.
+  assert.deepEqual(byRisk(raw, []).map((f) => f.path), ["c-gone.ts", "d-new.ts", "a-clean.ts", "b-broken.ts"]);
+  // Stable, and never mutating the list it was handed.
+  assert.deepEqual(raw.map((f) => f.path), ["a-clean.ts", "b-broken.ts", "c-gone.ts", "d-new.ts"]);
 });

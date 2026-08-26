@@ -178,6 +178,11 @@ unreadable ones — and `ctrl-b z` is the way back to the panels.
 - **`m` collapses the tree to what moved.** On a real repo most of the tree
   is files the turn never went near. The header says `CHANGED` instead of
   `REPO` so a short list is never mistaken for a small project.
+- **`n`/`p` read worst first.** git hands its diff over alphabetically, which
+  has nothing to do with what deserves a reader first. The pane orders it: a
+  file with a failing gate, then deletions — the hardest change to notice by
+  reading what's left — then new files, which have no previous version and so
+  have never been read by anyone, then churn.
 - **`e` walks the failures.** GATES names a file and a line; `e` pins the
   review pane to it and scrolls there — including into a file nothing has
   touched, where the pane previews the source from that line instead of

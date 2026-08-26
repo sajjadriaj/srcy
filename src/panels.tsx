@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } from "./cockpit.js";
-import { KEYS, START, actionFor, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
+import { KEYS, START, actionFor, byRisk, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
 import { loadGates, problemsOf, runGate, summarise, type Gate, type GateResult } from "./gates.js";
@@ -1085,7 +1085,9 @@ export function Dock({
 
   const head = s.repo.diffs;
   const tree = scope === "turn" ? base.turn : scope === "session" ? base.session : undefined;
-  const files = scope === "head" ? head : scoped;
+  // Worst first, not git's alphabetical order: the pane is for reading a
+  // turn, and what broke is where reading should start.
+  const files = useMemo(() => byRisk(scope === "head" ? head : scoped, problemsOf(gates)), [scope, head, scoped, gates]);
   // Said out loud, never papered over with another scope's diff.
   const note =
     scope === "head" || tree !== undefined

@@ -1,5 +1,6 @@
 import { TOP_LEVEL, hunkLines } from "./cockpit.js";
 import type { FileDiff } from "./diff.js";
+import type { Problem } from "./checks.js";
 
 // The dock, as a reviewer rather than a preview.
 //
@@ -213,6 +214,29 @@ export function fileLines(f: FileDiff, split = false): ReviewLine[] {
   // pane, which reads as "nothing happened" about a file that moved.
   if (out.length === 0) out.push({ num: "", sign: " ", text: `${f.path} — metadata only` });
   return out;
+}
+
+// The order to read a turn's files in.
+//
+// git's order is the order git found them, which is alphabetical and has
+// nothing to do with what deserves a reader first. After a forty-call turn
+// that is the difference between reviewing and skimming.
+//
+// A failing gate leads because it is a fact rather than a guess about risk.
+// Deletions come next: a file that is gone is the hardest change to notice by
+// reading what is left. Then new files, which have no previous version and so
+// have never been read by anyone. Then churn, then the path, so the order is
+// stable when nothing separates two files.
+export function byRisk(files: FileDiff[], problems: Problem[]): FileDiff[] {
+  const broken = new Set(problems.map((p) => p.path));
+  const rank = (f: FileDiff): number => {
+    if (broken.has(f.path)) return 0;
+    if (f.header.includes("deleted file mode ")) return 1;
+    if (f.header.includes("new file mode ")) return 2;
+    return 3;
+  };
+  const churn = (f: FileDiff): number => f.hunks.reduce((n, h) => n + h.body.split("\n").length, 0);
+  return [...files].sort((a, b) => rank(a) - rank(b) || churn(b) - churn(a) || a.path.localeCompare(b.path));
 }
 
 export interface View {
