@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,11 +10,11 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, checkStep, checksRows, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GoalLine, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, baseline, checkStep, checksRows, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
-import { CLAUDE, advance, emptyFold, newReader, parseState, parseUsage, stateOf, usageOf } from "../src/transcript.js";
+import { CLAUDE, advance, emptyFold, foldLine as claudeFold, newReader, parseState, parseUsage, stateOf, usageOf, type Source } from "../src/transcript.js";
 import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
 import { sourceFor } from "../src/panels.js";
 import { newRepo } from "./helpers.js";
@@ -342,9 +342,14 @@ test("the budget counts what the fixed sections actually draw", () => {
   assert.equal(usageRows(bare), count(<NarrowUsage usage={bare} width={30} />));
   const full = { used: 1, size: 2, output: 3, cached: 0.5 };
   assert.equal(usageRows(full), count(<NarrowUsage usage={full} width={30} />));
-  // The rail draws two rules now, not three. A budget still counting the
-  // deleted CONTEXT rule would leave a blank row at the bottom for ever.
-  assert.equal(mapBudget(24, 3, 2, 1), 24 - 2 - 3 - 2 - 1);
+  // GOAL is a rule and a line, whatever it holds — and an agent whose
+  // transcript srcy cannot read still draws the row that says so.
+  assert.equal(count(<GoalLine turn={null} width={30} />), 1);
+  assert.equal(count(<GoalLine turn={{ at: 1, text: "make it green\nplease" }} width={30} />), 1);
+  // Three rules now — GOAL, PLAN, CHECKS — and the goal line under the
+  // first of them. A budget counting one section fewer than the rail draws
+  // pushes the gauge off the bottom, and Ink overdraws rather than scrolls.
+  assert.equal(mapBudget(24, 3, 2, 1), 24 - 2 - 2 - 3 - 2 - 1);
   // And the map never gets a negative or absurd budget out of a tiny pane.
   assert.ok(mapBudget(6, 5, 4, 3) >= 3);
 });
@@ -958,6 +963,47 @@ test("the dock shows every hunk of the file, and says how to move", async (t) =>
   assert.match(frame, /SECOND EDIT/, frame);
   // And the keys are on screen rather than behind a `?` nobody presses.
   assert.match(frame, /n\/p file/, frame);
+});
+
+// The TURN baseline is only worth having if it is honest. It is taken the
+// moment a request lands, and thrown away rather than shipped when the agent
+// turns out to have already started writing — the shape of a fast agent, and
+// the one case where a baseline would hide exactly what it was opened to show.
+test("a turn baseline is refused when the agent had already started writing", async (t) => {
+  const repo = await mkdtemp(join(tmpdir(), "srcy-baseline-"));
+  const log = join(repo, "session.jsonl");
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  await writeFile(join(repo, "a.ts"), "const a = 1\n");
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+
+  const at = Date.parse("2026-08-25T10:00:00.000Z");
+  const iso = (ms: number): string => new Date(ms).toISOString();
+  const said = JSON.stringify({ type: "user", timestamp: iso(at), message: { role: "user", content: "fix the thing" } });
+  await writeFile(log, `${said}\n`);
+  // A named function: readSession keys its remembered offset by it.
+  async function findFixture(): Promise<string> {
+    return log;
+  }
+  const source: Source = { find: findFixture, fold: claudeFold };
+
+  const clean = await baseline(repo, source, at);
+  assert.match(clean.turn ?? "", /^[0-9a-f]{40}$/, JSON.stringify(clean));
+  assert.equal(clean.turnWhy, undefined);
+
+  // Now the agent starts editing, and the same request is baselined again.
+  const wrote = JSON.stringify({
+    type: "assistant",
+    timestamp: iso(at + 500),
+    message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Edit", input: { file_path: "a.ts" } }] },
+  });
+  await appendFile(log, `${wrote}\n`);
+  const late = await baseline(repo, source, at);
+  assert.equal(late.turn, undefined, "a baseline taken after the work is not a baseline");
+  assert.match(late.turnWhy ?? "", /already writing/);
 });
 
 test("a reopened session does not pin the dock to last time's file", async (t) => {

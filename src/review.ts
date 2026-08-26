@@ -44,6 +44,11 @@ export interface Review {
   // The file the agent wrote last, which is what FOLLOW follows.
   newest: string;
   scope: Scope;
+  // Why this scope has nothing to show. A scope whose baseline could not be
+  // taken says so; it never silently falls back to another one, because a
+  // diff labelled TURN that is really every uncommitted line is worth less
+  // than an empty pane that admits it.
+  note?: string;
 }
 
 export type Action =
@@ -109,7 +114,7 @@ function clamp(n: number, lo: number, hi: number): number {
 
 export function view(r: Review): View {
   const scope = r.scope.toUpperCase();
-  if (r.files.length === 0) {
+  if (r.note !== undefined || r.files.length === 0) {
     return {
       index: 0,
       files: 0,
@@ -118,7 +123,7 @@ export function view(r: Review): View {
       hunk: 0,
       hunks: 0,
       pinned: false,
-      title: `REVIEW  ${scope}  clean — nothing to review`,
+      title: `REVIEW  ${scope}  ${r.note ?? "clean — nothing to review"}`,
     };
   }
   const { index, pinned } = locate(r);
@@ -240,4 +245,14 @@ export function actionFor(input: string, key: Chord = {}): Action | undefined {
 
 // The key line under the diff. Not hidden behind a `?`: the pane is one row
 // taller for it, and a binding nobody can see is a binding nobody presses.
-export const KEYS = " ]/[ hunk · n/p file · j/k scroll · g/G ends · f follow";
+export const KEYS = " ]/[ hunk · n/p file · j/k scroll · f follow · 1/2/3 turn/session/head";
+
+// The scope keys. Separate from `actionFor` because choosing what to review
+// is not moving around inside it: the position survives the change, and a
+// scope with no baseline is a state the pane has to say out loud.
+export function scopeFor(input: string): Scope | undefined {
+  if (input === "1") return "turn";
+  if (input === "2") return "session";
+  if (input === "3") return "head";
+  return undefined;
+}

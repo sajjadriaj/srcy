@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { when, type Fold, type Source } from "./transcript.js";
+import { spoken, when, type Fold, type Source } from "./transcript.js";
 
 // Reading Codex's session log.
 //
@@ -19,6 +19,8 @@ const SESSIONS = join(homedir(), ".codex", "sessions");
 
 interface Payload {
   type?: unknown;
+  role?: unknown;
+  content?: unknown;
   name?: unknown;
   call_id?: unknown;
   input?: unknown;
@@ -137,8 +139,19 @@ function targetOf(payload: Payload): string {
   return raw.slice(0, 80);
 }
 
+// Codex's read-only tools. As with Claude Code, anything unrecognised is
+// assumed to write: `shell` and `apply_patch` are the two that do, and a
+// custom tool nobody here has heard of is not evidence of anything.
+const READS = new Set(["update_plan", "view_image"]);
+
 export function foldLine(f: Fold, line: string): void {
-  if (!line.includes('"token_count"') && !line.includes('"call_id"')) return;
+  if (
+    !line.includes('"token_count"') &&
+    !line.includes('"call_id"') &&
+    !line.includes('"role":"user"')
+  ) {
+    return;
+  }
   let p: Payload;
   let at: number | undefined;
   try {
@@ -164,6 +177,20 @@ export function foldLine(f: Fold, line: string): void {
     return;
   }
 
+  // What the reader asked for. Codex opens every session by injecting the
+  // environment as a user message, and `spoken` is what tells the two apart.
+  if (p.type === "message" && p.role === "user") {
+    const text = Array.isArray(p.content)
+      ? spoken(
+          p.content
+            .map((b) => String((b as { text?: unknown }).text ?? ""))
+            .join(" "),
+        )
+      : "";
+    if (text !== "" && at !== undefined) f.turn = { at, text };
+    return;
+  }
+
   const id = typeof p.call_id === "string" ? p.call_id : undefined;
   if (id === undefined) return;
   if (p.type === "function_call" || p.type === "custom_tool_call") {
@@ -183,7 +210,9 @@ export function foldLine(f: Fold, line: string): void {
         }
       }
     }
-    f.open.set(id, { tool: typeof p.name === "string" ? p.name : "?", target: targetOf(p), since: at });
+    const name = typeof p.name === "string" ? p.name : "?";
+    if (at !== undefined && !READS.has(name)) f.wrote = at;
+    f.open.set(id, { tool: name, target: targetOf(p), since: at });
   } else if (p.type === "function_call_output" || p.type === "custom_tool_call_output") {
     f.open.delete(id);
   }

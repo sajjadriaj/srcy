@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
-import { KEYS, START, actionFor, move, view, type Position, type ReviewLine, type Scope } from "./review.js";
+import { KEYS, START, actionFor, move, scopeFor, view, type Position, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import { runChecks, type CheckResult, type Problem } from "./checks.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
-import { CLAUDE, readSession, type Activity, type Source } from "./transcript.js";
+import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
+import { captureTree, scopedDiff } from "./scopes.js";
 import { CODEX } from "./codex.js";
 
 // The panels around the agent's pane.
@@ -96,6 +97,11 @@ export function useSize(): { cols: number; rows: number } {
 
 interface Shared {
   file?: string;
+  // Baseline trees for the scoped reviews, and why TURN has none. Written by
+  // the rail, which owns everything expensive; the dock diffs against them.
+  turn?: string;
+  session?: string;
+  turnWhy?: string;
   // When that pick was made. The dock re-reads this file on a timer, so a
   // pick with no timestamp is indistinguishable from the same pick seen
   // again — and the dock would re-pin the pane every second, which is one
@@ -141,6 +147,26 @@ export async function readShared(session: string): Promise<Shared> {
   }
 }
 
+// A baseline for the turn that began at `marker`, or the reason there is not
+// one.
+//
+// The tree is captured first and the transcript re-read after, because that
+// is the order the agent writes in: a tool call is recorded when it starts,
+// just before the file it is about to change. Reading afterwards therefore
+// catches a write that began *during* the capture, which is the window this
+// check exists to close. A baseline that cannot be shown to predate the work
+// is thrown away rather than shipped with a caveat — a diff labelled TURN
+// that already contains half the turn is worse than no TURN at all.
+export async function baseline(cwd: string, source: Source | null, marker: number): Promise<Shared> {
+  const tree = await captureTree(cwd);
+  if (tree === null) return { turn: undefined, turnWhy: "baseline could not be created" };
+  const after = source === null ? null : await readSession(cwd, source);
+  if ((after?.wrote ?? 0) >= marker) {
+    return { turn: undefined, turnWhy: "the agent was already writing — press c to start one" };
+  }
+  return { turn: tree, turnWhy: undefined };
+}
+
 // ---------------------------------------------------------------------------
 // Polling
 
@@ -149,6 +175,7 @@ interface Watched {
   plan: PlanEntry[];
   usage: Usage | null;
   activity: Activity | null;
+  turn: Turn | null;
   checks: CheckResult | null | undefined;
   // The tree has moved since that check ran, so its verdict describes code
   // that no longer exists. A red CHECKS from thirty seconds ago reads
@@ -162,6 +189,7 @@ const EMPTY: Watched = {
   plan: [],
   usage: null,
   activity: null,
+  turn: null,
   checks: undefined,
   stale: false,
 };
@@ -225,6 +253,10 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
   const problems = useRef<CheckResult | null | undefined>(undefined);
   // The fingerprint the current result was measured against.
   const checkedFor = useRef<string | null>(null);
+  // The baselines the scoped reviews diff against: one for the session, one
+  // for the newest request. Refs because capturing is work, not a render.
+  const sessionTree = useRef<string | null>(null);
+  const turnMark = useRef<number | null>(null);
 
   useEffect(() => {
     let live = true;
@@ -244,11 +276,32 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
           plan: t?.plan ?? [],
           usage: t?.usage ?? null,
           activity: t?.activity ?? null,
+          turn: t?.turn ?? null,
           checks: problems.current,
           stale: problems.current !== undefined && checkedFor.current !== null && checkedFor.current !== fp,
         });
 
         if (rail) {
+          // Everything this session has watched happen. Captured on the
+          // first tick rather than at launch: a repo git cannot read yet
+          // costs a frame, not a start-up crash.
+          if (sessionTree.current === null) {
+            const tree = await captureTree(cwd);
+            if (tree !== null) {
+              sessionTree.current = tree;
+              publish(session, { session: tree });
+            }
+          }
+          // And one per request the reader makes. Awaited inside the tick
+          // rather than left running beside it: `readSession` folds from a
+          // remembered offset, and two of them at once would read the same
+          // bytes twice.
+          const marker = t?.turn?.at;
+          if (marker !== undefined && marker !== turnMark.current) {
+            turnMark.current = marker;
+            publish(session, await baseline(cwd, source, marker));
+          }
+
           const step = checkStep(fp, mark.current, quietSince.current, Date.now(), checking.current);
           mark.current = step.mark;
           quietSince.current = step.quietSince;
@@ -431,10 +484,22 @@ export function usageRows(_usage: Usage | null): number {
   return 1;
 }
 
-// Lines left for the file list once the plan, the failures, the gauge and
-// the two rules between them have taken theirs.
-export function mapBudget(height: number, plan: number, checks: number, usage: number): number {
-  return Math.max(3, height - 2 - Math.max(1, plan) - checks - usage);
+// The request the agent is working on, in the reader's own words.
+//
+// One line, and the first line of it: it is here to answer "what did I ask
+// for" three tool calls later, not to be read again in full. An agent whose
+// transcript srcy cannot read says so rather than showing an empty row,
+// which would read as "you asked for nothing".
+export function GoalLine({ turn, width }: { turn: Turn | null; width: number }): React.JSX.Element {
+  if (turn === null) return <Text dimColor>{"  (no request read)"}</Text>;
+  const first = turn.text.split("\n").find((l) => l.trim() !== "") ?? "";
+  return <Text>{clipTo(`  ${first}`, width)}</Text>;
+}
+
+// Lines left for the file list once the goal, the plan, the failures, the
+// gauge and the rules between them have taken theirs.
+export function mapBudget(height: number, plan: number, checks: number, usage: number, goal = 2): number {
+  return Math.max(3, height - 2 - goal - Math.max(1, plan) - checks - usage);
 }
 
 // How often the project's file list is refreshed. Slower than the poll
@@ -520,6 +585,16 @@ export function Rail({
   // otherwise, which is the point.
   useInput(
     (input, key) => {
+      // A checkpoint the reader sets by hand. The one way to get a TURN
+      // scope for an agent srcy cannot read, and the way back when an
+      // automatic baseline was refused because the agent was already
+      // writing when the request landed.
+      if (input === "c") {
+        void captureTree(cwd).then((tree) =>
+          publish(session, tree === null ? { turnWhy: "baseline could not be created" } : { turn: tree, turnWhy: undefined }),
+        );
+        return;
+      }
       if (visible.length === 0) return;
       const row = visible[at];
       const go = (i: number): void => setPicked(visible[Math.max(0, Math.min(i, visible.length - 1))]?.path ?? null);
@@ -551,6 +626,8 @@ export function Rail({
           <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
         ))
       )}
+      <Rule label="GOAL" width={width} />
+      <GoalLine turn={s.turn} width={width} />
       <Rule label="PLAN" width={width} />
       <PlanBody entries={s.plan} />
       <Rule label="CHECKS" width={width} />
@@ -682,14 +759,25 @@ export function Dock({
   // The file the agent wrote last, by mtime. Recomputed on the poll rather
   // than during render because it is a stat per changed file.
   const [newestPath, setNewestPath] = useState("");
+  // Which change is under review, and the baselines the rail captured for
+  // the two scopes that are not simply "everything uncommitted".
+  const [scope, setScope] = useState<Scope>("head");
+  const [base, setBase] = useState<Shared>({});
+  const [scoped, setScoped] = useState<FileDiff[]>([]);
   // The rail's last pick this pane has already acted on. Without it every
   // poll re-pins the pane to the same file and `f` never sticks.
   const seenPick = useRef(0);
 
-  // ponytail: HEAD only. TURN and SESSION need baselines the rail owns; the
-  // scope is threaded through everything here so adding them is wiring.
-  const scope: Scope = "head";
-  const files = s.repo.diffs;
+  const head = s.repo.diffs;
+  const tree = scope === "turn" ? base.turn : scope === "session" ? base.session : undefined;
+  const files = scope === "head" ? head : scoped;
+  // Said out loud, never papered over with another scope's diff.
+  const note =
+    scope === "head" || tree !== undefined
+      ? undefined
+      : scope === "turn"
+        ? (base.turnWhy ?? "no request read yet — press c in the rail to start one")
+        : "session baseline could not be created";
 
   useEffect(() => {
     let live = true;
@@ -697,7 +785,15 @@ export function Dock({
       const state = await readShared(session);
       if (!live) return;
       setChecks(state.checks);
-      const n = await newest(cwd, files);
+      setBase(state);
+
+      // The scoped diff is tree-against-tree, so it costs a capture; the
+      // HEAD scope stays the cheap `git diff HEAD` the rail already ran.
+      const from = scope === "turn" ? state.turn : scope === "session" ? state.session : undefined;
+      const list = scope === "head" ? head : from === undefined ? [] : await scopedDiff(cwd, from);
+      if (!live) return;
+      if (scope !== "head") setScoped(list);
+      const n = await newest(cwd, list);
       if (!live) return;
       setNewestPath(n?.path ?? "");
 
@@ -707,7 +803,7 @@ export function Dock({
         seenPick.current = at;
         // A file the reader picked in the rail outranks the file the agent
         // wrote last: they are looking at something on purpose.
-        if (files.some((f) => f.path === picked)) {
+        if (list.some((f) => f.path === picked)) {
           setPreview(null);
           setPos({ path: picked, top: 0, pinned: true });
           return;
@@ -723,7 +819,7 @@ export function Dock({
       }
       // A previewed file the agent has since edited becomes a diff: the
       // reader picked that path, and the change to it is the newer answer.
-      if (preview !== null && files.some((f) => f.path === preview.path)) {
+      if (preview !== null && list.some((f) => f.path === preview.path)) {
         setPreview(null);
         setPos({ path: preview.path, top: 0, pinned: true });
       }
@@ -731,19 +827,27 @@ export function Dock({
     return () => {
       live = false;
     };
-  }, [cwd, session, files, preview]);
+  }, [cwd, session, head, preview, scope]);
 
   const failures = problemLines(checks, preview?.path ?? pos.path, width);
   // Two for the border and title tmux draws, one for the key line below.
   const room = Math.max(3, rows - 3 - failures.length);
-  const v = view({ pos, files, rows: room, newest: newestPath, scope });
+  const v = view({ pos, files, rows: room, newest: newestPath, scope, note });
 
   useInput(
     (input, key) => {
+      const picked = scopeFor(input);
+      if (picked !== undefined) {
+        // The position survives the change: the same file is usually in the
+        // next scope too, and `view` hands the pane back to follow when it
+        // is not.
+        setScope(picked);
+        return;
+      }
       const action = actionFor(input, key);
       if (action === undefined) return;
       setPreview(null);
-      setPos(move({ pos, files, rows: room, newest: newestPath, scope }, action));
+      setPos(move({ pos, files, rows: room, newest: newestPath, scope, note }, action));
     },
     // tmux only delivers keys to the focused pane, so this is inert until
     // the reader moves the keyboard here — the agent keeps every key

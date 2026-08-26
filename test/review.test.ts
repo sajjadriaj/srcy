@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
-import { START, actionFor, move, view, type Review } from "../src/review.js";
+import { START, actionFor, move, scopeFor, view, type Review } from "../src/review.js";
 
 const raw = `diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -167,4 +167,24 @@ test("every key the pane advertises is bound", () => {
   assert.equal(actionFor("", { pageUp: true }), "page-up");
   // Anything else belongs to whoever else is listening.
   assert.equal(actionFor("z"), undefined);
+});
+
+// The scope label has to mean what it says. A TURN with no baseline shows
+// nothing and explains itself; it never quietly renders HEAD's diff under
+// TURN's title, which is the one failure that makes the label worse than
+// having no scopes at all.
+test("a scope with no baseline says why rather than showing another one's diff", () => {
+  const v = view(r({ scope: "turn", note: "the agent was already writing — press c to start one" }));
+  assert.equal(v.lines.length, 0);
+  assert.equal(v.file, undefined);
+  assert.match(v.title, /TURN/);
+  assert.match(v.title, /already writing/);
+});
+
+test("1, 2 and 3 pick the three scopes and nothing else does", () => {
+  assert.equal(scopeFor("1"), "turn");
+  assert.equal(scopeFor("2"), "session");
+  assert.equal(scopeFor("3"), "head");
+  assert.equal(scopeFor("4"), undefined);
+  assert.equal(scopeFor("f"), undefined);
 });

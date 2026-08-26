@@ -4,7 +4,9 @@ import { join } from "node:path";
 import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
-import { parseUsage, projectDir } from "../src/transcript.js";
+import { parseState, parseUsage, projectDir } from "../src/transcript.js";
+import { foldLine as codexFold } from "../src/codex.js";
+import { emptyFold, stateOf } from "../src/transcript.js";
 import { newRepo } from "./helpers.js";
 
 // One assistant record, shaped the way Claude Code writes them.
@@ -71,3 +73,64 @@ test("the transcript directory is named the way Claude Code names it", () => {
   assert.match(projectDir("/home/u/p/.srcy/wt/s1"), /projects\/-home-u-p--srcy-wt-s1$/);
 });
 
+
+// One user record and one tool call, shaped the way Claude Code writes them.
+function said(text: unknown, at: string, extra: Record<string, unknown> = {}): string {
+  return JSON.stringify({ type: "user", timestamp: at, ...extra, message: { role: "user", content: text } });
+}
+
+function called(name: string, at: string): string {
+  return JSON.stringify({
+    type: "assistant",
+    timestamp: at,
+    message: { role: "assistant", content: [{ type: "tool_use", id: `t-${name}`, name, input: { file_path: "a.ts" } }] },
+  });
+}
+
+test("the turn is what the reader typed, not everything shaped like a user record", () => {
+  const s = parseState(
+    [
+      said("first request", "2026-08-25T10:00:00.000Z"),
+      // A tool result is a user record too — that is how the transcript
+      // carries it — and so is anything the CLI injects, which arrives
+      // wrapped in a tag. Neither is a request.
+      said([{ type: "tool_result", tool_use_id: "t-Read", content: "..." }], "2026-08-25T10:00:01.000Z"),
+      said("<system-reminder>be good</system-reminder>", "2026-08-25T10:00:02.000Z"),
+      said("second request", "2026-08-25T10:00:03.000Z"),
+      // A subagent's turn is not the session's turn.
+      said("a subagent's brief", "2026-08-25T10:00:04.000Z", { isSidechain: true }),
+    ].join("\n"),
+  );
+  assert.equal(s.turn?.text, "second request");
+  assert.equal(s.turn?.at, Date.parse("2026-08-25T10:00:03.000Z"));
+});
+
+test("a read is not a write, and an unknown tool is", () => {
+  // The asymmetry is the point: a baseline that quietly contains half the
+  // agent's work hides the change the reader opened it to see.
+  const read = parseState([said("go", "2026-08-25T10:00:00.000Z"), called("Read", "2026-08-25T10:00:01.000Z")].join("\n"));
+  assert.equal(read.wrote, undefined);
+
+  const wrote = parseState([said("go", "2026-08-25T10:00:00.000Z"), called("Edit", "2026-08-25T10:00:02.000Z")].join("\n"));
+  assert.equal(wrote.wrote, Date.parse("2026-08-25T10:00:02.000Z"));
+
+  const mcp = parseState([called("mcp__something__do", "2026-08-25T10:00:03.000Z")].join("\n"));
+  assert.equal(mcp.wrote, Date.parse("2026-08-25T10:00:03.000Z"));
+});
+
+test("Codex's request and its writes read the same way", () => {
+  const f = emptyFold();
+  const line = (payload: unknown, at: string): string => JSON.stringify({ timestamp: at, payload });
+  for (const l of [
+    // Codex opens every session by injecting the environment as a user turn.
+    line({ type: "message", role: "user", content: [{ type: "input_text", text: "<environment_context>cwd</environment_context>" }] }, "2026-08-25T10:00:00.000Z"),
+    line({ type: "message", role: "user", content: [{ type: "input_text", text: "make it green" }] }, "2026-08-25T10:00:01.000Z"),
+    line({ type: "function_call", call_id: "c1", name: "update_plan", arguments: "{}" }, "2026-08-25T10:00:02.000Z"),
+    line({ type: "function_call", call_id: "c2", name: "shell", arguments: '{"command":["ls"]}' }, "2026-08-25T10:00:03.000Z"),
+  ]) {
+    codexFold(f, l);
+  }
+  const s = stateOf(f);
+  assert.equal(s.turn?.text, "make it green");
+  assert.equal(s.wrote, Date.parse("2026-08-25T10:00:03.000Z"));
+});

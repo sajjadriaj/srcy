@@ -95,8 +95,57 @@ interface Block {
 
 interface Entry {
   isSidechain?: boolean;
+  type?: unknown;
   timestamp?: unknown;
   message?: { content?: unknown };
+}
+
+// Tools that cannot change the working tree. Everything else is treated as
+// though it can — including anything unrecognised, an MCP tool, or a
+// subagent — because the cost of the two mistakes is not symmetric: a
+// baseline that quietly contains half the agent's work hides exactly the
+// change the reader opened it to see, while a missing one says so out loud.
+const READS = new Set([
+  "Read",
+  "Glob",
+  "Grep",
+  "LS",
+  "WebFetch",
+  "WebSearch",
+  "TodoWrite",
+  "NotebookRead",
+  "ExitPlanMode",
+  "AskUserQuestion",
+]);
+
+export function writes(tool: string): boolean {
+  return !READS.has(tool);
+}
+
+// What the reader actually typed, or "" if this user record is machinery.
+//
+// A tool result is a user record too — that is how the transcript carries
+// it — and so are slash-command expansions, hook output and system
+// reminders, which arrive wrapped in a tag. None of them is a request, and
+// treating one as the turn would move the baseline under the agent's feet.
+function userText(content: unknown): string {
+  if (typeof content === "string") return spoken(content);
+  if (!Array.isArray(content)) return "";
+  if (content.some((b) => (b as Block).type === "tool_result")) return "";
+  return spoken(
+    content
+      .filter((b) => (b as Block).type === "text")
+      .map((b) => String((b as { text?: unknown }).text ?? ""))
+      .join(" "),
+  );
+}
+
+// Exported so the Codex reader applies the same rule: both agents wrap the
+// machinery they inject into a user turn in a tag, and two copies of this
+// test would drift apart the first time one of them added a new one.
+export function spoken(text: string): string {
+  const t = text.trim();
+  return t.startsWith("<") ? "" : t;
 }
 
 // What the agent is doing right now, for the header line. Null once the
@@ -112,9 +161,22 @@ export interface Activity {
   since?: number;
 }
 
+// The request the agent is working on, as the reader typed it.
+export interface Turn {
+  at: number;
+  text: string;
+}
+
 export interface State {
   plan: PlanEntry[];
   activity: Activity | null;
+  // The newest thing the reader asked for. It is the rail's GOAL line, and
+  // the moment a TURN baseline is taken from.
+  turn?: Turn;
+  // When the agent last started a tool call that could change the tree. A
+  // baseline is only honest if nothing like this happened after the request
+  // it claims to start from.
+  wrote?: number;
 }
 
 // The subset of an Edit/Write/Read/Bash input worth putting in a one-line
@@ -158,6 +220,8 @@ export function parseState(text: string): State {
 export interface Fold {
   plan: PlanEntry[];
   open: Map<string, Activity>;
+  turn?: Turn;
+  wrote?: number;
   output: number;
   last: { used: number; cached: number } | null;
   // Set only by agents that record it. Codex writes the real number with
@@ -185,7 +249,8 @@ export function foldLine(f: Fold, line: string): void {
   // the only part of this path anyone could feel.
   const usage = line.includes('"usage"');
   const tools = line.includes('"tool_use"') || line.includes('"tool_result"');
-  if (!usage && !tools) return;
+  const spoke = line.includes('"type":"user"');
+  if (!usage && !tools && !spoke) return;
 
   let rec: Line & Entry;
   try {
@@ -213,6 +278,10 @@ export function foldLine(f: Fold, line: string): void {
   // two unrelated pieces of work.
   if (rec.isSidechain === true) return;
   const content = rec.message?.content;
+  if (rec.type === "user") {
+    const text = userText(content);
+    if (text !== "" && at !== undefined) f.turn = { at, text };
+  }
   if (!Array.isArray(content)) return;
   for (const raw of content) {
     const b = raw as Block & { id?: unknown; tool_use_id?: unknown };
@@ -226,8 +295,10 @@ export function foldLine(f: Fold, line: string): void {
             .map((t) => ({ content: t.content, status: typeof t.status === "string" ? t.status : "pending" }));
         }
       }
+      const name = typeof b.name === "string" ? b.name : "?";
+      if (at !== undefined && writes(name)) f.wrote = at;
       if (typeof b.id === "string") {
-        f.open.set(b.id, { tool: typeof b.name === "string" ? b.name : "?", target: targetOf(b.input), since: at });
+        f.open.set(b.id, { tool: name, target: targetOf(b.input), since: at });
       }
     } else if (b.type === "tool_result" && typeof b.tool_use_id === "string") {
       f.open.delete(b.tool_use_id);
@@ -246,7 +317,10 @@ export function stateOf(f: Fold): State {
   // one started is the one a reader is watching for.
   let activity: Activity | null = null;
   for (const v of f.open.values()) activity = v;
-  return { plan: f.plan, activity };
+  const s: State = { plan: f.plan, activity };
+  if (f.turn !== undefined) s.turn = f.turn;
+  if (f.wrote !== undefined) s.wrote = f.wrote;
+  return s;
 }
 
 export function usageOf(f: Fold): Usage | null {
