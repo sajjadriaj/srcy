@@ -7,7 +7,8 @@ import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type PlanEntry, type Usage } from "./cockpit.js";
 import { KEYS, START, actionFor, move, scopeFor, view, type Position, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
-import { runChecks, type CheckResult, type Problem } from "./checks.js";
+import type { Problem } from "./checks.js";
+import { loadGates, problemsOf, runGate, summarise, type Gate, type GateResult } from "./gates.js";
 import { listPaths, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
@@ -107,7 +108,9 @@ interface Shared {
   // again — and the dock would re-pin the pane every second, which is one
   // way of saying `f` does nothing.
   pickedAt?: number;
-  checks?: CheckResult | null;
+  // Every gate's verdict, so the dock can print the messages the rail has no
+  // width for without running anything itself.
+  gates?: GateResult[];
 }
 
 function statePath(session: string): string {
@@ -176,12 +179,15 @@ interface Watched {
   usage: Usage | null;
   activity: Activity | null;
   turn: Turn | null;
-  checks: CheckResult | null | undefined;
-  // The tree has moved since that check ran, so its verdict describes code
-  // that no longer exists. A red CHECKS from thirty seconds ago reads
-  // exactly like a red CHECKS from now, and only one of them is worth
-  // interrupting the agent over.
-  stale: boolean;
+  // What this project verifies, and what each of those has said. The
+  // verdicts carry the tree they were measured against, so "passing" and
+  // "passed, before the last three edits" are different things on screen.
+  gates: Gate[];
+  results: GateResult[];
+  gateError?: string;
+  // The gate running right now, or "" — a verdict from before it started is
+  // not what is happening now.
+  running: string;
 }
 
 const EMPTY: Watched = {
@@ -190,8 +196,9 @@ const EMPTY: Watched = {
   usage: null,
   activity: null,
   turn: null,
-  checks: undefined,
-  stale: false,
+  gates: [],
+  results: [],
+  running: "",
 };
 
 // "Has the working tree changed" — by content, not by churn counts.
@@ -239,7 +246,15 @@ export function checkStep(
 // `rail` is the pane that shows everything. The dock shows one diff, so it
 // neither runs the project's checker nor opens the transcript — work whose
 // result it would never draw.
-function useWatch(cwd: string, rail: boolean, source: Source | null, session = ""): Watched {
+function useWatch(
+  cwd: string,
+  rail: boolean,
+  source: Source | null,
+  session = "",
+  // Gates the reader asked for by hand. A ref rather than state: pressing
+  // `r` is a request for work, not a reason to re-render.
+  asked?: React.RefObject<string[]>,
+): Watched {
   const [state, setState] = useState<Watched>(EMPTY);
   // Refs, not state: these drive when work happens, and re-rendering because
   // a fingerprint changed would be a render per poll forever.
@@ -249,10 +264,15 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
   // checker never runs at all on a repo that was already clean.
   const mark = useRef<string | null>(null);
   const quietSince = useRef(0);
-  const checking = useRef(false);
-  const problems = useRef<CheckResult | null | undefined>(undefined);
-  // The fingerprint the current result was measured against.
-  const checkedFor = useRef<string | null>(null);
+  // What this project verifies, what has run, and what is running. The
+  // queue is why gates run one at a time: they are the project's own
+  // commands, and two compilers over one tree cost more than they save.
+  const config = useRef<Gate[]>([]);
+  const configError = useRef<string | undefined>(undefined);
+  const configFor = useRef<string | null>(null);
+  const results = useRef<GateResult[]>([]);
+  const queue = useRef<string[]>([]);
+  const running = useRef("");
   // The baselines the scoped reviews diff against: one for the session, one
   // for the newest request. Refs because capturing is work, not a render.
   const sessionTree = useRef<string | null>(null);
@@ -267,7 +287,7 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
 
     const tick = async (): Promise<void> => {
       try {
-        const repo = await repoState(cwd, problems.current?.problems ?? []);
+        const repo = await repoState(cwd, problemsOf(results.current));
         const t = rail && source !== null ? await readSession(cwd, source) : null;
         if (!live) return;
         const fp = fingerprint(repo);
@@ -277,8 +297,10 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
           usage: t?.usage ?? null,
           activity: t?.activity ?? null,
           turn: t?.turn ?? null,
-          checks: problems.current,
-          stale: problems.current !== undefined && checkedFor.current !== null && checkedFor.current !== fp,
+          gates: config.current,
+          results: results.current,
+          gateError: configError.current,
+          running: running.current,
         });
 
         if (rail) {
@@ -302,26 +324,41 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
             publish(session, await baseline(cwd, source, marker));
           }
 
-          const step = checkStep(fp, mark.current, quietSince.current, Date.now(), checking.current);
+          // What this project verifies, re-read when the tree moves —
+          // which is what editing .srcy/config.json does.
+          if (configFor.current !== fp) {
+            configFor.current = fp;
+            const loaded = await loadGates(cwd);
+            config.current = loaded.gates;
+            configError.current = loaded.error;
+          }
+
+          const step = checkStep(fp, mark.current, quietSince.current, Date.now(), running.current !== "");
           mark.current = step.mark;
           quietSince.current = step.quietSince;
-          if (step.run) {
-            checking.current = true;
-            // Deliberately not awaited inside the tick: a typecheck can take
-            // ten seconds, and the rail must keep updating while it runs.
-            const ranFor = step.mark;
-            void runChecks(cwd, cwd)
-              .then((r) => {
-                problems.current = r;
-                checkedFor.current = ranFor;
-                // The rail has room for `session.ts:3`. The message goes to
-                // the pane with the width to print it.
-                publish(session, { checks: r });
-              })
-              .catch(() => {})
-              .finally(() => {
-                checking.current = false;
-              });
+          if (step.run) queue.current.push(...config.current.filter((g) => g.auto).map((g) => g.name));
+          if (asked !== undefined && asked.current.length > 0) queue.current.push(...asked.current.splice(0));
+
+          if (running.current === "" && queue.current.length > 0) {
+            const name = queue.current.shift()!;
+            const gate = config.current.find((g) => g.name === name);
+            if (gate !== undefined) {
+              running.current = name;
+              // Deliberately not awaited inside the tick: a typecheck can
+              // take ten seconds, and the rail must keep updating while it
+              // runs. The next one starts on the tick after this finishes.
+              void runGate(cwd, gate, fp)
+                .then((r) => {
+                  results.current = [...results.current.filter((x) => x.name !== r.name), r];
+                  // The rail has room for `session.ts:3`. The message goes
+                  // to the pane with the width to print it.
+                  publish(session, { gates: results.current });
+                })
+                .catch(() => {})
+                .finally(() => {
+                  running.current = "";
+                });
+            }
           }
         }
       } catch {
@@ -337,7 +374,7 @@ function useWatch(cwd: string, rail: boolean, source: Source | null, session = "
       live = false;
       clearTimeout(timer);
     };
-  }, [cwd, rail, source, session]);
+  }, [cwd, rail, source, session, asked]);
 
   return state;
 }
@@ -353,47 +390,110 @@ export function Rule({ label, width }: { label: string; width: number }): React.
 // doing more harm than the count alone.
 const RAIL_PROBLEMS = 3;
 
-export function NarrowChecks({
-  result,
+export function GateRows({
+  gates,
+  results,
+  mark,
+  running,
+  error,
   width,
-  stale = false,
 }: {
-  result: CheckResult | null | undefined;
+  gates: Gate[];
+  results: GateResult[];
+  // The tree the rail is looking at now. A verdict measured against another
+  // one is said to be stale rather than shown as a current pass: acting on a
+  // stale pass is the expensive mistake.
+  mark: string;
+  running: string;
+  error?: string;
   width: number;
-  // The code moved since this ran. Said out loud rather than shown as a
-  // current verdict, because acting on a stale pass is the expensive mistake.
-  stale?: boolean;
 }): React.JSX.Element {
-  if (result === undefined) return <Text dimColor>{"  not run yet"}</Text>;
-  if (result === null) return <Text dimColor>{"  none configured"}</Text>;
-  const age = stale ? " · code moved since" : "";
-  if (result.ok) {
-    return stale ? (
-      <Text dimColor>{`  ✔ ${result.command}${age}`.slice(0, width)}</Text>
-    ) : (
-      <Text color="green">{`  ✔ ${result.command}`.slice(0, width)}</Text>
+  if (gates.length === 0) {
+    // Deliberately not silent: a project with nothing configured should
+    // learn that it could have something, exactly when it would matter.
+    return (
+      <Box flexDirection="column">
+        {error !== undefined && <Text color="red">{clipTo(`  ${error}`, width)}</Text>}
+        <Text dimColor>{clipTo("  none configured — add .srcy/config.json or an executable .srcy/check", width)}</Text>
+      </Box>
     );
   }
-  const shown = result.problems.slice(0, RAIL_PROBLEMS);
-  const files = new Set(result.problems.map((p) => p.path)).size;
+  const by = new Map(results.map((r) => [r.name, r]));
+  const problems = problemsOf(results);
+  const shown = problems.slice(0, RAIL_PROBLEMS);
   return (
     <Box flexDirection="column">
-      <Text color={stale ? undefined : "red"} dimColor={stale}>
-        {`  ✖ ${result.problems.length} in ${files} file${files === 1 ? "" : "s"}${age}`.slice(0, width)}
-      </Text>
+      {error !== undefined && <Text color="red">{clipTo(`  ${error}`, width)}</Text>}
+      {gates.map((g) => (
+        <GateLine key={g.name} gate={g} result={by.get(g.name)} mark={mark} running={running === g.name} width={width} />
+      ))}
       {shown.map((p, i) => (
         // Truncated rather than wrapped: a TypeScript message is longer than
         // this column and wrapping one costs four rows that the next failure
         // needed. The dock has the width to show it in full.
         <Text key={i} dimColor>
-          {`  ${p.path.split("/").pop() ?? p.path}:${p.line}`.slice(0, width)}
+          {clipTo(`  ${p.path.split("/").pop() ?? p.path}:${p.line}`, width)}
         </Text>
       ))}
-      {result.problems.length > shown.length ? (
-        <Text dimColor>{`  …and ${result.problems.length - shown.length} more`}</Text>
-      ) : null}
+      {problems.length > shown.length ? <Text dimColor>{`  …and ${problems.length - shown.length} more`}</Text> : null}
     </Box>
   );
+}
+
+// How wide the name column is before the verdict starts. Long enough for
+// "typecheck", short enough to leave the verdict room in a narrow rail.
+const GATE_NAME = 10;
+
+export function GateLine({
+  gate,
+  result,
+  mark,
+  running,
+  width,
+}: {
+  gate: Gate;
+  result: GateResult | undefined;
+  mark: string;
+  running: boolean;
+  width: number;
+}): React.JSX.Element {
+  const name = gate.name.slice(0, GATE_NAME).padEnd(GATE_NAME);
+  if (running) return <Text color="cyan">{clipTo(`  ${name} running…`, width)}</Text>;
+  // Undefined is "we have not run this yet" — never the same as a pass. An
+  // automatic gate is waiting for the tree to settle; a manual one is
+  // waiting for you, and says which.
+  if (result === undefined) {
+    return <Text dimColor>{clipTo(`  ${name} ${gate.auto ? "not run yet" : "not run — press r"}`, width)}</Text>;
+  }
+  const stale = result.mark !== mark;
+  const age = stale ? " · code moved since" : "";
+  const took = `${elapsed(result.ms)}`;
+  if (result.status === "pass") {
+    const text = `  ${name} ✔ ${took}${age}`;
+    return stale ? <Text dimColor>{clipTo(text, width)}</Text> : <Text color="green">{clipTo(text, width)}</Text>;
+  }
+  // A gate that ran out of time proved nothing either way, so it is neither
+  // a pass nor a failure — it is a thing to look at, with its own word.
+  const verdict =
+    result.status === "timeout"
+      ? "timed out"
+      : result.problems.length === 0
+        ? "failing"
+        : `✖ ${result.problems.length} in ${new Set(result.problems.map((p) => p.path)).size}`;
+  const text = `  ${name} ${verdict}${age}`;
+  return (
+    <Text color={stale ? undefined : "red"} dimColor={stale}>
+      {clipTo(text, width)}
+    </Text>
+  );
+}
+
+// The heading. Fresh passes over configured gates, and how many want
+// looking at — the two numbers that decide whether the turn is done.
+export function gatesLabel(gates: Gate[], results: GateResult[], mark: string): string {
+  if (gates.length === 0) return "GATES";
+  const { passing, total, attention } = summarise(gates, results, mark);
+  return `GATES ${passing}/${total}${attention > 0 ? `  ${attention} to look at` : ""}`;
 }
 
 // One line, and no heading above it.
@@ -472,10 +572,14 @@ export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX): s
 // budget below rather than eyeballed: a section that renders one line more
 // than the budget assumed pushes the gauge off the bottom of the pane, and
 // Ink overdraws rather than scrolling — rows land on top of each other.
-export function checksRows(result: CheckResult | null | undefined): number {
-  if (result === undefined || result === null || result.ok) return 1;
-  const shown = Math.min(RAIL_PROBLEMS, result.problems.length);
-  return 1 + shown + (result.problems.length > shown ? 1 : 0);
+//
+// GATES is now as tall as the project has gates, plus what failed.
+export function gateRows(gates: Gate[], results: GateResult[], error?: string): number {
+  const head = error === undefined ? 0 : 1;
+  if (gates.length === 0) return head + 1;
+  const problems = problemsOf(results).length;
+  const shown = Math.min(RAIL_PROBLEMS, problems);
+  return head + gates.length + shown + (problems > shown ? 1 : 0);
 }
 
 // One line whatever it holds. Still measured through this function rather
@@ -559,7 +663,10 @@ export function Rail({
   session?: string;
   interactive?: boolean;
 }): React.JSX.Element {
-  const s = useWatch(cwd, true, source, session);
+  // Gates the reader asked for by hand, handed to the poll loop that owns
+  // running them.
+  const asked = useRef<string[]>([]);
+  const s = useWatch(cwd, true, source, session, asked);
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
 
@@ -589,6 +696,13 @@ export function Rail({
       // scope for an agent srcy cannot read, and the way back when an
       // automatic baseline was refused because the agent was already
       // writing when the request landed.
+      // Run everything the project verifies, now. Including the gates that
+      // opted out of running themselves, which is the whole reason to have
+      // a key for this: the slow ones are the ones you ask for.
+      if (input === "r") {
+        asked.current.push(...s.gates.map((g) => g.name));
+        return;
+      }
       if (input === "c") {
         void captureTree(cwd).then((tree) =>
           publish(session, tree === null ? { turnWhy: "baseline could not be created" } : { turn: tree, turnWhy: undefined }),
@@ -613,7 +727,10 @@ export function Rail({
     { isActive: interactive && process.stdin.isTTY === true },
   );
 
-  const budget = height === undefined ? undefined : mapBudget(height, s.plan.length, checksRows(s.checks), usageRows(s.usage));
+  const budget =
+    height === undefined
+      ? undefined
+      : mapBudget(height, s.plan.length, gateRows(s.gates, s.results, s.gateError), usageRows(s.usage));
   const view = treeWindow(visible.length, at, Math.max(1, (budget ?? visible.length) - 1));
 
   return (
@@ -630,8 +747,15 @@ export function Rail({
       <GoalLine turn={s.turn} width={width} />
       <Rule label="PLAN" width={width} />
       <PlanBody entries={s.plan} />
-      <Rule label="CHECKS" width={width} />
-      <NarrowChecks result={s.checks} width={width} stale={s.stale} />
+      <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} />
+      <GateRows
+        gates={s.gates}
+        results={s.results}
+        mark={s.repo.mark}
+        running={s.running}
+        error={s.gateError}
+        width={width}
+      />
       {/* Pushes the gauge to the bottom edge, so it is in the same place
           whether the session has touched two files or twenty. A number you
           have to hunt for is a number you stop reading. It carries no
@@ -712,28 +836,23 @@ const DOCK_PROBLEMS = 4;
 // Returned as strings rather than rendered here so the dock can count them:
 // the diff below has to give up exactly these rows, and Ink overdraws rather
 // than scrolling when it does not.
-export function problemLines(
-  checks: CheckResult | null | undefined,
-  focus: string | undefined,
-  width: number,
-): string[] {
-  if (checks === undefined || checks === null || checks.ok) return [];
-  // The file on screen first: its failures are the ones the diff underneath
-  // is about. The rest still show, because a tree that does not compile is
-  // worth reading whichever file you happened to be looking at.
-  const ordered = [
-    ...checks.problems.filter((p) => p.path === focus),
-    ...checks.problems.filter((p) => p.path !== focus),
-  ];
-  if (ordered.length === 0) {
+export function problemLines(results: GateResult[], focus: string | undefined, width: number): string[] {
+  const failed = results.filter((r) => r.status === "fail" || r.status === "timeout");
+  if (failed.length === 0) return [];
+  const problems = problemsOf(failed);
+  if (problems.length === 0) {
     // A failure that named no location at all: the raw output is the only
     // thing there is to go on, and nowhere else shows it.
-    return checks.tail
+    return failed[0]!.tail
       .split("\n")
       .filter((l) => l.trim() !== "")
       .slice(-DOCK_PROBLEMS)
       .map((l) => `  ${l}`.slice(0, width));
   }
+  // The file on screen first: its failures are the ones the diff underneath
+  // is about. The rest still show, because a tree that does not compile is
+  // worth reading whichever file you happened to be looking at.
+  const ordered = [...problems.filter((p) => p.path === focus), ...problems.filter((p) => p.path !== focus)];
   const out = ordered
     .slice(0, DOCK_PROBLEMS)
     .map((p: Problem) => `  ✖ ${p.path}:${p.line}  ${p.message}`.slice(0, width));
@@ -755,7 +874,7 @@ export function Dock({
   const s = useWatch(cwd, false, null);
   const [pos, setPos] = useState<Position>(START);
   const [preview, setPreview] = useState<{ path: string; text: string } | null>(null);
-  const [checks, setChecks] = useState<CheckResult | null | undefined>(undefined);
+  const [gates, setGates] = useState<GateResult[]>([]);
   // The file the agent wrote last, by mtime. Recomputed on the poll rather
   // than during render because it is a stat per changed file.
   const [newestPath, setNewestPath] = useState("");
@@ -784,7 +903,7 @@ export function Dock({
     void (async () => {
       const state = await readShared(session);
       if (!live) return;
-      setChecks(state.checks);
+      setGates(state.gates ?? []);
       setBase(state);
 
       // The scoped diff is tree-against-tree, so it costs a capture; the
@@ -829,7 +948,7 @@ export function Dock({
     };
   }, [cwd, session, head, preview, scope]);
 
-  const failures = problemLines(checks, preview?.path ?? pos.path, width);
+  const failures = problemLines(gates, preview?.path ?? pos.path, width);
   // Two for the border and title tmux draws, one for the key line below.
   const room = Math.max(3, rows - 3 - failures.length);
   const v = view({ pos, files, rows: room, newest: newestPath, scope, note });

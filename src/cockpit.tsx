@@ -1,6 +1,6 @@
 import React from "react";
 import { Box, Text } from "ink";
-import type { CheckResult, Problem } from "./checks.js";
+import type { Problem } from "./checks.js";
 import type { FileDiff } from "./diff.js";
 
 // The two things a file can be to a session: changed against the base
@@ -140,80 +140,6 @@ export function PlanBar({ entries }: { entries: PlanEntry[] }): React.JSX.Elemen
       })}
     </Box>
   );
-}
-
-// How many failing locations the pane lists before summarising the rest.
-const PROBLEMS_SHOWN = 4;
-
-// ChecksPane is the red-squiggle line: does the code the agent just wrote
-// still build, and still pass. Four states, each of which has to look
-// different from the others — "not checked" reading like "passed" is the
-// one failure that would make the pane worse than not having it.
-export function ChecksPane({
-  result,
-  running,
-  focus,
-}: {
-  result: CheckResult | null | undefined;
-  running: boolean;
-  // The path the repo map's cursor is on, when the map has the keyboard.
-  focus?: string;
-}): React.JSX.Element | null {
-  if (running) {
-    return <Text dimColor>{"CHECKS  running…"}</Text>;
-  }
-  // Undefined is "we have not looked yet" — distinct from null, which is
-  // "we looked and there is nothing to run". Claiming a project has no
-  // checker before ever asking is the same class of lie as showing a pass.
-  if (result === undefined) return null;
-  if (result === null) {
-    // Deliberately not silent: a project with no check configured should
-    // learn that it could have one, exactly when it would have mattered.
-    return <Text dimColor>{"CHECKS  none configured — add an executable .srcy/check"}</Text>;
-  }
-  if (result.ok) {
-    return <Text color="green">{`CHECKS  ${result.command}  ✔ passing`}</Text>;
-  }
-  // Walking the cursor onto a failing file turns this pane into that file's
-  // failures — all of them, since there is only one file's worth. It is also
-  // the way out of "…and N more": the truncated list below is capped, and
-  // moving the cursor is how a reader reaches what it cut.
-  const scoped = focus === undefined ? [] : result.problems.filter((p) => p.path === focus);
-  if (scoped.length > 0) {
-    return (
-      <Box flexDirection="column">
-        <Text color="red">{`CHECKS  ${focus}  ✖ ${scoped.length}`}</Text>
-        {scoped.map((problem, i) => (
-          <Text key={i} color="red">
-            {`  ✖ line ${problem.line}  ${problem.message}`}
-          </Text>
-        ))}
-      </Box>
-    );
-  }
-  const shown = result.problems.slice(0, PROBLEMS_SHOWN);
-  const rest = result.problems.length - shown.length;
-  return (
-    <Box flexDirection="column">
-      <Text color="red">{`CHECKS  ${result.command}  ✖ failing`}</Text>
-      {shown.map((problem, i) => (
-        <Text key={i} color="red">
-          {`  ✖ ${problem.path}:${problem.line}  ${problem.message}`}
-        </Text>
-      ))}
-      {rest > 0 && <Text dimColor>{`  …and ${rest} more`}</Text>}
-      {/* With no parsed location the output is all there is to go on, so
-          the pane shows it rather than an empty failing header. */}
-      {result.problems.length === 0 && result.tail !== "" && <Text dimColor>{indent(result.tail)}</Text>}
-    </Box>
-  );
-}
-
-function indent(s: string): string {
-  return s
-    .split("\n")
-    .map((l) => `  ${l}`)
-    .join("\n");
 }
 
 // planFrom reads a "plan" session update defensively: it is the one update

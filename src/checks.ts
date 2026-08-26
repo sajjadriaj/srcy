@@ -10,16 +10,6 @@ export interface Problem {
   message: string;
 }
 
-export interface CheckResult {
-  command: string; // what ran, for display
-  ok: boolean;
-  problems: Problem[];
-  // The tail of combined stdout/stderr. Kept so a failure that names no
-  // file:line — a segfault, a missing binary, a bare "FAILED" — is still
-  // visible rather than silently reported as "0 problems".
-  tail: string;
-}
-
 // How long a check may run before it is killed. A check is something the
 // human is waiting on between turns, not a CI job.
 const TIMEOUT_MS = 120_000;
@@ -104,55 +94,62 @@ export function parseProblems(output: string, cwd: string): Problem[] {
   return problems;
 }
 
-// runChecks runs the project's own checker inside the worktree, so it sees
-// what the agent wrote and never touches the user's real tree. Returns null
-// when there is nothing to run — a project with no check configured must
-// read as "not checked", never as "checks passed".
-export async function runChecks(worktreePath: string, repo: string): Promise<CheckResult | null> {
-  const argv = await checkCommand(repo);
-  if (argv === null) return null;
+// runCommand runs one of the project's own commands inside the worktree and
+// collects everything it printed.
+//
+// The child gets its own process group so a timeout kills what it spawned
+// rather than the wrapper: npm execs into the real tool through a shell, and
+// killing npm alone leaves a compiler running for the rest of the session.
+export interface Ran {
+  text: string;
+  code: number | null;
+  // Distinct from a non-zero exit. A gate that ran out of time has not
+  // failed — nothing was proved either way — and rewriting it to "failing"
+  // sends the reader looking for a bug that may not exist.
+  timedOut: boolean;
+}
 
-  const output = await new Promise<{ text: string; code: number | null }>((resolve) => {
+export async function runCommand(argv: string[], cwd: string, timeoutMs = TIMEOUT_MS): Promise<Ran> {
+  return new Promise<Ran>((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), {
-      cwd: worktreePath,
+      cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      // The check is the user's own build script: it gets its own process
-      // group so a timeout can kill everything it spawned, not just the
-      // wrapper (npm execs into the real tool through a shell).
       detached: true,
     });
     let text = "";
+    let timedOut = false;
     const collect = (chunk: Buffer): void => {
       text += chunk.toString();
     };
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
     const timer = setTimeout(() => {
+      timedOut = true;
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {
         // already gone
       }
-      text += `\nsrcy: check timed out after ${TIMEOUT_MS / 1000}s`;
-    }, TIMEOUT_MS);
+      text += `\nsrcy: timed out after ${Math.round(timeoutMs / 1000)}s`;
+    }, timeoutMs);
     timer.unref();
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ text: `srcy: could not run check: ${err.message}`, code: 1 });
+      resolve({ text: `srcy: could not run ${argv[0]}: ${err.message}`, code: 1, timedOut });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ text, code });
+      resolve({ text, code, timedOut });
     });
   });
+}
 
-  const lines = output.text.split("\n").filter((l) => l.trim() !== "");
-  return {
-    // The script's absolute path is a temp-dir-length distraction in a
-    // status line; what the reader needs is which of the two it was.
-    command: argv[0] === join(repo, ".srcy", "check") ? ".srcy/check" : argv.join(" "),
-    ok: output.code === 0,
-    problems: output.code === 0 ? [] : parseProblems(output.text, worktreePath),
-    tail: lines.slice(-TAIL_LINES).join("\n"),
-  };
+// The last lines of a run, which is all any pane has room for — and the only
+// thing there is to show when a failure names no file at all.
+export function tailOf(text: string): string {
+  return text
+    .split("\n")
+    .filter((l) => l.trim() !== "")
+    .slice(-TAIL_LINES)
+    .join("\n");
 }

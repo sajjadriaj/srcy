@@ -10,9 +10,10 @@ import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, 
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir } from "../src/transcript.js";
-import { Dock, GoalLine, NarrowChecks, NarrowUsage, Rail, TreeLine, activityTitle, baseline, checkStep, checksRows, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateRows, GoalLine, NarrowUsage, Rail, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, cursorAt, elapsed, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
+import type { GateResult } from "../src/gates.js";
 import { TMUX, cmdline, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
 import { CLAUDE, advance, emptyFold, foldLine as claudeFold, newReader, parseState, parseUsage, stateOf, usageOf, type Source } from "../src/transcript.js";
 import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
@@ -262,31 +263,30 @@ test("the dock follows the file written last, not the first one alphabetically",
 // ---------------------------------------------------------------------------
 // Narrow rendering
 
-test("CHECKS in the rail counts first and lists second", () => {
-  const result = {
-    ok: false,
-    command: "npm run typecheck",
-    tail: "",
+test("GATES in the rail counts first and lists second", () => {
+  const problems = [
     // Real paths and real compiler messages, both far longer than a rail is
     // wide — a fixture that happens to fit proves nothing about clipping.
-    problems: [
-      { path: "src/auth/session.ts", line: 41, message: "error TS2532: Object is possibly 'undefined'." },
-      { path: "src/auth/session.ts", line: 52, message: "error TS2345: Argument of type 'string' is not assignable." },
-      { path: "src/auth/token.ts", line: 3, message: "error TS2304: Cannot find name 'verify'." },
-      { path: "src/panels/rail.tsx", line: 4, message: "error TS7006: Parameter implicitly has an 'any' type." },
-      { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'." },
-    ],
-  };
-  const frame = render(<NarrowChecks result={result} width={30} />).lastFrame() ?? "";
-  assert.match(frame, /✖ 5 in 4 files/);
+    { path: "src/auth/session.ts", line: 41, message: "error TS2532: Object is possibly 'undefined'." },
+    { path: "src/auth/session.ts", line: 52, message: "error TS2345: Argument of type 'string' is not assignable." },
+    { path: "src/auth/token.ts", line: 3, message: "error TS2304: Cannot find name 'verify'." },
+    { path: "src/panels/rail.tsx", line: 4, message: "error TS7006: Parameter implicitly has an 'any' type." },
+    { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'." },
+  ];
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const result: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1200, mark: "m", problems };
+  const frame = render(<GateRows gates={[gate]} results={[result]} mark="m" running="" width={30} />).lastFrame() ?? "";
+  assert.match(frame, /✖ 5 in 4/);
   assert.match(frame, /…and 2 more/);
   for (const line of frame.split("\n")) {
-    assert.ok(line.length <= 30, `checks row overflows the rail: ${JSON.stringify(line)}`);
+    assert.ok(line.length <= 30, `gate row overflows the rail: ${JSON.stringify(line)}`);
   }
-  // "not run yet" and "none configured" stay distinguishable: claiming a
-  // project has no checker before looking is the same lie as showing a pass.
-  assert.match(render(<NarrowChecks result={undefined} width={30} />).lastFrame() ?? "", /not run yet/);
-  assert.match(render(<NarrowChecks result={null} width={30} />).lastFrame() ?? "", /none configured/);
+  // "not run" and "none configured" stay distinguishable: claiming a project
+  // has no checker before looking is the same lie as showing a pass. And a
+  // manual gate says it is waiting for you, not for the tree to settle.
+  assert.match(render(<GateRows gates={[gate]} results={[]} mark="m" running="" width={30} />).lastFrame() ?? "", /not run yet/);
+  const manual = { ...gate, name: "e2e", auto: false };
+  assert.match(render(<GateRows gates={[manual]} results={[]} mark="m" running="" width={30} />).lastFrame() ?? "", /press r/);
 });
 
 test("the gauge is one line and the counts survive every rail width", () => {
@@ -326,17 +326,21 @@ const MANY = Array.from({ length: 12 }, (_, i) => ({
 test("the budget counts what the fixed sections actually draw", () => {
   // These numbers exist so the map can be sized around them. If a section
   // renders one line more than it claims, the gauge goes off the bottom.
-  const failing = {
-    ok: false,
-    command: "c",
-    tail: "",
-    problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m" })),
-  };
+  const gates = [
+    { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 },
+    { name: "unit", command: ["npm", "test"], auto: false, timeoutMs: 1000 },
+  ];
+  const broke: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1, mark: "m",
+    problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m" })) };
   const count = (el: React.JSX.Element): number => (render(el).lastFrame() ?? "").split("\n").length;
-  assert.equal(checksRows(undefined), count(<NarrowChecks result={undefined} width={30} />));
-  assert.equal(checksRows(null), count(<NarrowChecks result={null} width={30} />));
-  assert.equal(checksRows(failing), count(<NarrowChecks result={failing} width={30} />));
-  assert.equal(checksRows({ ...failing, ok: true, problems: [] }), count(<NarrowChecks result={{ ...failing, ok: true, problems: [] }} width={30} />));
+  const rows = (g: typeof gates, r: GateResult[], error?: string): React.JSX.Element => (
+    <GateRows gates={g} results={r} mark="m" running="" error={error} width={30} />
+  );
+  assert.equal(gateRows([], []), count(rows([], [])));
+  assert.equal(gateRows([], [], "bad"), count(rows([], [], "bad")));
+  assert.equal(gateRows(gates, []), count(rows(gates, [])));
+  assert.equal(gateRows(gates, [broke]), count(rows(gates, [broke])));
+  assert.equal(gateRows(gates, [{ ...broke, status: "pass", problems: [] }]), count(rows(gates, [{ ...broke, status: "pass", problems: [] }])));
   assert.equal(usageRows(null), count(<NarrowUsage usage={null} width={30} />));
   const bare = { used: 1, size: 2 };
   assert.equal(usageRows(bare), count(<NarrowUsage usage={bare} width={30} />));
@@ -700,7 +704,15 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
     render(<TreeLine row={{ path: "a.ts", name: "a.ts", depth: 1, dir: false,
       entry: { path: "a.ts", touch: "wrote" as const, added: 2, removed: 1, problems: 3 } }} width={24} cursor={false} />).lastFrame(),
     render(<NarrowUsage usage={{ used: 104_800, size: 200_000, output: 12_000, cached: 0.99 }} width={30} />).lastFrame(),
-    render(<NarrowChecks result={{ ok: false, command: "c", tail: "", problems: [{ path: "a.ts", line: 4, message: "boom" }] }} width={30} />).lastFrame(),
+    render(
+      <GateRows
+        gates={[{ name: "check", command: ["c"], auto: true, timeoutMs: 1000 }]}
+        results={[{ name: "check", status: "fail", tail: "", ms: 1, mark: "m", problems: [{ path: "a.ts", line: 4, message: "boom" }] }]}
+        mark="m"
+        running=""
+        width={30}
+      />,
+    ).lastFrame(),
   ];
   for (const frame of frames) {
     for (const ch of frame ?? "") {
@@ -803,32 +815,46 @@ test("the rail draws the project, the plan and the gauge from what is on disk", 
   }
 });
 
-test("a check whose code has already moved says so instead of reading as current", () => {
+test("a verdict whose code has already moved says so instead of reading as current", () => {
   // Acting on a stale pass is the expensive mistake: a green line from
   // thirty seconds ago looks exactly like a green line from now.
-  const failing = { ok: false, command: "npm run typecheck", tail: "",
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const broke: GateResult = { name: "typecheck", status: "fail", ms: 1200, mark: "then", tail: "",
     problems: [{ path: "src/a.ts", line: 1, message: "boom" }] };
-  const fresh = render(<NarrowChecks result={failing} width={40} />).lastFrame() ?? "";
-  const stale = render(<NarrowChecks result={failing} width={40} stale />).lastFrame() ?? "";
-  assert.doesNotMatch(fresh, /moved/);
-  assert.match(stale, /moved since/);
+  const row = (result: GateResult | undefined, mark: string): string =>
+    render(<GateRows gates={[gate]} results={result === undefined ? [] : [result]} mark={mark} running="" width={40} />).lastFrame() ?? "";
+  assert.doesNotMatch(row(broke, "then"), /moved/);
+  assert.match(row(broke, "now"), /moved since/);
   // A stale pass must not keep claiming the build is green.
-  const passing = { ...failing, ok: true, problems: [] };
-  assert.match(render(<NarrowChecks result={passing} width={40} stale />).lastFrame() ?? "", /moved since/);
-  assert.doesNotMatch(render(<NarrowChecks result={passing} width={40} />).lastFrame() ?? "", /moved/);
-  // Staleness is not a fourth state to confuse with the other three.
-  assert.match(render(<NarrowChecks result={undefined} width={40} stale />).lastFrame() ?? "", /not run yet/);
+  const green: GateResult = { ...broke, status: "pass", problems: [] };
+  assert.match(row(green, "now"), /moved since/);
+  assert.doesNotMatch(row(green, "then"), /moved/);
+  // Staleness is not another state to confuse with not-run or running.
+  assert.match(row(undefined, "now"), /not run/);
+  assert.match(
+    render(<GateRows gates={[gate]} results={[]} mark="now" running="typecheck" width={40} />).lastFrame() ?? "",
+    /running/,
+  );
+  // And the headline counts fresh passes over configured gates.
+  assert.match(gatesLabel([gate], [green], "then"), /GATES 1\/1/);
+  assert.match(gatesLabel([gate], [green], "now"), /GATES 0\/1.*look at/);
+  assert.equal(gatesLabel([], [], "now"), "GATES");
+});
+
+// A gate nobody configured must read as "we did not look", never as a pass.
+test("a project with nothing configured is told, not left blank", () => {
+  const frame = render(<GateRows gates={[]} results={[]} mark="now" running="" width={70} />).lastFrame() ?? "";
+  assert.match(frame, /none configured/);
+  const broken = render(<GateRows gates={[]} results={[]} mark="now" running="" width={70} error="bad config" />).lastFrame() ?? "";
+  assert.match(broken, /bad config/);
 });
 
 // ---------------------------------------------------------------------------
 // What the checker actually said
 
-const failing = (problems: { path: string; line: number; message: string }[], tail = ""): {
-  command: string;
-  ok: boolean;
-  problems: { path: string; line: number; message: string }[];
-  tail: string;
-} => ({ command: "npm run typecheck", ok: false, problems, tail });
+const failing = (problems: { path: string; line: number; message: string }[], tail = ""): GateResult[] => [
+  { name: "typecheck", status: "fail", problems, tail, ms: 1200, mark: "mark" },
+];
 
 test("the dock prints the message the rail has no room for", () => {
   const problems = [
@@ -841,13 +867,13 @@ test("the dock prints the message the rail has no room for", () => {
   assert.match(lines[0]!, /TS2345/, lines.join("\n"));
   assert.match(lines[1]!, /session\.ts:3/, lines.join("\n"));
   // Which is the whole point: the rail can say where, never what.
-  const rail = render(<NarrowChecks result={failing(problems)} width={30} />).lastFrame() ?? "";
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const rail = render(<GateRows gates={[gate]} results={failing(problems)} mark="mark" running="" width={30} />).lastFrame() ?? "";
   assert.doesNotMatch(rail, /TS2532/, rail);
 
-  // Nothing to say when the check passed, was never run, or does not exist.
-  assert.deepEqual(problemLines({ ...failing([]), ok: true }, "a.ts", 80), []);
-  assert.deepEqual(problemLines(undefined, "a.ts", 80), []);
-  assert.deepEqual(problemLines(null, "a.ts", 80), []);
+  // Nothing to say when every gate passed, or none has run.
+  assert.deepEqual(problemLines([{ ...failing([])[0]!, status: "pass" }], "a.ts", 80), []);
+  assert.deepEqual(problemLines([], "a.ts", 80), []);
 });
 
 test("the dock caps the failure list and says what it cut", () => {
@@ -885,10 +911,10 @@ test("the panels pass a check result between processes without tmux mangling it"
     message: `error TS2532: $HOME is possibly 'undefined' ${"x".repeat(400)}`,
   }));
   publish(session, { file: "src/auth/token.ts" });
-  publish(session, { checks: failing(problems, "tail") });
+  publish(session, { gates: failing(problems, "tail") });
   const got = await readShared(session);
   assert.equal(got.file, "src/auth/token.ts");
-  assert.deepEqual(got.checks?.problems, problems);
+  assert.deepEqual(got.gates?.[0]?.problems, problems);
 
   // An unwritten session is "nothing picked", not a crash.
   assert.deepEqual(await readShared(`srcy-test-absent-${process.pid}`), {});
@@ -916,7 +942,7 @@ test("the dock gives the diff the rows the failures took", async (t) => {
   );
   publish(session, {
     file: "a.ts",
-    checks: failing([
+    gates: failing([
       { path: "a.ts", line: 2, message: "error TS1000: nope" },
       { path: "a.ts", line: 3, message: "error TS1001: also nope" },
       { path: "a.ts", line: 4, message: "error TS1002: still nope" },
