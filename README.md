@@ -10,12 +10,12 @@ it.
 ![srcy](docs/demo.gif)
 
 <sub>Launch → the turn lands → `types` goes red while `lint`, which watches
-only `docs/`, stays green → `e` to the failing line → collapse the tree to
-what moved → pin a file → walk its hunks, side by side and back → zoom the
-agent → drag the border → the fix lands, **VERIFIED** → detach, and ask the
-same question with no panes at all. Real layout, real git repo, real
-transcript, real gates. Only the agent's turn is scripted; `npm run demo`
-reproduces it.</sub>
+only `docs/`, stays green → a tool srcy never invoked reports a counterexample
+beside it → `e` to the failing line → collapse the tree to what moved → pin a
+file → walk its hunks, side by side and back → zoom the agent → drag the
+border → the fix lands, **VERIFIED** → detach, and ask the same question with
+no panes at all. Real layout, real git repo, real transcript, real gates, real
+socket. Only the agent's turn is scripted; `npm run demo` reproduces it.</sub>
 
 ---
 
@@ -230,6 +230,7 @@ at a terminal. Same engine, same gates, same word.
 | `srcy checkpoint list` | every checkpoint |
 | `srcy checkpoint diff 3 5` | `git diff` between two of them (one argument = against now) |
 | `srcy timeline` | how the tree got here |
+| `srcy emit --source x --type y` | how another tool reports what it is doing |
 
 ```
 $ srcy status
@@ -277,7 +278,82 @@ shows the last verdict, correctly labelled stale, instead of `not run yet`.
 .srcy/state.json
 .srcy/events.jsonl
 .srcy/checkpoints.jsonl
+.srcy/srcy.sock
 ```
+
+---
+
+## Other tools
+
+srcy observes; it does not orchestrate. It never installs, invokes or polls
+another tool, and it works identically when none are installed. The whole
+integration contract is one line of JSON:
+
+```bash
+srcy emit --source proof --type proof.falsify.completed \
+          --level info --summary "Falsification passed"
+```
+
+```bash
+echo '{"version":1,"source":"proof","type":"proof.attack.counterexample",
+       "level":"error","summary":"Found counterexample","treeHash":"a81fc23"}' |
+  srcy emit --stdin
+```
+
+No SDK, no library, nothing to import — a hook in shell, Python, Rust, Go, a
+CI step or a git hook can do this. **`srcy emit` exits 0 when no srcy is
+listening**, so a tool that emits is a tool that still works on a machine
+where srcy has never been installed. `--strict` says otherwise, if the sender
+would rather know.
+
+| envelope | |
+|---|---|
+| `version` | `1`. Required, and an unknown version is refused rather than guessed at |
+| `source` | who is speaking. The first event establishes it; nothing to register |
+| `type` | `<source>.<category>.<action>` by convention, never enforced |
+| `level` | `info` \| `warning` \| `error` — the sender's own reading |
+| `summary` | one line, for the human reading the rail |
+| `treeHash` | the tree the work was about, as `git write-tree` spells it |
+| `timestamp` `sessionId` `metadata` | optional; `metadata` is carried untouched |
+
+Only the envelope is validated. `{"version":1,"source":"my-weird-tool",
+"type":"banana.completed","metadata":{"anything":true}}` is a valid event, and
+a malformed one loses only itself — a bug in somebody's hook can't take the
+session down.
+
+Events appear in the rail under `EVENTS`, in `srcy timeline`, and — when the
+sender set a `level` of `warning` or `error` — in `srcy status` under
+`Attention`:
+
+```
+─ EVENTS  proof benchmark ──────
+  ✖ proof Found counterexample
+  ! benchmark p99 regressed 14%
+```
+
+**srcy never revises a level.** A result the sender called `info` is
+information here, whatever its metadata might mean to someone who knew that
+tool — and srcy is the one reader that must not know. Per source, srcy
+repeats whichever level-bearing event came last: a tool that reported an
+error and later reported something fine has said the second thing more
+recently.
+
+A `treeHash` that is not the tree that is here now reads `· earlier tree`.
+That is the only thing srcy says about another tool's result.
+
+Inside a session, these are set for the agent and anything it runs — as
+discovery, never a requirement:
+
+```
+SRCY_ACTIVE=1
+SRCY_SESSION_ID=srcy-api-8f291
+SRCY_SOCKET=/repo/.srcy/srcy.sock
+```
+
+The endpoint is a local Unix socket, mode `0600`, never a network listener.
+Events are capped at 64 KB and land in the same `.srcy/events.jsonl` srcy
+writes its own to — an event is an event. Add `.srcy/srcy.sock` to
+`.gitignore` with the rest.
 
 ---
 

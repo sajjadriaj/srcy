@@ -4,8 +4,9 @@ import { realpathSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git } from "./git.js";
+import { socketPath } from "./events.js";
 import { renderPanel } from "./panels.js";
-import { checkpoint, doctor, mission, status, timeline, verify } from "./status.js";
+import { checkpoint, doctor, emit, mission, status, timeline, verify } from "./status.js";
 import { attach, have, launch, resize, sessionExists } from "./tmux.js";
 
 // repoRoot resolves the repository srcy is being run from, or explains why
@@ -18,6 +19,11 @@ async function repoRoot(): Promise<string> {
     console.error(`srcy must be run inside a git repository. (${detail})`);
     process.exit(1);
   }
+}
+
+// repoRoot, for the one caller that must not exit 1 on its own account.
+async function quietRepoRoot(): Promise<string | null> {
+  return git(process.cwd(), "rev-parse", "--show-toplevel").catch(() => null);
 }
 
 function die(msg: string): never {
@@ -88,6 +94,14 @@ async function main(): Promise<void> {
   if (argv[0] === "mission") return void process.exit(await mission(await repoRoot(), argv[1], argv.slice(2)));
   if (argv[0] === "checkpoint") return void process.exit(await checkpoint(await repoRoot(), argv[1], argv.slice(2)));
   if (argv[0] === "timeline") return void process.exit(await timeline(await repoRoot()));
+  // How another tool reports what it is doing. Never a reason for that tool
+  // to fail: no repository, no listener, nothing srcy understands — all of
+  // them exit 0 unless the sender asked for --strict.
+  if (argv[0] === "emit") {
+    const repo = await quietRepoRoot();
+    if (repo === null) return void process.exit(argv.includes("--strict") ? 1 : 0);
+    return void process.exit(await emit(repo, argv.slice(1)));
+  }
 
   let agent: string[], name: string | undefined;
   try {
@@ -118,6 +132,14 @@ async function main(): Promise<void> {
       {
         session,
         repo,
+        // Discovery, not a requirement. A hook that wants to report what it
+        // is doing can find srcy here; one that does not look is a tool srcy
+        // never hears from, which is a supported way to use every tool.
+        env: {
+          SRCY_ACTIVE: "1",
+          SRCY_SESSION_ID: session,
+          SRCY_SOCKET: socketPath(repo),
+        },
         agent,
         panel,
         resize: [process.execPath, self, "resize"],

@@ -9,7 +9,8 @@ import { KEYS, START, actionFor, byRisk, fileLines, move, scopeFor, view, type P
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
 import { checkDerived, derivedGates, isFresh, loadGates, markFor, marksFor, problemsOf, runGate, summarise, verified, type Derived, type Gate, type GateResult, type Marks } from "./gates.js";
-import { appendEvent, readResults, writeResults } from "./state.js";
+import { appendEvent, appendRecord, readResults, writeResults, type SrcyEvent } from "./state.js";
+import { listen, type ExternalEvent, type Receiver } from "./events.js";
 import { listPaths, loadTask, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
@@ -223,7 +224,13 @@ interface Watched {
   // The gate running right now, or "" — a verdict from before it started is
   // not what is happening now.
   running: string;
+  // What other tools have said this session, oldest first.
+  outside: SrcyEvent[];
 }
+
+// How many external events the rail keeps. It is a tail, not a history: the
+// history is .srcy/events.jsonl, which `srcy timeline` reads.
+const EVENTS_KEPT = 32;
 
 const EMPTY: Watched = {
   repo: { files: [], diffs: [], mark: "", stamps: [] },
@@ -236,6 +243,7 @@ const EMPTY: Watched = {
   gates: [],
   results: [],
   running: "",
+  outside: [],
 };
 
 // "Has the working tree changed" — by content, not by churn counts.
@@ -325,6 +333,11 @@ function useWatch(
   // so a verdict about a tree that has since moved arrives already labelled
   // stale rather than as a pass nobody re-earned.
   const restored = useRef(false);
+  // What other tools have said. The socket handler only pushes here — it runs
+  // while the sender waits, so anything expensive done there is latency
+  // charged to somebody else's build.
+  const inbox = useRef<ExternalEvent[]>([]);
+  const outside = useRef<SrcyEvent[]>([]);
   // The baselines the scoped reviews diff against: one for the session, one
   // for the newest request. Refs because capturing is work, not a render.
   const sessionTree = useRef<string | null>(null);
@@ -336,6 +349,22 @@ function useWatch(
     // A session name is reused when you reopen the same repo, so the file may
     // still hold the last run's pick. Cleared before the dock can read it.
     if (rail) reset(session);
+
+    // The one thing srcy asks of another tool: a line of JSON, here. srcy
+    // never starts, invokes or polls the tool that sends it, and a repo where
+    // nothing ever connects is a repo where this costs an idle socket.
+    let receiver: Receiver | null = null;
+    if (rail) {
+      void listen(cwd, (e) => {
+        if (!live) return;
+        inbox.current.push(e);
+      })
+        .then((r) => {
+          if (live) receiver = r;
+          else void r?.close();
+        })
+        .catch(() => {});
+    }
 
     const tick = async (): Promise<void> => {
       try {
@@ -358,9 +387,29 @@ function useWatch(
           gateError: configError.current,
           task: task.current,
           running: running.current,
+          outside: outside.current,
         });
 
         if (rail) {
+          // Drained on the tick rather than in the socket handler: writing to
+          // disk is the expensive half, and the sender is long gone by now.
+          if (inbox.current.length > 0) {
+            for (const e of inbox.current.splice(0)) {
+              const record: SrcyEvent = {
+                at: e.timestamp ?? Date.now(),
+                type: e.type,
+                source: e.source,
+                receivedAt: Date.now(),
+                ...(e.level === undefined ? {} : { level: e.level }),
+                ...(e.summary === undefined ? {} : { summary: e.summary }),
+                ...(e.treeHash === undefined ? {} : { treeHash: e.treeHash }),
+                ...(e.sessionId === undefined ? {} : { sessionId: e.sessionId }),
+                ...(e.metadata === undefined ? {} : { metadata: e.metadata }),
+              };
+              outside.current = [...outside.current, record].slice(-EVENTS_KEPT);
+              await appendRecord(cwd, record);
+            }
+          }
           if (!restored.current) {
             restored.current = true;
             const saved = await readResults(cwd);
@@ -473,6 +522,7 @@ function useWatch(
     return () => {
       live = false;
       clearTimeout(timer);
+      void (receiver as Receiver | null)?.close();
     };
   }, [cwd, rail, source, session, asked]);
 
@@ -509,6 +559,51 @@ const EMPTY_RAN = new Map<string, number>();
 
 export const GIT = "cyan";
 export const AGENT = "magenta";
+// A fourth source, for the same reason the other three have one: the rail
+// stacks unrelated things in a narrow column, and "who is telling me this"
+// should not cost a read of the words. Nothing under this rule was measured
+// by srcy — it is another tool's word, repeated.
+export const OUTSIDE = "yellow";
+
+// How many of the newest external events the rail has room for. The rail is
+// a tail; the history is .srcy/events.jsonl, which `srcy timeline` reads.
+const EVENTS_SHOWN = 3;
+
+// The rule carries the sources, because a source exists only by having
+// spoken — there is nothing registered anywhere to look up.
+export function eventsLabel(events: SrcyEvent[]): string {
+  const names = [...new Set(events.map((e) => e.source ?? ""))].filter((n) => n !== "");
+  return names.length === 0 ? "EVENTS" : `EVENTS  ${names.join(" ")}`;
+}
+
+// The rows themselves, and no clock on them: the rail is "now", and at this
+// width a timestamp costs a third of the sentence it is stamping. `srcy
+// timeline` is where the times are.
+export function EventRows({ events, width }: { events: SrcyEvent[]; width: number }): React.JSX.Element {
+  return (
+    <Box flexDirection="column">
+      {events.slice(-EVENTS_SHOWN).map((e, i) => {
+        // The sender's own level, repeated and never revised. A result a tool
+        // called `info` is information here too, whatever its metadata might
+        // mean to someone who knew that tool — and srcy is the one reader
+        // that must not know.
+        const mark = e.level === "error" ? "✖" : e.level === "warning" ? "!" : "·";
+        const color = e.level === "error" ? "red" : e.level === "warning" ? "yellow" : undefined;
+        return (
+          <Text key={i} color={color} dimColor={color === undefined}>
+            {clipTo(`  ${mark} ${e.source} ${e.summary ?? e.type}`, width)}
+          </Text>
+        );
+      })}
+    </Box>
+  );
+}
+
+export function eventRows(events: SrcyEvent[]): number {
+  // Zero rows and no rule when nothing has ever connected: a repo with no
+  // integrations must look exactly as it did before this existed.
+  return events.length === 0 ? 0 : Math.min(EVENTS_SHOWN, events.length) + 1;
+}
 
 export function gatesTone(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): string | undefined {
   if (gates.length === 0) return undefined;
@@ -859,8 +954,8 @@ export function GoalLine({ turn, width, task = "" }: { turn: Turn | null; width:
 
 // Lines left for the file list once the goal, the plan, the failures, the
 // gauge and the rules between them have taken theirs.
-export function mapBudget(height: number, plan: number, checks: number, usage: number, goal = 2): number {
-  return Math.max(3, height - 2 - goal - Math.max(1, plan) - checks - usage);
+export function mapBudget(height: number, plan: number, checks: number, usage: number, goal = 2, events = 0): number {
+  return Math.max(3, height - 2 - goal - Math.max(1, plan) - checks - usage - events);
 }
 
 // How often the project's file list is refreshed. Slower than the poll
@@ -1060,7 +1155,14 @@ export function Rail({
   const budget =
     height === undefined
       ? undefined
-      : mapBudget(height, s.plan.length, gateRows(s.gates, s.results, s.gateError), usageRows(s.usage));
+      : mapBudget(
+          height,
+          s.plan.length,
+          gateRows(s.gates, s.results, s.gateError),
+          usageRows(s.usage),
+          2,
+          eventRows(s.outside),
+        );
   const view = treeWindow(visible.length, at, Math.max(1, (budget ?? visible.length) - 1));
 
   return (
@@ -1098,6 +1200,12 @@ export function Rail({
         wrote={s.wrote}
         now={now}
       />
+      {s.outside.length === 0 ? null : (
+        <>
+          <Rule label={eventsLabel(s.outside)} width={width} color={OUTSIDE} />
+          <EventRows events={s.outside} width={width} />
+        </>
+      )}
       {/* Pushes the gauge to the bottom edge, so it is in the same place
           whether the session has touched two files or twenty. A number you
           have to hunt for is a number you stop reading. It carries no

@@ -71,12 +71,23 @@ export function dockHeight(rows: number): number {
 export interface Layout {
   session: string;
   repo: string;
+  // What a process inside the session needs to find srcy, if it cares to
+  // look. Nothing is required to: a tool that ignores all of this works
+  // exactly as it does outside a session.
+  env?: Record<string, string>;
   agent: string[];
   panel: (which: string) => string[];
   // How to re-invoke srcy for the window-resized hook, as argv.
   resize: string[];
   cols: number;
   rows: number;
+}
+
+// `env A=1 B=2 ` before a command, or nothing at all. `env` is POSIX and is
+// on every system that has tmux.
+function envPrefix(env?: Record<string, string>): string {
+  const pairs = Object.entries(env ?? {});
+  return pairs.length === 0 ? "" : `env ${pairs.map(([k, v]) => shq(`${k}=${v}`)).join(" ")} `;
 }
 
 // plan returns the tmux commands, in order, as argv arrays. Split out from
@@ -91,8 +102,12 @@ export function plan(l: Layout): string[][] {
     // so a session whose agent had quit sat there with two panels watching a
     // repo nobody was working on. `;` rather than `&&` — an agent that exits
     // non-zero has still exited.
+    // The agent's own environment is set on its command line rather than with
+    // new-session's `-e`, which is tmux 3.2 and newer: srcy would otherwise
+    // refuse to start at all on an older tmux, to deliver an optional
+    // integration hint nobody asked for.
     ["new-session", "-d", "-s", S, "-c", l.repo, "-x", String(l.cols), "-y", String(l.rows), "-P", "-F", "#{pane_id}",
-      `${cmdline(l.agent)}; ${TMUX} kill-session -t ${shq(S)}`],
+      `${envPrefix(l.env)}${cmdline(l.agent)}; ${TMUX} kill-session -t ${shq(S)}`],
     // Dock first, while the agent pane is still the whole window — splitting
     // it now is what makes the dock span the full width. Doing this after the
     // rail split would wedge the dock under the agent only.
@@ -121,6 +136,8 @@ export function plan(l: Layout): string[][] {
     ["set-option", "-t", S, "pane-active-border-style", "fg=colour78"],
     ["set-option", "-t", S, "focus-events", "on"],
     ["set-option", "-t", S, "extended-keys", "on"],
+    // And on the session, so a shell opened later in it sees them too.
+    ...Object.entries(l.env ?? {}).map(([k, v]) => ["set-environment", "-t", S, k, v]),
     // The agent pane keeps the keyboard: it is the thing you type into.
     // Panels are read-only, and taking focus from the prompt to render a
     // file list would be the tail wagging the dog.

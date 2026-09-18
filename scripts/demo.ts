@@ -43,6 +43,10 @@ const sh = (cmd: string, args: string[], cwd?: string): void => {
   if (r.status !== 0) throw new Error(`${cmd} ${args.join(" ")}\n${r.stderr ?? ""}`);
 };
 const cam = (args: string[]): string => spawnSync("tmux", args, { encoding: "utf8" }).stdout ?? "";
+// Another tool reporting what it is doing, through the one command that is
+// the whole integration contract. Run as a subprocess rather than by calling
+// into srcy, because that is what a hook in any language actually does.
+let emitWith: (args: string[]) => void = () => {};
 const camQuiet = (args: string[]): void => void spawnSync("tmux", args, { stdio: "ignore" });
 const srcyQuiet = (args: string[]): void => void spawnSync("tmux", ["-L", SOCKET, ...args], { stdio: "ignore" });
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -250,6 +254,7 @@ async function main(): Promise<void> {
 
     const self = fileURLToPath(new URL("../src/index.ts", import.meta.url));
     const tsx = fileURLToPath(new URL("../node_modules/.bin/tsx", import.meta.url));
+    emitWith = (args) => void spawnSync(tsx, [self, "emit", ...args], { cwd: repo, stdio: "ignore" });
 
     srcyQuiet(["kill-session", "-t", SESSION]);
     build(
@@ -388,6 +393,27 @@ async function main(): Promise<void> {
     await wait(CHECK_MS);
 
     // -----------------------------------------------------------------------
+    // Another tool, which srcy neither installed nor invoked.
+    //
+    // `proof` is the agent's own command here, exactly as it would be in a
+    // bare terminal. Its hook emits into srcy's socket; srcy repeats what it
+    // said and adds nothing. Two independent tools objecting at once, one of
+    // them srcy's and one of them not, is the whole point of the section.
+
+    await say(`${GN}●${OFF} Bash  proof falsify`);
+    await jsonl(call("p1", "Bash", { command: "proof falsify", description: "Falsify the expiry invariants" }));
+    emitWith(["--source", "proof", "--type", "proof.falsify.started", "--level", "info", "--summary", "Falsifying invariants"]);
+    await wait(1300);
+    emitWith([
+      "--source", "proof",
+      "--type", "proof.attack.counterexample",
+      "--level", "error",
+      "--summary", "exp == now() accepted",
+    ]);
+    await jsonl(result("p1"));
+    await wait(2400);
+
+    // -----------------------------------------------------------------------
     // Straight to what broke. GATES names a file and a line; `e` is the walk
     // between reading that and reading the code.
 
@@ -471,8 +497,17 @@ async function main(): Promise<void> {
     await jsonl(result("t6"));
     await jsonl(record({ input_tokens: 2, cache_creation_input_tokens: 700, cache_read_input_tokens: 118_200, output_tokens: 13_400 }));
     await wait(CHECK_MS);
+
+    // The same tool again, saying something different. srcy repeats whichever
+    // level came last and never decides for itself that the old error still
+    // stands -- it is not the one who ran the check.
+    await say(`${GN}●${OFF} Bash  proof falsify`);
+    await jsonl(call("p2", "Bash", { command: "proof falsify", description: "Falsify the expiry invariants" }));
+    emitWith(["--source", "proof", "--type", "proof.falsify.completed", "--level", "info", "--summary", "12 properties held"]);
+    await jsonl(result("p2"));
+    await wait(2200);
     await say(`Expiry is inclusive now, and renew() guards the optional.`, "", `${CY}❯${OFF}`);
-    await wait(2800);
+    await wait(2600);
 
     // -----------------------------------------------------------------------
     // The same question, without the panes.

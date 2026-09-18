@@ -102,6 +102,20 @@ export interface SrcyEvent {
   at: number;
   type: string;
   detail?: string;
+  // Set only on an event another tool sent. They land in this same log
+  // rather than a history of their own: an event is an event, and a second
+  // permanent store for the ones srcy did not generate would have to be kept
+  // in step with this one forever.
+  source?: string;
+  level?: "info" | "warning" | "error";
+  summary?: string;
+  treeHash?: string;
+  sessionId?: string;
+  // When it arrived, kept beside the sender's own `at`. A tool that batches
+  // its hooks, or a machine whose clock disagrees, is visible in the gap
+  // rather than silently rewritten.
+  receivedAt?: number;
+  metadata?: Record<string, unknown>;
 }
 
 // ponytail: trimmed at a fixed size rather than rotated. A second file to
@@ -114,6 +128,10 @@ function logPath(repo: string): string {
 }
 
 export async function appendEvent(repo: string, type: string, detail?: string): Promise<void> {
+  await appendRecord(repo, { at: Date.now(), type, ...(detail === undefined ? {} : { detail }) });
+}
+
+export async function appendRecord(repo: string, event: SrcyEvent): Promise<void> {
   const file = logPath(repo);
   try {
     await mkdir(join(repo, ".srcy"), { recursive: true });
@@ -122,7 +140,7 @@ export async function appendEvent(repo: string, type: string, detail?: string): 
       const kept = (await readFile(file, "utf8")).split("\n").filter((l) => l !== "").slice(-KEEP_LINES);
       await writeFile(file, `${kept.join("\n")}\n`);
     }
-    await appendFile(file, `${JSON.stringify({ at: Date.now(), type, detail } satisfies SrcyEvent)}\n`);
+    await appendFile(file, `${JSON.stringify(event)}\n`);
   } catch {
     // The timeline is a convenience. Losing a line of it must never be the
     // reason a gate does not run.
