@@ -5,6 +5,7 @@ import { resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { git } from "./git.js";
 import { renderPanel } from "./panels.js";
+import { checkpoint, doctor, mission, status, timeline, verify } from "./status.js";
 import { attach, have, launch, resize, sessionExists } from "./tmux.js";
 
 // repoRoot resolves the repository srcy is being run from, or explains why
@@ -77,6 +78,16 @@ async function main(): Promise<void> {
   if (argv[0] === "panel") return renderPanel(argv[1] ?? "rail", argv[2] ?? "", argv[3] ?? "");
   // Run by tmux's window-resized hook, never by a person.
   if (argv[0] === "resize") return resize(argv[1] ?? "");
+
+  // srcy without the panes. The trust model is worth nothing if the only way
+  // to read it is to be looking at a terminal: these exit non-zero when the
+  // tree is not verified, so a hook or a script can ask the same question.
+  if (argv[0] === "status") return void process.exit(await status(await repoRoot()));
+  if (argv[0] === "verify") return void process.exit(await verify(await repoRoot(), argv[1]));
+  if (argv[0] === "doctor") return void process.exit(await doctor(await repoRoot()));
+  if (argv[0] === "mission") return void process.exit(await mission(await repoRoot(), argv[1], argv.slice(2)));
+  if (argv[0] === "checkpoint") return void process.exit(await checkpoint(await repoRoot(), argv[1], argv.slice(2)));
+  if (argv[0] === "timeline") return void process.exit(await timeline(await repoRoot()));
 
   let agent: string[], name: string | undefined;
   try {

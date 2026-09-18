@@ -1,7 +1,16 @@
 {
   "gates": [
-    { "name": "types", "command": ["npm", "run", "typecheck"] },
-    { "name": "tests", "command": ["npm", "test"], "timeoutMs": 180000 }
+    {
+      "name": "types",
+      "command": ["npm", "run", "typecheck"],
+      "watch": ["**/*.ts", "**/*.tsx", "tsconfig.json"]
+    },
+    {
+      "name": "tests",
+      "command": ["npm", "test"],
+      "timeoutMs": 180000,
+      "watch": ["src", "test", "scripts", "package.json"]
+    }
   ],
   "derived": [
     { "from": ["src", "scripts/demo.ts"], "to": "docs/demo.cast" },

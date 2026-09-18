@@ -14,6 +14,7 @@ import { Dock, GateLine, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gates
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
+import type { Problem } from "../src/checks.js";
 import { TMUX, cmdline, compact, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
 import { CLAUDE, advance, emptyFold, foldLine as claudeFold, newReader, parseState, parseUsage, stateOf, usageOf, type Source } from "../src/transcript.js";
 import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
@@ -291,7 +292,7 @@ test("a tracked edit is measured against HEAD, staged or not", async (t) => {
 
 test("a file that fails checks is on the map even when the agent never touched it", async (t) => {
   const repo = await newRepo(t);
-  const s = await repoState(repo, [{ path: "src/old.ts", line: 4, message: "boom" }]);
+  const s = await repoState(repo, [{ path: "src/old.ts", line: 4, message: "boom", severity: "error" as const, check: "" }]);
   const entry = s.files.find((f) => f.path === "src/old.ts");
   // The reader's question is "what is broken". git's answer to "what moved"
   // does not contain it.
@@ -321,13 +322,13 @@ test("GATES in the rail counts first and lists second", () => {
   const problems = [
     // Real paths and real compiler messages, both far longer than a rail is
     // wide — a fixture that happens to fit proves nothing about clipping.
-    { path: "src/auth/session.ts", line: 41, message: "error TS2532: Object is possibly 'undefined'." },
-    { path: "src/auth/session.ts", line: 52, message: "error TS2345: Argument of type 'string' is not assignable." },
-    { path: "src/auth/token.ts", line: 3, message: "error TS2304: Cannot find name 'verify'." },
-    { path: "src/panels/rail.tsx", line: 4, message: "error TS7006: Parameter implicitly has an 'any' type." },
-    { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'." },
+    { path: "src/auth/session.ts", line: 41, message: "error TS2532: Object is possibly 'undefined'.", severity: "error" as const, check: "" },
+    { path: "src/auth/session.ts", line: 52, message: "error TS2345: Argument of type 'string' is not assignable.", severity: "error" as const, check: "" },
+    { path: "src/auth/token.ts", line: 3, message: "error TS2304: Cannot find name 'verify'.", severity: "error" as const, check: "" },
+    { path: "src/panels/rail.tsx", line: 4, message: "error TS7006: Parameter implicitly has an 'any' type.", severity: "error" as const, check: "" },
+    { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'.", severity: "error" as const, check: "" },
   ];
-  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
   const result: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1200, mark: "m", problems };
   const frame = render(<GateRows gates={[gate]} results={[result]} mark="m" running="" width={30} />).lastFrame() ?? "";
   assert.match(frame, /✖ 5 in 4/);
@@ -402,11 +403,11 @@ test("the budget counts what the fixed sections actually draw", () => {
   // These numbers exist so the map can be sized around them. If a section
   // renders one line more than it claims, the gauge goes off the bottom.
   const gates = [
-    { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 },
-    { name: "unit", command: ["npm", "test"], auto: false, timeoutMs: 1000 },
+    { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
+    { name: "unit", command: ["npm", "test"], auto: false, timeoutMs: 1000 , required: true, watch: [] },
   ];
   const broke: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1, mark: "m",
-    problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m" })) };
+    problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m", severity: "error" as const, check: "typecheck" })) };
   const count = (el: React.JSX.Element): number => (render(el).lastFrame() ?? "").split("\n").length;
   const rows = (g: typeof gates, r: GateResult[], error?: string): React.JSX.Element => (
     <GateRows gates={g} results={r} mark="m" running="" error={error} width={30} />
@@ -785,8 +786,8 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
     render(<ReviewRow line={{ num: "5", sign: "-", text: "was", right: { num: "5", sign: "+", text: "is" } }} width={40} />).lastFrame(),
     render(
       <GateRows
-        gates={[{ name: "check", command: ["c"], auto: true, timeoutMs: 1000 }]}
-        results={[{ name: "check", status: "fail", tail: "", ms: 1, mark: "m", problems: [{ path: "a.ts", line: 4, message: "boom" }] }]}
+        gates={[{ name: "check", command: ["c"], auto: true, timeoutMs: 1000 , required: true, watch: [] }]}
+        results={[{ name: "check", status: "fail", tail: "", ms: 1, mark: "m", problems: [{ path: "a.ts", line: 4, message: "boom", severity: "error" as const, check: "" }] }]}
         mark="m"
         running=""
         width={30}
@@ -916,9 +917,9 @@ test("the rail draws the project, the plan and the gauge from what is on disk", 
 test("a verdict whose code has already moved says so instead of reading as current", () => {
   // Acting on a stale pass is the expensive mistake: a green line from
   // thirty seconds ago looks exactly like a green line from now.
-  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
   const broke: GateResult = { name: "typecheck", status: "fail", ms: 1200, mark: "then", tail: "",
-    problems: [{ path: "src/a.ts", line: 1, message: "boom" }] };
+    problems: [{ path: "src/a.ts", line: 1, message: "boom", severity: "error" as const, check: "" }] };
   const row = (result: GateResult | undefined, mark: string): string =>
     render(<GateRows gates={[gate]} results={result === undefined ? [] : [result]} mark={mark} running="" width={40} />).lastFrame() ?? "";
   assert.doesNotMatch(row(broke, "then"), /moved/);
@@ -950,14 +951,14 @@ test("a project with nothing configured is told, not left blank", () => {
 // ---------------------------------------------------------------------------
 // What the checker actually said
 
-const failing = (problems: { path: string; line: number; message: string }[], tail = ""): GateResult[] => [
+const failing = (problems: Problem[], tail = ""): GateResult[] => [
   { name: "typecheck", status: "fail", problems, tail, ms: 1200, mark: "mark" },
 ];
 
 test("the dock prints the message the rail has no room for", () => {
   const problems = [
-    { path: "src/auth/session.ts", line: 3, message: "error TS2532: Object is possibly 'undefined'." },
-    { path: "src/auth/token.ts", line: 9, message: "error TS2345: Argument of type 'string' is not assignable." },
+    { path: "src/auth/session.ts", line: 3, message: "error TS2532: Object is possibly 'undefined'.", severity: "error" as const, check: "" },
+    { path: "src/auth/token.ts", line: 9, message: "error TS2345: Argument of type 'string' is not assignable.", severity: "error" as const, check: "" },
   ];
   const lines = problemLines(failing(problems), "src/auth/token.ts", 100);
   // The file on screen leads: the diff underneath is about that one.
@@ -965,7 +966,7 @@ test("the dock prints the message the rail has no room for", () => {
   assert.match(lines[0]!, /TS2345/, lines.join("\n"));
   assert.match(lines[1]!, /session\.ts:3/, lines.join("\n"));
   // Which is the whole point: the rail can say where, never what.
-  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 };
+  const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
   const rail = render(<GateRows gates={[gate]} results={failing(problems)} mark="mark" running="" width={30} />).lastFrame() ?? "";
   assert.doesNotMatch(rail, /TS2532/, rail);
 
@@ -975,10 +976,12 @@ test("the dock prints the message the rail has no room for", () => {
 });
 
 test("the dock caps the failure list and says what it cut", () => {
-  const many = Array.from({ length: 9 }, (_, i) => ({
+  const many: Problem[] = Array.from({ length: 9 }, (_, i) => ({
     path: `src/deeply/nested/module${i}.ts`,
     line: i + 1,
     message: `error TS2532: Object is possibly 'undefined' and this sentence runs well past any pane ${i}`,
+    severity: "error",
+    check: "typecheck",
   }));
   const lines = problemLines(failing(many), undefined, 100);
   assert.equal(lines.length, 5, lines.join("\n"));
@@ -1003,10 +1006,12 @@ test("the panels pass a check result between processes without tmux mangling it"
   // JSON.parse throw. Both are exercised here.
   const session = `srcy-test-bus-${process.pid}`;
   t.after(() => rm(join(tmpdir(), `${session}.json`), { force: true }));
-  const problems = Array.from({ length: 20 }, (_, i) => ({
+  const problems: Problem[] = Array.from({ length: 20 }, (_, i) => ({
     path: `src/very/deeply/nested/module${i}.ts`,
     line: i + 1,
     message: `error TS2532: $HOME is possibly 'undefined' ${"x".repeat(400)}`,
+    severity: "error",
+    check: "typecheck",
   }));
   publish(session, { file: "src/auth/token.ts" });
   publish(session, { gates: failing(problems, "tail") });
@@ -1041,9 +1046,9 @@ test("the dock gives the diff the rows the failures took", async (t) => {
   publish(session, {
     file: "a.ts",
     gates: failing([
-      { path: "a.ts", line: 2, message: "error TS1000: nope" },
-      { path: "a.ts", line: 3, message: "error TS1001: also nope" },
-      { path: "a.ts", line: 4, message: "error TS1002: still nope" },
+      { path: "a.ts", line: 2, message: "error TS1000: nope", severity: "error" as const, check: "" },
+      { path: "a.ts", line: 3, message: "error TS1001: also nope", severity: "error" as const, check: "" },
+      { path: "a.ts", line: 4, message: "error TS1002: still nope", severity: "error" as const, check: "" },
     ]),
   });
 
@@ -1112,7 +1117,7 @@ test("a turn baseline is refused when the agent had already started writing", as
   async function findFixture(): Promise<string> {
     return log;
   }
-  const source: Source = { find: findFixture, fold: claudeFold };
+  const source: Source = { name: "fixture", find: findFixture, fold: claudeFold };
 
   const clean = await baseline(repo, source, at);
   assert.match(clean.turn ?? "", /^[0-9a-f]{40}$/, JSON.stringify(clean));
@@ -1195,8 +1200,8 @@ test("an in-place edit re-runs the checker, even though the churn is identical",
 
 test("a header takes a verdict's colour only when there is a verdict", () => {
   const gates = [
-    { name: "types", command: ["tsc"], auto: true, timeoutMs: 1000 },
-    { name: "tests", command: ["t"], auto: true, timeoutMs: 1000 },
+    { name: "types", command: ["tsc"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
+    { name: "tests", command: ["t"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
   ];
   const at = (name: string, status: "pass" | "fail" | "timeout", mark: string) => ({ name, status, tail: "", ms: 1, mark, problems: [] });
 
@@ -1339,7 +1344,7 @@ test("a plan item that has not moved in a while says how long", () => {
 
 test("when srcy has not run a gate, the agent's own run is the evidence", () => {
   const now = Date.parse("2026-08-26T10:10:00.000Z");
-  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000 };
+  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
   const ran = new Map([["npm test 2>&1 | tail -20", Date.parse("2026-08-26T10:06:00.000Z")]]);
 
   // Matched loosely: an agent wraps the command in a pipeline, and it is

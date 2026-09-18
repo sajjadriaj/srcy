@@ -323,7 +323,7 @@ new file mode 100644
   // deserves a reader first.
   assert.deepEqual(raw.map((f) => f.path), ["a-clean.ts", "b-broken.ts", "c-gone.ts", "d-new.ts"]);
 
-  const order = byRisk(raw, [{ path: "b-broken.ts", line: 1, message: "boom" }]).map((f) => f.path);
+  const order = byRisk(raw, [{ path: "b-broken.ts", line: 1, message: "boom", severity: "error" as const, check: "" }]).map((f) => f.path);
   // A failing gate is a fact, not a guess about risk. A deletion is the
   // hardest change to notice by reading what is left. A new file has no
   // previous version and so has never been read by anyone.

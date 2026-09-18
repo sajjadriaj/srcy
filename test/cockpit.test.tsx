@@ -109,7 +109,7 @@ test("planFrom degrades to no plan instead of throwing on an unexpected payload"
 test("mapEntries gives a failing file its own row even if untouched", () => {
   // A caller that stopped compiling against a changed signature is exactly
   // the failure worth surfacing, and this session never opened it.
-  const entries = mapEntries([], [], [{ path: "src/api/routes.ts", line: 9, message: "error" }]);
+  const entries = mapEntries([], [], [{ path: "src/api/routes.ts", line: 9, message: "error", severity: "error" as const, check: "" }]);
   assert.equal(entries.length, 1);
   assert.equal(entries[0]!.path, "src/api/routes.ts");
   assert.equal(entries[0]!.problems, 1);

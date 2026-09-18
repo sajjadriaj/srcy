@@ -8,6 +8,13 @@ export interface Problem {
   path: string; // repo-relative, POSIX separators — same space as the repo map
   line: number;
   message: string;
+  // Errors before warnings, everywhere a list of these is shown. A linter
+  // that exits non-zero over three errors and forty warnings would otherwise
+  // bury the three under the forty, in a pane with room for four rows.
+  severity: "error" | "warning";
+  // The gate that found it. The parser cannot know — it is reading text —
+  // so this is stamped on by whoever ran the command.
+  check: string;
 }
 
 // How long a check may run before it is killed. A check is something the
@@ -18,6 +25,11 @@ const TIMEOUT_MS = 120_000;
 const TAIL_LINES = 12;
 // A wall of problems is noise — the first few are what get fixed.
 const MAX_PROBLEMS = 20;
+// How far into the output to keep looking. Errors are sorted ahead of
+// warnings before the cap is applied, so the scan has to outrun the cap —
+// otherwise a run whose first twenty lines are warnings hides every error
+// under them, which is the exact failure MAX_PROBLEMS was meant to prevent.
+const MAX_SCAN = 400;
 
 // checkCommand decides what to run. `.srcy/check` (executable, in the user's
 // real repo) wins outright: it is the escape hatch for any project whose
@@ -57,6 +69,21 @@ const PAREN_RE = /^\s*([\w./@+-]+\.[A-Za-z][\w]*)\((\d+),(\d+)\):\s*(.*)$/;
 // Matches a stack or runner frame: "at fn (/abs/test/a.test.ts:22:10)" and
 // node:test's own "test at test/a.test.ts:99:1".
 const FRAME_RE = /(?:^|\s|\()((?:[\w./@+-]|\\)+\.[A-Za-z][\w]*):(\d+):(\d+)\)?\s*$/;
+// Matches rustc and cargo: "  --> src/main.rs:4:5". The message is on the
+// line above it, which is why CARGO_HEAD exists.
+const ARROW_RE = /^\s*-->\s+((?:[\w./@+-]|\\)+\.[A-Za-z][\w]*):(\d+):(\d+)\s*$/;
+const CARGO_HEAD_RE = /^(error|warning)(?:\[[^\]]+\])?:\s*(.+)$/;
+// Matches eslint's default formatter, which names the file once and then
+// indents every finding under it:
+//
+//   /abs/src/a.js
+//     12:5  error  Unexpected console statement  no-console
+//
+// Neither line is a location on its own, so a parser that reads one line at
+// a time finds nothing at all in an eslint run — which is how a lint gate
+// ends up saying only "failing" with a list of locations right there.
+const BARE_PATH_RE = /^\s*((?:[\w./@+-]|\\)+\.[A-Za-z][\w]*)\s*$/;
+const UNDER_PATH_RE = /^\s+(\d+):(\d+)\s+(error|warning)\s+(.*)$/;
 
 function toRepoRelative(cwd: string, path: string): string {
   const p = isAbsolute(path) ? relative(cwd, path) : path;
@@ -71,27 +98,75 @@ function toRepoRelative(cwd: string, path: string): string {
 // Duplicates collapse by path and line — a compiler that repeats a location
 // in a summary block should not double the count — and the first message
 // for a location wins, since that is the one with the detail.
-export function parseProblems(output: string, cwd: string): Problem[] {
+export function parseProblems(output: string, cwd: string, check = ""): Problem[] {
   const seen = new Set<string>();
   const problems: Problem[] = [];
-  for (const raw of output.split("\n")) {
-    const line = raw.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
-    const m = PAREN_RE.exec(line) ?? COLON_RE.exec(line) ?? FRAME_RE.exec(line);
-    if (!m) continue;
-    const path = toRepoRelative(cwd, m[1]!);
+  // The two formats that split one finding across two lines. Both are reset
+  // by nothing: a stale header can only mislabel a finding, where clearing
+  // it on the wrong line would drop the finding entirely.
+  let underFile = "";
+  let cargoSays = "";
+
+  const add = (path: string, lineNo: number, message: string, severity: Problem["severity"]): void => {
+    const rel = toRepoRelative(cwd, path);
     // A location outside the tree (node internals, a dependency's own
     // stack frame) is never something the reviewer can act on here.
-    if (path.startsWith("../") || path.startsWith("node_modules/") || path.startsWith("node:")) continue;
-    const lineNo = Number(m[2]);
-    if (!Number.isFinite(lineNo) || lineNo <= 0) continue;
-    const key = `${path}:${lineNo}`;
-    if (seen.has(key)) continue;
+    if (rel.startsWith("../") || rel.startsWith("node_modules/") || rel.startsWith("node:")) return;
+    if (!Number.isFinite(lineNo) || lineNo <= 0) return;
+    const key = `${rel}:${lineNo}`;
+    if (seen.has(key)) return;
     seen.add(key);
-    const message = (m[4] ?? "").trim();
-    problems.push({ path, line: lineNo, message: message === "" ? line.trim() : message });
-    if (problems.length >= MAX_PROBLEMS) break;
+    problems.push({ path: rel, line: lineNo, message, severity, check });
+  };
+
+  for (const raw of output.split("\n").slice(0, MAX_SCAN)) {
+    const line = raw.replace(/\x1b\[[0-9;]*m/g, "").trimEnd();
+
+    const arrow = ARROW_RE.exec(line);
+    if (arrow) {
+      // rustc puts the sentence above the location, so the location alone
+      // reads as "something is wrong at src/main.rs:4" — true, and useless.
+      add(arrow[1]!, Number(arrow[2]), cargoSays === "" ? line.trim() : cargoSays, severityOf(cargoSays));
+      continue;
+    }
+    const head = CARGO_HEAD_RE.exec(line);
+    if (head) {
+      cargoSays = `${head[1]}: ${head[2]!.trim()}`;
+      continue;
+    }
+
+    const m = PAREN_RE.exec(line) ?? COLON_RE.exec(line) ?? FRAME_RE.exec(line);
+    if (m) {
+      const message = (m[4] ?? "").trim();
+      const text = message === "" ? line.trim() : message;
+      add(m[1]!, Number(m[2]), text, severityOf(text));
+      continue;
+    }
+
+    const under = UNDER_PATH_RE.exec(line);
+    if (under && underFile !== "") {
+      add(underFile, Number(under[1]), under[4]!.trim(), under[3] === "warning" ? "warning" : "error");
+      continue;
+    }
+    const bare = BARE_PATH_RE.exec(line);
+    if (bare) underFile = bare[1]!;
   }
-  return problems;
+
+  // Errors first, and stable within each: the order a tool printed them in
+  // is the order it thinks they happened in, which is better than any
+  // re-sort this could invent.
+  return problems
+    .map((p, i) => [p, i] as const)
+    .sort(([a, i], [b, j]) => (a.severity === b.severity ? i - j : a.severity === "error" ? -1 : 1))
+    .map(([p]) => p)
+    .slice(0, MAX_PROBLEMS);
+}
+
+// What the tool called it. Anything that says warning and does not also say
+// error is one; everything else is an error, because a check that exited
+// non-zero over something this cannot classify is not a warning.
+function severityOf(text: string): Problem["severity"] {
+  return /\bwarn(ing)?\b/i.test(text) && !/\berror\b/i.test(text) ? "warning" : "error";
 }
 
 // runCommand runs one of the project's own commands inside the worktree and

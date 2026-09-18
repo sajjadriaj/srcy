@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { checkCommand, parseProblems, runCommand, tailOf, type Problem } from "./checks.js";
@@ -23,6 +24,16 @@ export interface Gate {
   // ones are opted out and wait for `r`.
   auto: boolean;
   timeoutMs: number;
+  // Whether VERIFIED is a claim about this gate. A required gate that has
+  // not freshly passed means the tree is not verified; an optional one is
+  // information. Required by default: a config that quietly narrowed what
+  // green means would be worse than no config.
+  required: boolean;
+  // The paths this gate's verdict depends on. Empty means the whole tree,
+  // which is what every gate meant before this existed. A typecheck that
+  // reads only TypeScript is not invalidated by editing the README, and
+  // saying it was is the same lie in the other direction as a stale pass.
+  watch: string[];
 }
 
 export interface GateResult {
@@ -120,8 +131,19 @@ export async function checkDerived(cwd: string, list: Derived[], paths: string[]
 
 // Derived files are shown as gates because they are the same claim, but they
 // are never queued: there is no command, and `runGate` would spawn nothing.
+// Not required: VERIFIED is a claim about the commands a project declared as
+// verification, and a derived file is a timestamp comparison rather than one
+// of them. A stale artifact still earns its row and its ATTENTION line — it
+// just does not decide whether the tree is trusted.
 export function derivedGates(list: Derived[]): Gate[] {
-  return list.map((d) => ({ name: d.to.split("/").pop() ?? d.to, command: [], auto: false, timeoutMs: 0 }));
+  return list.map((d) => ({
+    name: d.to.split("/").pop() ?? d.to,
+    command: [],
+    auto: false,
+    timeoutMs: 0,
+    required: false,
+    watch: [],
+  }));
 }
 
 export function parseConfig(raw: unknown): { gates: Gate[]; error?: string } {
@@ -132,7 +154,14 @@ export function parseConfig(raw: unknown): { gates: Gate[]; error?: string } {
   const gates: Gate[] = [];
   const seen = new Set<string>();
   for (const item of list) {
-    const o = item as { name?: unknown; command?: unknown; auto?: unknown; timeoutMs?: unknown } | null;
+    const o = item as {
+      name?: unknown;
+      command?: unknown;
+      auto?: unknown;
+      timeoutMs?: unknown;
+      required?: unknown;
+      watch?: unknown;
+    } | null;
     const name = typeof o?.name === "string" ? o.name.trim() : "";
     if (name === "" || name.includes("\n")) return { gates: [], error: "every gate needs a one-line name" };
     if (seen.has(name)) return { gates: [], error: `two gates are named ${name}` };
@@ -153,9 +182,21 @@ export function parseConfig(raw: unknown): { gates: Gate[]; error?: string } {
     if (t !== undefined && (typeof t !== "number" || !Number.isFinite(t) || t <= 0)) {
       return { gates: [], error: `${name}: timeoutMs must be a positive number of milliseconds` };
     }
+
+    const watch = o?.watch;
+    // Refused rather than ignored, for the reason a mistyped gate name is:
+    // a watch list srcy silently dropped is a gate that looks scoped and
+    // re-runs on every edit, or worse, one that looks scoped and never goes
+    // stale at all.
+    if (watch !== undefined && (!Array.isArray(watch) || !watch.every((w) => typeof w === "string" && w !== ""))) {
+      return { gates: [], error: `${name}: watch must be a list of paths` };
+    }
+
     gates.push({
       name,
       command: command as string[],
+      required: o?.required !== false,
+      watch: (watch as string[] | undefined) ?? [],
       // Automatic by default. The rail's whole job is telling you the tree
       // is broken before you ask, and a config that quietly turned that off
       // for every gate would be a downgrade from having no config at all.
@@ -179,6 +220,8 @@ async function detected(repo: string): Promise<Gate[]> {
       command: argv,
       auto: true,
       timeoutMs: DEFAULT_TIMEOUT_MS,
+      required: true,
+      watch: [],
     },
   ];
 }
@@ -213,11 +256,129 @@ export async function runGate(repo: string, gate: Gate, mark: string): Promise<G
   return {
     name: gate.name,
     status,
-    problems: status === "pass" ? [] : parseProblems(out.text, repo),
+    // Stamped with the gate name: the dock and the CLI both list problems
+    // from several gates at once, and "what is broken" is a poorer answer
+    // than "what is broken, and which check noticed".
+    problems: status === "pass" ? [] : parseProblems(out.text, repo, gate.name),
     tail: tailOf(out.text),
     ms: Date.now() - started,
     mark,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Selective staleness
+//
+// One fingerprint for the whole tree makes every verdict stale the moment
+// anything moves, which trains the reader to ignore the word. A gate that
+// declares what it reads gets a fingerprint of exactly that, so editing a
+// README leaves the typecheck's pass standing — and editing a `.ts` file
+// still invalidates it, which is the half that must never break.
+
+// Three shapes, not a glob engine: a directory prefix (`src`, or `src/**`),
+// an extension across the tree (`**/*.ts`), or an exact path. Anything else
+// matches nothing, which is visible immediately — the gate never goes stale.
+// A project whose watch list needs more than this leaves it out and gets the
+// whole tree, which is what it had before.
+export function watched(path: string, patterns: string[]): boolean {
+  if (patterns.length === 0) return true;
+  return patterns.some((raw) => {
+    if (raw.startsWith("**/*")) return path.endsWith(raw.slice(4));
+    const p = raw.replace(/\/\*\*$/, "").replace(/^\.\//, "").replace(/\/$/, "");
+    if (p === "" || p === ".") return true;
+    return path === p || path.startsWith(`${p}/`);
+  });
+}
+
+// The fingerprint a gate's verdict is measured against: the whole tree's,
+// or a hash of only the changed files it watches.
+//
+// `stamps` is one entry per changed file, sorted, as RepoState carries it.
+// A gate whose watched files are all unchanged hashes an empty list, which
+// is a constant — so its verdict stays fresh across every edit elsewhere,
+// which is the entire point.
+export function markFor(mark: string, stamps: [string, string][], watch: string[]): string {
+  if (watch.length === 0) return mark;
+  const h = createHash("sha1");
+  for (const [path, stamp] of stamps) {
+    if (!watched(path, watch)) continue;
+    h.update(path).update(" ").update(stamp).update("");
+  }
+  return h.digest("hex");
+}
+
+// Every gate's own fingerprint, computed once per frame. Passed around as a
+// map rather than recomputed at each comparison because the rail asks the
+// same question from four places.
+export type Marks = Map<string, string>;
+
+export function marksFor(gates: Gate[], mark: string, stamps: [string, string][]): Marks {
+  return new Map(gates.map((g) => [g.name, markFor(mark, stamps, g.watch)]));
+}
+
+// What a gate's verdict should be compared against. The plain tree mark is
+// the fallback so every existing caller keeps working unchanged: a gate with
+// no watch list is measured against the whole tree either way.
+export function markOf(gate: Gate, mark: string, marks?: Marks): string {
+  return marks?.get(gate.name) ?? mark;
+}
+
+export function isFresh(gate: Gate, result: GateResult | undefined, mark: string, marks?: Marks): boolean {
+  return result !== undefined && result.mark === markOf(gate, mark, marks);
+}
+
+// ---------------------------------------------------------------------------
+// Trust
+
+// VERIFIED, and nothing subjective in it: every required gate has passed,
+// and each of those passes was measured against the tree that is there now.
+//
+// A project with no required gate is never verified. Vacuous truth is the
+// one answer this must not give — "green" on a repo that verifies nothing is
+// exactly the lie the rest of this file exists to prevent.
+export function verified(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): boolean {
+  const required = gates.filter((g) => g.required);
+  if (required.length === 0) return false;
+  const by = new Map(results.map((r) => [r.name, r]));
+  return required.every((g) => {
+    const r = by.get(g.name);
+    return r !== undefined && r.status === "pass" && isFresh(g, r, mark, marks);
+  });
+}
+
+// One line per thing that is not a fresh pass, worst first. The rail already
+// lists failing locations; this is the same question asked where there is no
+// rail — `srcy status`, and anything reading its output.
+export interface Attention {
+  severity: "error" | "warning";
+  gate: string;
+  detail: string;
+}
+
+export function attention(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): Attention[] {
+  const by = new Map(results.map((r) => [r.name, r]));
+  const out: Attention[] = [];
+  for (const g of gates) {
+    const r = by.get(g.name);
+    if (r === undefined) continue; // not run is not a finding, it is an absence
+    if (r.status === "fail" || r.status === "timeout") {
+      const where = r.problems[0];
+      const detail =
+        r.status === "timeout"
+          ? `timed out after ${Math.round(r.ms / 1000)}s`
+          : where !== undefined
+            ? `${where.path}:${where.line}  ${where.message}`
+            : (r.tail.split("\n").find((l) => l.trim() !== "") ?? "failing");
+      // A stale failure is still a failure — it is the best evidence there
+      // is — and saying so beats dropping the row, which would read as a fix.
+      out.push({ severity: "error", gate: g.name, detail: isFresh(g, r, mark, marks) ? detail : `${detail} (stale)` });
+      continue;
+    }
+    if (r.status === "pass" && !isFresh(g, r, mark, marks)) {
+      out.push({ severity: "warning", gate: g.name, detail: "code moved since it ran" });
+    }
+  }
+  return out.sort((a, b) => (a.severity === b.severity ? 0 : a.severity === "error" ? -1 : 1));
 }
 
 export interface Summary {
@@ -230,14 +391,14 @@ export interface Summary {
 
 // The headline. The numerator counts fresh passes only: a pass measured
 // against a tree that has since moved is not evidence about this one.
-export function summarise(gates: Gate[], results: GateResult[], mark: string): Summary {
+export function summarise(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): Summary {
   const by = new Map(results.map((r) => [r.name, r]));
   let passing = 0;
   let attention = 0;
   for (const g of gates) {
     const r = by.get(g.name);
     if (r === undefined) continue;
-    const fresh = r.mark === mark;
+    const fresh = isFresh(g, r, mark, marks);
     if (fresh && r.status === "pass") passing++;
     else if (r.status === "fail" || r.status === "timeout") attention++;
     else if (!fresh && r.status === "pass") attention++;
@@ -265,5 +426,10 @@ export function problemsOf(results: GateResult[]): Problem[] {
       out.push(p);
     }
   }
-  return out;
+  // Errors before warnings across every gate, stable inside each. The rail
+  // has room for three rows; a lint run's warnings must not be the three.
+  return out
+    .map((p, i) => [p, i] as const)
+    .sort(([a, i], [b, j]) => (a.severity === b.severity ? i - j : a.severity === "error" ? -1 : 1))
+    .map(([p]) => p);
 }

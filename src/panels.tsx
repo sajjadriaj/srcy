@@ -8,10 +8,12 @@ import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } fro
 import { KEYS, START, actionFor, byRisk, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
-import { checkDerived, derivedGates, loadGates, problemsOf, runGate, summarise, type Derived, type Gate, type GateResult } from "./gates.js";
-import { listPaths, repoState, type RepoState } from "./repo.js";
+import { checkDerived, derivedGates, isFresh, loadGates, markFor, marksFor, problemsOf, runGate, summarise, verified, type Derived, type Gate, type GateResult, type Marks } from "./gates.js";
+import { appendEvent, readResults, writeResults } from "./state.js";
+import { listPaths, loadTask, repoState, type RepoState } from "./repo.js";
 import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
+import { detectSource } from "./agent.js";
 import { captureTree, scopedDiff } from "./scopes.js";
 import { CODEX } from "./codex.js";
 
@@ -224,7 +226,7 @@ interface Watched {
 }
 
 const EMPTY: Watched = {
-  repo: { files: [], diffs: [], mark: "" },
+  repo: { files: [], diffs: [], mark: "", stamps: [] },
   plan: [],
   usage: null,
   activity: null,
@@ -318,6 +320,11 @@ function useWatch(
   const results = useRef<GateResult[]>([]);
   const queue = useRef<string[]>([]);
   const running = useRef("");
+  // Verdicts written by the last session, or by `srcy verify` in another
+  // terminal. Read once: each one carries the tree it was measured against,
+  // so a verdict about a tree that has since moved arrives already labelled
+  // stale rather than as a pass nobody re-earned.
+  const restored = useRef(false);
   // The baselines the scoped reviews diff against: one for the session, one
   // for the newest request. Refs because capturing is work, not a render.
   const sessionTree = useRef<string | null>(null);
@@ -354,6 +361,12 @@ function useWatch(
         });
 
         if (rail) {
+          if (!restored.current) {
+            restored.current = true;
+            const saved = await readResults(cwd);
+            const have = new Set(results.current.map((r) => r.name));
+            results.current = [...results.current, ...saved.filter((r) => !have.has(r.name))];
+          }
           // Everything this session has watched happen. Captured on the
           // first tick rather than at launch: a repo git cannot read yet
           // costs a frame, not a start-up crash.
@@ -405,7 +418,18 @@ function useWatch(
           const step = checkStep(fp, mark.current, quietSince.current, Date.now(), running.current !== "");
           mark.current = step.mark;
           quietSince.current = step.quietSince;
-          if (step.run) queue.current.push(...config.current.filter((g) => g.auto).map((g) => g.name));
+          if (step.run) {
+            // Only the gates whose own fingerprint moved. A gate that
+            // declared what it reads is not re-run because a README changed —
+            // which is the work `watch` exists to avoid, and the reason its
+            // last verdict is still allowed to read as a pass.
+            const by = new Map(results.current.map((r) => [r.name, r]));
+            for (const g of config.current) {
+              if (!g.auto || queue.current.includes(g.name)) continue;
+              const r = by.get(g.name);
+              if (r === undefined || r.mark !== markFor(fp, repo.stamps, g.watch)) queue.current.push(g.name);
+            }
+          }
           if (asked !== undefined && asked.current.length > 0) queue.current.push(...asked.current.splice(0));
 
           if (running.current === "" && queue.current.length > 0) {
@@ -413,15 +437,22 @@ function useWatch(
             const gate = config.current.find((g) => g.name === name);
             if (gate !== undefined) {
               running.current = name;
+              void appendEvent(cwd, "gate.start", name);
               // Deliberately not awaited inside the tick: a typecheck can
               // take ten seconds, and the rail must keep updating while it
               // runs. The next one starts on the tick after this finishes.
-              void runGate(cwd, gate, fp)
-                .then((r) => {
+              void runGate(cwd, gate, markFor(fp, repo.stamps, gate.watch))
+                .then(async (r) => {
                   results.current = [...results.current.filter((x) => x.name !== r.name), r];
                   // The rail has room for `session.ts:3`. The message goes
                   // to the pane with the width to print it.
                   publish(session, { gates: results.current });
+                  // And to .srcy/state.json, which is how `srcy status` in
+                  // another terminal answers without running anything twice.
+                  await writeResults(cwd, results.current);
+                  // A transition, not a poll. The timeline's whole value is
+                  // that it holds the handful of moments something changed.
+                  await appendEvent(cwd, `gate.${r.status}`, `${r.name}  ${Math.round(r.ms / 1000)}s`);
                 })
                 .catch(() => {})
                 .finally(() => {
@@ -479,24 +510,22 @@ const EMPTY_RAN = new Map<string, number>();
 export const GIT = "cyan";
 export const AGENT = "magenta";
 
-export function gatesTone(gates: Gate[], results: GateResult[], mark: string): string | undefined {
+export function gatesTone(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): string | undefined {
   if (gates.length === 0) return undefined;
   const by = new Map(results.map((r) => [r.name, r]));
   let broken = 0;
-  let fresh = 0;
   for (const g of gates) {
     const r = by.get(g.name);
     if (r === undefined) continue;
     if (r.status === "fail" || r.status === "timeout") broken++;
-    else if (r.status === "pass" && r.mark === mark) fresh++;
   }
   if (broken > 0) return "red";
-  // Green is a claim about every gate, so it waits for every gate to have
-  // made it against the tree that is there now. Everything else — not run,
+  // Green is exactly VERIFIED and nothing looser: every required gate has
+  // passed against the tree that is there now. Everything else — not run,
   // still running, a pass measured against a tree that has moved on — is an
   // unknown, and an unknown takes no colour rather than borrowing one of the
   // two verdicts. The label already says how many are worth a look.
-  return fresh === gates.length ? "green" : undefined;
+  return verified(gates, results, mark, marks) ? "green" : undefined;
 }
 
 // How many failing locations fit in a column this narrow before the list is
@@ -507,6 +536,7 @@ export function GateRows({
   gates,
   results,
   mark,
+  marks,
   running,
   error,
   width,
@@ -520,6 +550,10 @@ export function GateRows({
   // one is said to be stale rather than shown as a current pass: acting on a
   // stale pass is the expensive mistake.
   mark: string;
+  // Each gate's own fingerprint, for the gates that declared what they read.
+  // Absent means every gate is measured against the whole tree, which is what
+  // they all did before `watch` existed.
+  marks?: Marks;
   running: string;
   error?: string;
   width: number;
@@ -550,6 +584,7 @@ export function GateRows({
           gate={g}
           result={by.get(g.name)}
           mark={mark}
+          marks={marks}
           running={running === g.name}
           width={width}
           ran={ran}
@@ -608,6 +643,7 @@ export function GateLine({
   gate,
   result,
   mark,
+  marks,
   running,
   width,
   ran = EMPTY_RAN,
@@ -617,6 +653,7 @@ export function GateLine({
   gate: Gate;
   result: GateResult | undefined;
   mark: string;
+  marks?: Marks;
   running: boolean;
   width: number;
   ran?: Map<string, number>;
@@ -633,7 +670,7 @@ export function GateLine({
     const waiting = gate.auto ? "not run yet" : "not run — press r";
     return <Text dimColor>{clipTo(`  ${name} ${said === "" ? waiting : `not run · ${said}`}`, width)}</Text>;
   }
-  const stale = result.mark !== mark;
+  const stale = !isFresh(gate, result, mark, marks);
   const age = stale ? " · code moved since" : "";
   const took = `${elapsed(result.ms)}`;
   if (result.status === "pass") {
@@ -661,9 +698,13 @@ export function GateLine({
 
 // The heading. Fresh passes over configured gates, and how many want
 // looking at — the two numbers that decide whether the turn is done.
-export function gatesLabel(gates: Gate[], results: GateResult[], mark: string): string {
+export function gatesLabel(gates: Gate[], results: GateResult[], mark: string, marks?: Marks): string {
   if (gates.length === 0) return "GATES";
-  const { passing, total, attention } = summarise(gates, results, mark);
+  const { passing, total, attention } = summarise(gates, results, mark, marks);
+  // The word is only ever printed when it is true. An UNVERIFIED that took
+  // the same room would be saying "not yet" in a column where the counts
+  // beside it already say which gates the "not yet" is about.
+  if (verified(gates, results, mark, marks)) return `GATES ${passing}/${total} VERIFIED`;
   return `GATES ${passing}/${total}${attention > 0 ? `  ${attention} to look at` : ""}`;
 }
 
@@ -801,17 +842,10 @@ export function usageRows(_usage: Usage | null): number {
 // request is the newest thing you said, which is not the same as what you are
 // trying to do: it is replaced every turn, and a compaction or a model change
 // can leave it describing a detour. A file in the repo outlives all three.
-export async function loadTask(cwd: string): Promise<string> {
-  const raw = await readFile(join(cwd, ".srcy", "task.md"), "utf8").catch(() => "");
-  // It is markdown, so the first line is usually a heading and its hashes are
-  // punctuation rather than something to read.
-  return (
-    raw
-      .split("\n")
-      .map((l) => l.replace(/^#+\s*/, "").trim())
-      .find((l) => l !== "") ?? ""
-  );
-}
+// Lives in repo.ts, which is where everything read off the tree lives — and
+// where `srcy status` can reach it without loading Ink. Re-exported because
+// the rail's own tests have always imported it from here.
+export { loadTask };
 
 export function GoalLine({ turn, width, task = "" }: { turn: Turn | null; width: number; task?: string }): React.JSX.Element {
   // The pinned objective wins. The rule above says which of the two this is,
@@ -920,6 +954,9 @@ export function Rail({
   const s = useWatch(cwd, true, source, session, asked, past);
   const paths = useTree(cwd);
   const changed = useMemo(() => new Map(s.repo.files.map((f) => [f.path, f])), [s.repo.files]);
+  // Each gate's own fingerprint, once per frame rather than at each of the
+  // four places below that ask whether a verdict is still about this tree.
+  const marks = useMemo(() => marksFor(s.gates, s.repo.mark, s.repo.stamps), [s.gates, s.repo.mark, s.repo.stamps]);
 
   // Directories the reader opened or closed by hand, layered over the ones
   // the work opens by itself.
@@ -1044,11 +1081,16 @@ export function Rail({
       <GoalLine turn={s.turn} task={s.task} width={width} />
       <Rule label="PLAN" width={width} color={AGENT} />
       <PlanBody entries={s.plan} since={s.doingAt} now={now} />
-      <Rule label={gatesLabel(s.gates, s.results, s.repo.mark)} width={width} color={gatesTone(s.gates, s.results, s.repo.mark)} />
+      <Rule
+        label={gatesLabel(s.gates, s.results, s.repo.mark, marks)}
+        width={width}
+        color={gatesTone(s.gates, s.results, s.repo.mark, marks)}
+      />
       <GateRows
         gates={s.gates}
         results={s.results}
         mark={s.repo.mark}
+        marks={marks}
         running={s.running}
         error={s.gateError}
         width={width}
@@ -1473,6 +1515,36 @@ export function sourceFor(agent: string): Source | null {
   return null;
 }
 
+// How often to look for a transcript when the binary's name did not name an
+// adapter. Slow: this is the wrapper-script case, and the answer changes once
+// per session at most.
+const DETECT_MS = 2000;
+
+// An agent srcy could not recognise by name may still be one it can read —
+// `srcy --agent ./bin/dev-claude` is the same Claude Code writing the same
+// transcript. So the name is tried first, and failing that srcy watches for a
+// session file to appear. Nothing here is required: a repo where no adapter
+// ever matches keeps every panel that reads git, which is most of them.
+function Detected({ which, agent, session }: { which: string; agent: string; session: string }): React.JSX.Element {
+  const [source, setSource] = useState<Source | null>(() => sourceFor(agent));
+  useEffect(() => {
+    if (source !== null || which !== "rail") return;
+    let live = true;
+    const id = setInterval(() => {
+      void detectSource(process.cwd())
+        .then((found) => {
+          if (live && found !== null) setSource(found);
+        })
+        .catch(() => {});
+    }, DETECT_MS);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, [source, which]);
+  return <Panel which={which} source={source} session={session} />;
+}
+
 export function renderPanel(which: string, agent = "", session = ""): void {
-  render(<Panel which={which} source={sourceFor(agent)} session={session} />);
+  render(<Detected which={which} agent={agent} session={session} />);
 }

@@ -287,6 +287,9 @@ export interface Fold {
 // Claude Code reader below and the Codex one next door — because those are
 // the two formats that exist, not because a third is expected.
 export interface Source {
+  // What to call this agent on screen. The adapters are the only place srcy
+  // knows one agent from another; everything else reads git.
+  name: string;
   // The session file for work happening in `cwd`, or null if this agent has
   // not written one. Newest wins: it is the session being typed into.
   find: (cwd: string) => Promise<string | null>;
@@ -610,7 +613,7 @@ export async function advance(r: Reader, path: string, fold = foldLine): Promise
 // what the agent has written since the last one.
 const readers = new Map<string, Reader>();
 
-export const CLAUDE: Source = { find: newestTranscript, fold: foldLine };
+export const CLAUDE: Source = { name: "claude", find: newestTranscript, fold: foldLine };
 
 export async function readSession(
   cwd: string,

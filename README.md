@@ -9,10 +9,12 @@ it.
 
 ![srcy](docs/demo.gif)
 
-<sub>Launch → the turn → GATES goes red → `e` to the failing line → collapse
-the tree to what moved → pin a file → walk its hunks, side by side and back →
-zoom the agent full screen → drag the border → the fix lands green. Real layout, real git repo, real transcript, real checker, all changing
-while the panels read them. Only the agent's turn is scripted — `npm run demo`
+<sub>Launch → the turn lands → `types` goes red while `lint`, which watches
+only `docs/`, stays green → `e` to the failing line → collapse the tree to
+what moved → pin a file → walk its hunks, side by side and back → zoom the
+agent → drag the border → the fix lands, **VERIFIED** → detach, and ask the
+same question with no panes at all. Real layout, real git repo, real
+transcript, real gates. Only the agent's turn is scripted; `npm run demo`
 reproduces it.</sub>
 
 ---
@@ -21,13 +23,15 @@ reproduces it.</sub>
 
 An agent's pane is a **log**: every fact printed once, then buried under the
 next forty tool calls. srcy is **state** — the plan *now*, the diff *so far*,
-whether it compiles *at this moment*.
+whether it compiles *at this moment*, and whether that answer is still about
+the code in front of you.
 
 |  | agent's pane | srcy |
 |---|---|---|
 | the plan | printed once, 40 calls ago | on screen |
 | what changed | one hunk at a time | whole tree, marked — and every hunk, scrollable |
 | does it build | whatever it said last | run against the tree that exists |
+| is that still true | — | `VERIFIED`, or `code moved since` |
 | how long has this call been running | — | `⟳ 13s Bash npm test` |
 
 ---
@@ -55,258 +59,94 @@ Run inside any git repo.
 | `srcy` | claude, in this repo |
 | `srcy --agent codex` | any binary — the name *is* the command |
 | `srcy --agent "claude --model opus"` | with its own flags |
-| `srcy -- claude --model opus` | everything after `--` is the agent's argv |
+| `srcy -- claude --resume` | everything after `--` is the agent's argv |
 | `srcy --name review` | a second session on the same repo |
 
-- Re-running `srcy` **re-attaches** instead of starting a second session.
-- Session name = repo basename + hash of its path, so `~/work/api` and
-  `~/side/api` never collide.
-- Quitting the agent ends the session. A mistyped flag is refused, not ignored.
+Re-running `srcy` **re-attaches** instead of starting a second session. The
+session name is the repo basename plus a hash of its path, so `~/work/api` and
+`~/side/api` never collide. A mistyped flag is refused, not ignored.
 
-srcy runs on its own tmux server:
-
-```bash
-tmux -L srcy ls            # what srcy has running
-tmux -L srcy kill-server   # stop all of it
-```
+srcy runs on its own tmux server: `tmux -L srcy ls`, `tmux -L srcy kill-server`.
 
 ### The agent's own flags
 
 Everything after `--` is the agent's argv, untouched. srcy wraps nothing and
-adds no permission layer of its own, so resuming a conversation and loosening
-approvals are the agent's flags, not srcy's.
+adds no permission layer, so resuming and loosening approvals are the agent's
+flags: `srcy -- claude --resume`, `srcy -- codex resume --last`,
+`srcy -- claude --permission-mode acceptEdits`.
 
-| | |
-|---|---|
-| `srcy -- claude --resume` | pick an earlier conversation |
-| `srcy -- claude -c` | continue the last one |
-| `srcy -- codex resume --last` | the same, for codex |
+> **`--dangerously-skip-permissions` and
+> `--dangerously-bypass-approvals-and-sandbox` let the agent run any command,
+> write any file and reach the network without a prompt.** Run them somewhere
+> you can throw away — a container, a scratch worktree, a branch you can
+> `git reset --hard` — and not in a shell holding credentials. What srcy adds
+> there is visibility, not a seatbelt.
 
-The panels come back with it. srcy reads whichever transcript was written
-most recently, with no "started after srcy" filter, so a resumed session
-restores its PLAN, its gauge and its GOAL. The `TURN` baseline is a fresh git
-tree either way — it comes from the repo, not the transcript.
-
-Approvals travel the same road:
-
-| | |
-|---|---|
-| `srcy -- claude --permission-mode acceptEdits` | edits land, shell still asks |
-| `srcy -- codex -s workspace-write -a on-request` | writes confined to the repo |
-| `srcy -- claude --dangerously-skip-permissions` | nothing asks |
-| `srcy -- codex --dangerously-bypass-approvals-and-sandbox` | nothing asks |
-
-**The last two let the agent run any command, write any file and reach the
-network without a prompt.** Run them somewhere you can throw away — a
-container, a scratch worktree, a branch you can `git reset --hard` — and not
-in a shell holding credentials. What srcy adds there is visibility, not a
-seatbelt: gates still run and the review pane still shows every file the turn
-touched, which is worth more when nothing else is asking.
-
-They combine: `srcy -- claude --resume --dangerously-skip-permissions`.
-
-Flag names drift between agent releases. `claude --help` and `codex --help`
-are the authority; the ones above were read off both.
-
-### Keys
-
-Keys are tmux's, because it *is* tmux.
-
-| key | |
-|---|---|
-| `ctrl-b o` / `ctrl-b ←→` | next pane / pane by direction |
-| `ctrl-b z` | zoom a pane full screen |
-| `ctrl-b d` | detach — the agent keeps working |
-| mouse | click to focus, drag a border, scroll back |
-
-With the keyboard in the sidebar:
-
-| key | |
-|---|---|
-| `j` `k` / `↓` `↑` | move the cursor |
-| `⏎` `space` | open/close a directory — on a file, pin the review pane to it |
-| `m` | show only what changed, and back |
-| `e` | jump the review pane to the next failing line |
-| `f` | back to following — the cursor tracks the file the agent has open |
-| `r` | run every gate now, including the ones that don't run themselves |
-| `c` | checkpoint: everything after this is *this* turn |
-
-With the keyboard in the review pane:
-
-| key | |
-|---|---|
-| `n` `p` | next / previous changed file |
-| `]` `[` | next / previous hunk |
-| `j` `k` / `↓` `↑` / `PgDn` `PgUp` | scroll |
-| `g` `G` | top / bottom of the diff |
-| `s` | side by side — old on the left, new on the right |
-| `f` | back to following the agent's newest write |
-| `1` `2` `3` | review this turn / this session / everything uncommitted |
-| `,` `.` | back and forward through the last 8 turns |
-
-The agent keeps every other keystroke. Both panels are inert until you move
-the keyboard to them.
-
-Under 72 columns the agent starts zoomed — three panes that narrow are three
-unreadable ones — and `ctrl-b z` is the way back to the panels.
+The panels come back with a resumed session: srcy reads whichever transcript
+was written most recently, so PLAN, GOAL and the gauge all restore. The `TURN`
+baseline is a fresh git tree either way — it comes from the repo, not the
+transcript.
 
 ---
 
 ## Panels
 
-| panel | reads | notes |
+| panel | reads | shows |
 |---|---|---|
-| **REPO** | `git` | `FOLLOW`/`PINNED`; whole project; directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
-| **GOAL** | `.srcy/task.md`, else the agent's session log | what you asked for, in your words, after forty tool calls buried it |
-| **PLAN** | agent's session log | still there 40 tool calls later |
-| **GATES** | `.srcy/config.json` or `.srcy/check` | one row per gate. Automatic ones run when the diff *stops* moving; the rest wait for `r`. Stale verdicts say `code moved since` |
-| **gauge** | agent's session log | `34% 343k/1.0M opus-5 cache 99%` |
-| **REVIEW** | `git` + GATES | every hunk of every changed file, scrollable, unified or side by side. Follows the newest write until you pin a file. Heads the diff with what the gates actually said |
+| **REPO** | `git` | the whole project, directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
+| **GOAL** | `.srcy/task.md`, else the session log | what you asked for, after forty tool calls buried it |
+| **PLAN** | session log | still there 40 tool calls later |
+| **GATES** | `.srcy/config.json` | one row per gate, plus `VERIFIED` when the word is earned |
+| **gauge** | session log | `34% 343k/1.0M opus-5 cache 99%` |
+| **REVIEW** | `git` + GATES | every hunk of every changed file, unified or side by side, headed by what the gates actually said |
 
-**Details worth knowing**
+A handful of choices worth knowing:
 
-- **A header's colour is its source, not decoration.** The rail stacks four
-  unrelated things in one narrow column, so `REPO` is cyan because it comes
-  from git, `GOAL` and `PLAN` are magenta because they come from the agent's
-  own log, and `GATES` takes a verdict's colour: red when a gate failed or
-  timed out, green when every gate has passed against the tree that is there
-  now, and no colour at all while any of it is unrun, running, or measured
-  against a tree that has moved on. The rule itself stays dim — it separates,
-  it doesn't announce.
-- **The focused pane's title is lit and the rest are grey.** Three panes take
-  keys and only one is listening; the panels do nothing until you move the
-  keyboard to them, which is easier to believe when you can see where it is.
-- **`m` collapses the tree to what moved.** On a real repo most of the tree
-  is files the turn never went near. The header says `CHANGED` instead of
-  `REPO` so a short list is never mistaken for a small project.
-- **`n`/`p` read worst first.** git hands its diff over alphabetically, which
-  has nothing to do with what deserves a reader first. The pane orders it: a
-  file with a failing gate, then deletions — the hardest change to notice by
-  reading what's left — then new files, which have no previous version and so
-  have never been read by anyone, then churn.
-- **`e` walks the failures.** GATES names a file and a line; `e` pins the
-  review pane to it and scrolls there — including into a file nothing has
-  touched, where the pane previews the source from that line instead of
-  starting at line one. A line the diff doesn't cover lands on the nearest
-  row above it.
-- **A plan step that hasn't moved says how long.** Past two minutes the
-  in-progress row carries its age. The plan is rewritten whole on every
-  update, so the clock is reset by the *item* changing, not by the list being
-  written again — twenty minutes on one step is a signal, twenty seconds
-  isn't, and they look identical without it.
-- **The sidebar's border says whether the agent is working or waiting on
-  you.** `⟳ 52s Bash npm test` while a tool is in flight — the age is the
-  wedged signal, since a still picture of `npm test` cannot say it has been
-  running twelve minutes — and `your turn · waiting 5m00s` once it stops.
-  `idle` covered both, and "just finished" and "finished while you were in
-  another window" are not the same thing to act on.
-- **The cursor holds a file, not a row.** The agent creates and deletes files
-  while you read; a row number silently means a different file.
-- **The sidebar says FOLLOW or PINNED, like the review pane.** Untouched, the
-  cursor tracks the file the agent has open right now. The first key you press
-  pins it — you are looking at something on purpose — and `f` hands it back.
-  Pinning survives every write: the agent cannot pull the cursor off what you
-  are reading.
-- **Hand-opened directories are overrides.** Everything you haven't touched
-  still opens itself for a change.
-- **An in-place edit counts as a change.** Replacing a line with a different
-  line leaves `+1 -1` exactly as it was — so the tree is identified by content,
-  not by churn counts. Otherwise the fix for the bug the agent introduced three
-  seconds ago never re-runs the checker.
-- **Where srcy hasn't run a gate, the agent's own run is the evidence.**
-  `not run · agent 4m00s`, or `not run · agent stale` when it went on editing
-  afterwards. "I ran the tests" is the claim taken on faith
-  more than any other, and both timestamps are the agent's own — so this holds
-  up on a transcript read hours later. Where srcy *has* run the gate its own
-  verdict is the better answer, and this stays out of the way.
+- **A header's colour is its source.** `REPO` is cyan because it comes from
+  git; `GOAL` and `PLAN` are magenta because they come from the agent. Only
+  `GATES` carries a state, so only `GATES` changes colour.
 - **Nothing reports passing before it has run.** `not run yet` ≠ `passing` ≠
   `none configured` ≠ `timed out`. A gate that ran out of time proved nothing
   either way, so it is not rewritten to "failing".
-- **The part that actually changed is picked out inside the line.** An
-  off-by-one is one character in eighty; `-` and `+` say the line moved, not
-  where. Both views mark the span between the common prefix and the common
-  suffix, in inverse rather than a third colour — the row already spends
-  colour on `+` and `-`. A line rewritten outright shares neither end and is
-  left alone, because marking all of it says nothing.
-- **Side by side is a key, not the default.** The dock is a short pane
-  spanning the window, so unified gets the whole width for the line and `s`
-  halves it — worth it reading a rewrite, not watching one land. Each column
-  is numbered by its own file, which unified cannot do: there, a deleted line
-  carries the number of whatever replaced it.
-- **FOLLOW and PINNED are both visible, and both reversible.** Anything you
-  press in the review pane pins it — having the agent's next write yank the
-  pane mid-sentence is what makes a live pane useless for reading. `f` gives
-  it back.
-- **A scope with no baseline shows nothing and says why.** `TURN` never
-  quietly falls back to `HEAD`: a diff labelled "this turn" that is really
-  every uncommitted line is worth less than an empty pane that admits it.
-- **Occupancy is the last request's, never a running total.** Cumulative counts
-  reach millions against a 200k window and would peg the gauge forever.
-- **The window is inferred from the session's peak, not its current fill.**
-  A Claude transcript never records how big the window is, so the evidence is
-  that a session has held more than 200k. Reading the current number instead
-  meant every `/compact` snapped the denominator back and showed 25k of a
-  megabyte as 15% full. Codex needs none of this — it records the real number.
-- **The peak belongs to the model that set it.** `/model` leaves the
-  conversation in place and swaps the window under it, so srcy reads the
-  model off every request and starts the peak over when it changes — what the
-  old model held is evidence about a window that is gone. The name is on the
-  gauge, next to the denominator it explains. The model string alone can't be
-  mapped to a size (a 1M session writes `claude-opus-5`, byte for byte what a
-  200k one writes), so for a window neither bucket fits, say so:
-  `SRCY_CONTEXT_WINDOW=400000 srcy`.
+- **An in-place edit counts as a change.** Replacing a line with a different
+  line leaves `+1 -1` exactly as it was, so the tree is identified by content.
+  Otherwise the fix for the bug introduced three seconds ago never re-checks.
+- **Created, edited and deleted are three markers** — `+` `▪` `-`. A deletion
+  says `deleted`, not `+0 -37`, which is the same shape as a heavy edit.
+- **`n`/`p` read worst first**: a file with a failing gate, then deletions,
+  then new files, then churn. git's alphabetical order has nothing to do with
+  what deserves a reader first.
+- **The border says working or waiting.** `⟳ 52s Bash npm test` while a call
+  is in flight — a still picture of `npm test` cannot say it has been running
+  twelve minutes — and `your turn · waiting 5m00s` once it stops.
+- **Where srcy hasn't run a gate, the agent's own run is the evidence.**
+  `not run · agent 4m00s`, or `agent stale` when it went on editing
+  afterwards. Both timestamps are the agent's own.
 - **`cache` is the bloat reading.** Healthy sits near 99%; a session
   re-sending its whole context every turn shows it collapsing.
-- **New files count their whole length.** `+0 -0` on a file that didn't exist
-  an hour ago reads as "nothing happened here".
-- **Created, edited and deleted are three different markers.** `+` `▪` `-`,
-  and a deletion says `deleted` instead of `+0 -37` — which is the same shape
-  as an edit that removed thirty-seven lines. Deleting the wrong file is a
-  different mistake from editing it, and it was the one the tree couldn't
-  show.
-- srcy adds **nothing** to the context window. Every token in there is the
+- **srcy adds nothing to the context window.** Every token in there is the
   agent's.
 
-### Pinning the objective
+Every marker is one cell wide in every terminal — the obvious ones (`●` `○`
+`▶` `█`) are East-Asian *ambiguous* and render two cells under some settings,
+which tears a fixed-width column.
 
-`.srcy/task.md` — one line, or a markdown file whose first line is one:
+---
 
-```markdown
-# Ship the auth rewrite behind a flag
-```
+## Verification
 
-GOAL shows it, and the rule says `GOAL  task.md` so a stale one is never
-mistaken for the request you just typed. Without the file, GOAL is the newest
-thing you asked the agent — which is the newest thing you *said*, not what
-you are trying to do: it is replaced every turn, and a compaction or a model
-change can leave it describing a detour. The file outlives all three.
-
-The `TURN` baseline still comes from the request, not from this. A pinned
-objective is not a checkpoint.
-
-### What gets verified
-
-`.srcy/check` — any executable, any language. Non-zero means failing.
-`path:line: msg` and `path(line,col): msg` are parsed into the list.
-
-```bash
-mkdir -p .srcy && cat > .srcy/check <<'EOF'
-#!/bin/sh
-cargo check --message-format short 2>&1
-EOF
-chmod +x .srcy/check
-```
-
-Without one, srcy falls back to your `typecheck` or `build` npm script.
-
-For more than one, `.srcy/config.json`:
+`.srcy/config.json` — commit it, like a lint file:
 
 ```json
 {
   "gates": [
-    { "name": "typecheck", "command": ["npm", "run", "typecheck"] },
-    { "name": "unit", "command": ["npm", "test"], "auto": false },
-    { "name": "lint", "command": ["npx", "eslint", "."], "timeoutMs": 60000 }
+    { "name": "types", "command": ["npm", "run", "typecheck"], "watch": ["**/*.ts"] },
+    { "name": "unit",  "command": ["npm", "test"], "watch": ["src", "test"] },
+    { "name": "lint",  "command": ["npx", "eslint", "."], "required": false },
+    { "name": "e2e",   "command": ["npm", "run", "e2e"], "auto": false, "timeoutMs": 300000 }
+  ],
+  "derived": [
+    { "from": ["src", "scripts/demo.ts"], "to": "docs/demo.cast" }
   ]
 }
 ```
@@ -315,40 +155,154 @@ For more than one, `.srcy/config.json`:
 |---|---|
 | `command` | a list of words, never a shell line. Need a shell? That's what `.srcy/check` is |
 | `auto` | default `true` — runs itself once the tree stops moving. `false` waits for `r` |
+| `required` | default `true` — whether **VERIFIED** is a claim about this gate |
+| `watch` | default the whole tree — the paths this verdict depends on |
 | `timeoutMs` | default 120000, capped at ten minutes |
 
-Gates run one at a time: they're your own commands, and two compilers over one
-tree cost more than they save. A malformed config is shown in GATES and falls
-back to the detected command — one bad gate invalidates the list rather than
-being silently skipped.
+Gates run one at a time. A malformed config is shown in GATES and falls back
+to the detected command — one bad gate invalidates the list rather than being
+silently skipped. With no config at all, srcy runs an executable `.srcy/check`
+(any language, non-zero means failing) or your `typecheck`/`build` npm script.
 
-Commit either — it's project config, like a lint file.
+### What green means
 
-### Files built from other files
+A verdict carries the tree it was measured against, so a pass the tree has
+outrun says `code moved since` instead of `✔`. **VERIFIED** is the whole of
+that in one word:
 
-A gif built from a script, a frame pasted into a README, a generated client —
-nothing tells you they went stale, so you find out when someone reads the old
-one. Declare them next to the gates:
+> every gate marked `required` has **passed**, and each of those passes was
+> measured against the tree that is there **now**.
 
-```json
-{
-  "derived": [
-    { "from": ["src", "scripts/demo.ts"], "to": "docs/demo.cast" },
-    { "from": ["docs/demo.cast"], "to": "docs/demo.gif" }
-  ]
-}
+Nothing softer. A repo with no required gate is never verified — "green
+because there was nothing to check" is the one thing this must never say.
+
+`watch` is what keeps the word usable. A typecheck that reads only TypeScript
+isn't invalidated by editing a README, so it doesn't go stale and doesn't
+re-run:
+
+| pattern | matches |
+|---|---|
+| `src` or `src/**` | everything under that directory |
+| `**/*.ts` | that extension, anywhere |
+| `api/schema.yaml` | exactly that file |
+
+Not a glob engine — three shapes, and anything else matches nothing, which
+shows up immediately as a gate that never goes stale.
+
+`derived` is the same claim about files a project builds from other files — a
+gif built from a script, a generated client. They appear in GATES as
+`demo.cast  older than panels.tsx` or `never built`; there is no command to
+run, only two timestamps to compare. This is Make's job, technically. Nobody
+runs Make on a gif.
+
+### What the checker said, and where
+
+Failures are parsed into locations you can jump to — `e` walks them, errors
+before warnings, so a lint run's forty warnings never bury its three errors.
+
+| read | looks like |
+|---|---|
+| tsc | `src/a.ts(41,5): error TS2322: …` |
+| most compilers, ruff, mypy, pytest, go test | `src/a.ts:41:5: …` |
+| jest, vitest, node:test | `at fn (/repo/test/a.test.ts:22:10)` |
+| eslint | a bare path, then `12:5  error  …` indented under it |
+| cargo, rustc | `error[E0308]: …` then `  --> src/main.rs:4:5` |
+
+The last two need more than a line at a time — neither an eslint file header
+nor a cargo arrow is a finding on its own.
+
+---
+
+## Without the panes
+
+The trust model is worth nothing if the only way to read it is to be looking
+at a terminal. Same engine, same gates, same word.
+
+| command | |
+|---|---|
+| `srcy status` | mission, agent, churn, every verdict, what needs attention, `VERIFIED` / `UNVERIFIED` |
+| `srcy verify` | run every gate against the tree that is there now |
+| `srcy verify unit` | just that one |
+| `srcy doctor` | what srcy resolved — gates, watches, timeouts, derived files, config errors |
+| `srcy mission start "…"` | pin what this working copy is for, and start its clock |
+| `srcy mission complete` | finish it, without erasing what it was |
+| `srcy checkpoint` | remember this tree and what was true of it — no commit |
+| `srcy checkpoint list` | every checkpoint |
+| `srcy checkpoint diff 3 5` | `git diff` between two of them (one argument = against now) |
+| `srcy timeline` | how the tree got here |
+
+```
+$ srcy status
+Mission
+  Fix the token expiration race  active 34m
+Agent
+  claude  working  Bash npm test  12s
+Repository
+  main  4 files  +72 -18
+Verification
+  typecheck   PASS  2.1s
+  unit        FAIL  8.4s
+  lint        STALE  0.8s  (optional)
+Attention
+  ✗ unit      test/session.test.ts:87  expected 2, got 3
+  ! lint      code moved since it ran
+State
+  UNVERIFIED
 ```
 
-They appear in GATES — same claim, same staleness language — as
-`demo.cast  older than panels.tsx`, or `never built`. `from` entries are
-paths or directory prefixes, not globs; there is no command to run, so `r`
-skips them and the comparison is re-made whenever the tree moves.
+`status` and `verify` **exit non-zero when the tree is not verified** — a
+hook, a CI step or the agent's own `&&` can ask srcy the same question the
+rail answers in colour. The `Agent` line is optional by construction: a repo
+where no adapter matches prints every other line unchanged.
 
-This is Make's job, technically. Nobody runs Make on a gif.
+A checkpoint is a real git tree object written through a throwaway index —
+nothing is committed, staged or stashed, and your index is never touched. The
+timeline is the other half: the verdicts say what is true, and only this says
+how the tree got here.
+
+```
+$ srcy timeline
+22:27:36  mission.start   Fix the token expiration race
+22:31:10  gate.start      unit
+22:31:31  gate.fail       unit  21s
+22:34:02  gate.pass       unit  19s
+```
+
+Transitions only, never polls. Verdicts live in `.srcy/state.json`, so the
+rail in one terminal and `srcy verify` in another share them — and a restart
+shows the last verdict, correctly labelled stale, instead of `not run yet`.
+`.srcy/config.json` and `.srcy/task.md` are the parts worth committing:
+
+```gitignore
+.srcy/state.json
+.srcy/events.jsonl
+.srcy/checkpoints.jsonl
+```
+
+---
+
+## Keys
+
+Keys are tmux's, because it *is* tmux: `ctrl-b o` next pane, `ctrl-b z` zoom,
+`ctrl-b d` detach (the agent keeps working), mouse to focus, drag or scroll.
+Under 72 columns the agent starts zoomed — three narrow panes are three
+unreadable ones.
+
+| in the sidebar | | in the review pane | |
+|---|---|---|---|
+| `j` `k` | move the cursor | `n` `p` | next / previous changed file |
+| `⏎` `space` | open a directory, or pin a file | `]` `[` | next / previous hunk |
+| `m` | only what changed, and back | `j` `k` `PgDn` `PgUp` | scroll |
+| `e` | jump to the next failing line | `g` `G` | top / bottom |
+| `f` | back to following the agent | `s` | side by side |
+| `r` | run every gate now | `f` | back to following |
+| `c` | checkpoint: everything after this is *this* turn | `1` `2` `3` | turn / session / everything uncommitted |
+| | | `,` `.` | back and forward through the last 8 turns |
+
+The agent keeps every other keystroke. Both panels are inert until you move
+the keyboard to them.
 
 ### Three answers to "what changed"
-
-`1` `2` `3` in the review pane:
 
 | scope | since |
 |---|---|
@@ -356,51 +310,46 @@ This is Make's job, technically. Nobody runs Make on a gif.
 | `SESSION` | srcy opening this repo |
 | `HEAD` | the last commit — every uncommitted line, staged or not |
 
-`,` steps back a turn and `.` forward, up to eight — the title says `TURN-2`.
-srcy keeps the tree each turn started from, so an older turn is a real diff
-rather than a reconstruction; a turn it no longer holds says so instead of
-quietly showing you another one. `c` checkpoints land in the same history.
-
-A baseline is a git tree captured through a throwaway index: your real index
-and worktree are never touched, and srcy stages, commits and reverts nothing.
-
 `TURN` is taken the moment your request lands, then checked against the
 transcript again: if the agent had already started writing, the baseline is
-thrown away and the pane says so rather than hiding half the turn. Press `c`
-to set one by hand — which is also how `TURN` works for an agent whose
-session format srcy cannot read.
+thrown away and the pane says so rather than hiding half the turn. A scope
+with no baseline shows nothing and explains itself — a diff labelled "this
+turn" that is really every uncommitted line is worth less than an empty pane
+that admits it.
 
 ---
 
 ## How it works
 
-**tmux hosts the layout.** That's why the agent stays native — tmux already
+**tmux hosts the layout**, which is why the agent stays native: tmux already
 solves the pty, resize protocol, scrollback, mouse and copy-paste. The agent
 gets a real terminal because it *is* in one.
 
 **On srcy's own socket.** Agents ask their terminal for things — Claude Code
 wants `focus-events`, pi wants `extended-keys` — and those are *server-wide*
-in tmux. On a shared server they'd reach into every other session you have
-open and stay on after srcy exits. Your `~/.tmux.conf` still loads.
+in tmux. On a shared server they would reach into every other session you have
+open. Your `~/.tmux.conf` still loads.
 
-**The panels never speak to the agent.** No protocol, no adapter. git and your
-checker work for every agent — and for a person with an editor open. Only
-`GOAL`, `PLAN`, the gauge and the automatic `TURN` baseline are per-agent:
+**The panels never speak to the agent.** git and your gates work for every
+agent, and for a person with an editor open. Only GOAL, PLAN, the gauge and
+the automatic `TURN` baseline are per-agent:
 
-| agent | `GOAL` | `PLAN` | gauge |
+| agent | GOAL | PLAN | gauge |
 |---|---|---|---|
 | `claude` | yes | yes | yes — window inferred (200k, or 1M once past it), per model |
 | `codex` | yes | when it calls `update_plan` | yes — against the window codex records itself |
 | anything else | blank | blank | blank |
 
-Blank, never another agent's numbers — and `c` sets the turn baseline by hand
-wherever srcy cannot read one.
+Blank, never another agent's numbers. An agent srcy cannot name is still
+watched for: if a transcript it recognises appears, the panels pick it up, and
+`c` sets the turn baseline by hand wherever they do not. An agent started
+*below* the root — a package in a monorepo, a worktree under it — is still
+this repo's agent.
 
-An agent started *below* the root — a package in a monorepo, a worktree
-checked out under it — is still this repo's agent, and srcy reads its session
-rather than showing a blank PLAN, GOAL and gauge with no word about why. git
-is repo-wide either way. The session's own records carry the directory it
-runs in, so a sibling like `../api-legacy` is never mistaken for one of yours.
+A Claude transcript never records how big the window is, so srcy infers it
+from the session's peak and restarts that peak when `/model` swaps the window
+underneath. For a window neither bucket fits:
+`SRCY_CONTEXT_WINDOW=400000 srcy`.
 
 <details>
 <summary>The same repo under <code>srcy --agent codex</code></summary>
@@ -444,32 +393,6 @@ window with every token count — measured, where Claude Code's is inferred.
    4   }
  ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn
 ```
-</details>
-
-<details>
-<summary>Why the panels share a file instead of a tmux option</summary>
-
-The sidebar and the diff pane are separate processes, so the picked file and
-the check result have to cross between them. That was a tmux user option.
-Measured on tmux 3.4:
-
-```
-set-option, ~16 KB+ value   →  "command too long"
-"a$b"  set, then read back  →  "a\$b"     (display-message and show-options)
-```
-
-The second is enough to make `JSON.parse` throw on any error message
-mentioning a shell variable. One small file named after the session has
-neither limit and costs no process per poll.
-</details>
-
-<details>
-<summary>Colour and glyphs</summary>
-
-Green wrote, red failed, dim is background you may skip. Every marker is one
-cell wide in every terminal — the obvious ones (`●` `○` `▶` `█`) are
-East-Asian *ambiguous* and render two cells under some terminal settings,
-which tears a fixed-width column.
 </details>
 
 ---

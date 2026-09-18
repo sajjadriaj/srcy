@@ -25,6 +25,35 @@ export interface RepoState {
   // ponytail: hashes the whole diff each poll. The `git diff HEAD` that
   // produced it costs more; revisit only if a repo turns up where it does not.
   mark: string;
+  // The same fingerprint taken apart: one `[path, stamp]` per changed file,
+  // sorted by path. `mark` is the hash of this list, so the two can never
+  // disagree — and a gate that watches only `src/**` can hash the entries it
+  // cares about instead of being invalidated by every edit in the repo.
+  stamps: [string, string][];
+}
+
+// srcy's own runtime state is not a change to the project.
+//
+// .srcy/state.json holds the gate verdicts, and it is written the moment a
+// gate finishes. Counting it as part of the tree makes every verdict
+// invalidate itself on the way to disk: the pass lands, the mark moves
+// because the pass landed, and the rail reports "code moved since" about the
+// run that just happened. The timeline and the checkpoint log are written on
+// the same beat and would do the same thing. Skipped here rather than only in
+// .gitignore, because a repo that has not added those lines yet must not be
+// broken by it.
+const RUNTIME = new Set([".srcy/state.json", ".srcy/events.jsonl", ".srcy/checkpoints.jsonl"]);
+
+function runtimeFile(path: string): boolean {
+  return RUNTIME.has(path);
+}
+
+// One file's content fingerprint, from the diff git already produced for it.
+// Header included: a rename with no content change is a change.
+function fileStamp(f: FileDiff): string {
+  const h = createHash("sha1").update(f.header);
+  for (const k of f.hunks) h.update(k.header).update("\n").update(k.body);
+  return h.digest("hex");
 }
 
 // A new file's churn is its whole length. Showing "+0 -0" for one — which
@@ -70,7 +99,7 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
   // Against HEAD, not the index: an agent that staged its work is still an
   // agent whose work you have not read yet.
   const raw = await git(repo, "diff", "HEAD").catch(() => "");
-  const diffs = splitDiff(raw);
+  const diffs = splitDiff(raw).filter((f) => !runtimeFile(f.path));
 
   const files: MapEntry[] = diffs.map((f) => {
     const { added, removed } = diffStats(f);
@@ -85,15 +114,15 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
     return { path: f.path, touch, added, removed, problems: count.get(f.path) ?? 0 };
   });
 
-  const stamps: string[] = [];
+  const stamps: [string, string][] = diffs.map((f) => [f.path, fileStamp(f)]);
   const seen = new Set(files.map((f) => f.path));
   const status = await git(repo, "status", "--porcelain", "-uall").catch(() => "");
   for (const line of status.split("\n")) {
     if (!line.startsWith("?? ")) continue;
     const path = line.slice(3).trim();
-    if (path === "" || seen.has(path)) continue;
+    if (path === "" || seen.has(path) || runtimeFile(path)) continue;
     const { added, removed, stamp } = await newFileChurn(repo, path);
-    stamps.push(`${path}:${stamp}`);
+    stamps.push([path, stamp]);
     // Untracked: it did not exist at HEAD, which is the same thing `new file
     // mode` says about a staged one.
     files.push({ path, touch: "added", added, removed, problems: count.get(path) ?? 0 });
@@ -108,8 +137,11 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
   }
 
   files.sort((a, b) => a.path.localeCompare(b.path));
-  const mark = createHash("sha1").update(raw).update("\u0000").update(stamps.sort().join("\u0000")).digest("hex");
-  return { files, diffs, mark };
+  stamps.sort(([a], [b]) => a.localeCompare(b));
+  const mark = createHash("sha1")
+    .update(stamps.map(([p, s]) => `${p}\u0000${s}`).join("\u0001"))
+    .digest("hex");
+  return { files, diffs, mark, stamps };
 }
 
 // Every file in the project, for the rail's tree — tracked plus untracked,
@@ -117,5 +149,24 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
 // walked so that node_modules and build output are somebody else's problem.
 export async function listPaths(repo: string): Promise<string[]> {
   const out = await git(repo, "ls-files", "-co", "--exclude-standard").catch(() => "");
-  return out.split("\n").filter((l) => l !== "");
+  // Minus srcy's own verdict file, for the same reason the fingerprint skips
+  // it: a project that has not added the .gitignore line yet should not find
+  // srcy's droppings in the tree it came here to read.
+  return out.split("\n").filter((l) => l !== "" && !runtimeFile(l));
+}
+
+// The objective the project pinned, if it pinned one. A transcript's newest
+// request is the newest thing you said, which is not the same as what you are
+// trying to do: it is replaced every turn, and a compaction or a model change
+// can leave it describing a detour. A file in the repo outlives all three.
+export async function loadTask(cwd: string): Promise<string> {
+  const raw = await readFile(join(cwd, ".srcy", "task.md"), "utf8").catch(() => "");
+  // It is markdown, so the first line is usually a heading and its hashes are
+  // punctuation rather than something to read.
+  return (
+    raw
+      .split("\n")
+      .map((l) => l.replace(/^#+\s*/, "").trim())
+      .find((l) => l !== "") ?? ""
+  );
 }

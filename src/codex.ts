@@ -253,4 +253,4 @@ export function foldLine(f: Fold, line: string): void {
   }
 }
 
-export const CODEX: Source = { find: findSession, fold: foldLine };
+export const CODEX: Source = { name: "codex", find: findSession, fold: foldLine };

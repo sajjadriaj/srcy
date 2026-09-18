@@ -1,2 +1,5 @@
 node_modules/
 dist/
+.srcy/state.json
+.srcy/events.jsonl
+.srcy/checkpoints.jsonl

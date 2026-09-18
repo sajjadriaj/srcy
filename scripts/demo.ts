@@ -34,8 +34,9 @@ const OUT = process.env.DEMO_OUT ?? fileURLToPath(new URL("../docs/demo.cast", i
 // recording is a few dozen frames rather than a few hundred.
 const FRAME_MS = 180;
 // Panels poll at 1.2s and the checker waits 2.5s for the diff to stop moving,
-// so anything that has to show a fresh verdict waits at least this long.
-const CHECK_MS = 5200;
+// and gates run one at a time — so a fresh verdict for all three is the quiet
+// wait plus a poll each.
+const CHECK_MS = 7600;
 
 const sh = (cmd: string, args: string[], cwd?: string): void => {
   const r = spawnSync(cmd, args, { cwd, encoding: "utf8" });
@@ -108,9 +109,11 @@ const FILES: [string, string][] = [
   ["README.md", "# api\n"],
 ];
 
-// Fails on the agent's first version of renew() and passes on its second, so
-// the recording shows GATES go red and come back green off real runs.
-const CHECK = [
+// Three gates, because VERIFIED is a claim about more than one thing and the
+// recording should show what the word is worth. `types` fails on the agent's
+// first version of renew() and passes on its second, so GATES goes red and
+// comes back green off real runs of a real command.
+const TYPES = [
   "#!/bin/sh",
   "if grep -q 'expiresAt + 3600' src/auth/session.ts 2>/dev/null; then",
   "  echo \"src/auth/session.ts(3,32): error TS18048: 'this.expiresAt' is possibly 'undefined'.\"",
@@ -119,6 +122,27 @@ const CHECK = [
   "exit 0",
   "",
 ].join("\n");
+const PASSES = "#!/bin/sh\nexit 0\n";
+
+// `lint` is the optional one: it is in GATES and in ATTENTION, and it does not
+// get a vote on whether the tree is verified.
+const CONFIG = JSON.stringify(
+  {
+    gates: [
+      { name: "types", command: [".srcy/types"], watch: ["**/*.ts"] },
+      { name: "tests", command: [".srcy/tests"], watch: ["src", "test"] },
+      // Watches the docs, so the turn's src edits never make it stale. It
+      // stays green beside a red `types` and a stale `tests`, which is what
+      // a watch list is for and is hard to believe until you have seen it.
+      { name: "lint", command: [".srcy/lint"], watch: ["docs"], required: false },
+    ],
+  },
+  null,
+  2,
+);
+
+// What this working copy is for, pinned where it outlives the session.
+const TASK = "# Fix the token expiry off-by-one\n";
 
 // ---------------------------------------------------------------------------
 // The transcript, written a line at a time while the panels read it
@@ -205,10 +229,14 @@ async function main(): Promise<void> {
       await writeFile(join(repo, path), body);
     }
     await mkdir(join(repo, ".srcy"), { recursive: true });
-    await writeFile(join(repo, ".srcy", "check"), CHECK);
-    await chmod(join(repo, ".srcy", "check"), 0o755);
+    await writeFile(join(repo, ".srcy", "config.json"), `${CONFIG}\n`);
+    await writeFile(join(repo, ".srcy", "task.md"), TASK);
+    for (const [name, body] of [["types", TYPES], ["tests", PASSES], ["lint", PASSES]] as const) {
+      await writeFile(join(repo, ".srcy", name), body);
+      await chmod(join(repo, ".srcy", name), 0o755);
+    }
 
-    sh("git", ["init", "-q"], repo);
+    sh("git", ["init", "-q", "-b", "main"], repo);
     sh("git", ["config", "user.email", "demo@srcy"], repo);
     sh("git", ["config", "user.name", "demo"], repo);
     sh("git", ["add", "-A"], repo);
@@ -246,7 +274,11 @@ async function main(): Promise<void> {
       rc,
       [
         `PS1='\\[\\e[38;5;42m\\]~/api\\[\\e[0m\\] $ '`,
-        `srcy() { env -u TMUX tmux -L ${SOCKET} attach -t ${SESSION}; }`,
+        // Bare `srcy` attaches, which is what the real binary does when this
+        // repo already has a session. With arguments it is the real CLI —
+        // the same code path, asked the same question without the panes.
+        `srcy() { if [ $# -eq 0 ]; then env -u TMUX tmux -L ${SOCKET} attach -t ${SESSION};`,
+        `  else ${shq(tsx)} ${shq(self)} "$@"; fi; }`,
         "unset HISTFILE",
         "clear",
         "",
@@ -254,7 +286,7 @@ async function main(): Promise<void> {
     );
     camQuiet(["kill-session", "-t", CAMERA]);
     sh("tmux", [
-      "new-session", "-d", "-s", CAMERA, "-x", String(COLS), "-y", String(ROWS),
+      "new-session", "-d", "-s", CAMERA, "-c", repo, "-x", String(COLS), "-y", String(ROWS),
       `env -u TMUX HOME=${shq(home)} TERM=xterm-256color bash --noprofile --rcfile ${shq(rc)} -i`,
     ]);
     camQuiet(["set-option", "-t", CAMERA, "status", "off"]);
@@ -440,7 +472,28 @@ async function main(): Promise<void> {
     await jsonl(record({ input_tokens: 2, cache_creation_input_tokens: 700, cache_read_input_tokens: 118_200, output_tokens: 13_400 }));
     await wait(CHECK_MS);
     await say(`Expiry is inclusive now, and renew() guards the optional.`, "", `${CY}❯${OFF}`);
-    await wait(2600);
+    await wait(2800);
+
+    // -----------------------------------------------------------------------
+    // The same question, without the panes.
+    //
+    // Detached rather than quit: the agent is still working in there. What
+    // the rail says in colour, `srcy status` says in words and in an exit
+    // code — so a hook, a CI step, or the agent's own `&&` can ask it too.
+
+    // Detached through tmux's own command rather than by sending a prefix
+    // key: the srcy session loads whatever tmux.conf is on the recording
+    // machine, and a demo that depends on that machine's prefix is a demo
+    // that records differently on the next one.
+    srcyQuiet(["detach-client", "-s", SESSION]);
+    await wait(1400);
+    for (const ch of "srcy status") {
+      camQuiet(["send-keys", "-t", CAMERA, ch === " " ? "Space" : ch]);
+      await wait(95);
+    }
+    await wait(500);
+    camQuiet(["send-keys", "-t", CAMERA, "Enter"]);
+    await wait(4200);
 
     running = false;
     await camera;
