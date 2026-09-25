@@ -182,10 +182,33 @@ export interface Ran {
   // failed — nothing was proved either way — and rewriting it to "failing"
   // sends the reader looking for a bug that may not exist.
   timedOut: boolean;
+  // Stopped on purpose, before it could say anything: the tree moved under
+  // it, or the panel is going away.
+  killed: boolean;
 }
 
-export async function runCommand(argv: string[], cwd: string, timeoutMs = TIMEOUT_MS): Promise<Ran> {
-  return new Promise<Ran>((resolve) => {
+
+export interface Run {
+  done: Promise<Ran>;
+  // Stop it early. The result still arrives, marked killed, so a caller
+  // waiting on `done` is never left waiting on a process that is gone.
+  kill: () => void;
+}
+
+// Everything started here and not yet finished. A gate's child is in its own
+// process group so a timeout can kill what it spawned — which also means the
+// panel exiting does not take it along, and a session ending mid-run left a
+// compiler going for the rest of the day. killAll is what the panel calls on
+// its way out.
+const live = new Set<() => void>();
+
+export function killAll(): void {
+  for (const kill of live) kill();
+}
+
+export function startCommand(argv: string[], cwd: string, timeoutMs = TIMEOUT_MS): Run {
+  let stop: () => void = () => {};
+  const done = new Promise<Ran>((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
@@ -193,30 +216,47 @@ export async function runCommand(argv: string[], cwd: string, timeoutMs = TIMEOU
     });
     let text = "";
     let timedOut = false;
+    let killed = false;
     const collect = (chunk: Buffer): void => {
       text += chunk.toString();
     };
     child.stdout.on("data", collect);
     child.stderr.on("data", collect);
-    const timer = setTimeout(() => {
-      timedOut = true;
+    const end = (): void => {
       try {
         process.kill(-child.pid!, "SIGKILL");
       } catch {
         // already gone
       }
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      end();
       text += `\nsrcy: timed out after ${Math.round(timeoutMs / 1000)}s`;
     }, timeoutMs);
     timer.unref();
+    stop = (): void => {
+      if (killed) return;
+      killed = true;
+      end();
+    };
+    live.add(stop);
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ text: `srcy: could not run ${argv[0]}: ${err.message}`, code: 1, timedOut });
+      live.delete(stop);
+      resolve({ text: `srcy: could not run ${argv[0]}: ${err.message}`, code: 1, timedOut, killed });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolve({ text, code, timedOut });
+      live.delete(stop);
+      resolve({ text, code, timedOut, killed });
     });
   });
+  return { done, kill: () => stop() };
+}
+
+export async function runCommand(argv: string[], cwd: string, timeoutMs = TIMEOUT_MS): Promise<Ran> {
+  return startCommand(argv, cwd, timeoutMs).done;
 }
 
 // The last lines of a run, which is all any pane has room for — and the only

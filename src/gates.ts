@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { checkCommand, parseProblems, runCommand, tailOf, type Problem } from "./checks.js";
+import { checkCommand, parseProblems, startCommand, tailOf, type Problem } from "./checks.js";
 
 // What srcy has actually verified, as more than one question.
 //
@@ -15,7 +15,7 @@ import { checkCommand, parseProblems, runCommand, tailOf, type Problem } from ".
 // Deliberately more states than pass/fail. "Not run" reading like "passing"
 // is the failure that would make the whole pane worse than nothing, and a
 // gate that ran out of time has not failed — nothing was proved either way.
-export type Status = "not_run" | "running" | "pass" | "fail" | "timeout";
+export type Status = "not_run" | "running" | "pass" | "fail" | "timeout" | "killed";
 
 export interface Gate {
   name: string;
@@ -41,6 +41,9 @@ export interface GateResult {
   status: Status;
   problems: Problem[];
   tail: string;
+  // The last OUTPUT_LINES of what it printed, for the pane with the height
+  // to show a test runner's assertion diff. The tail is the rail's twelve.
+  output: string;
   ms: number;
   // The tree fingerprint this verdict was measured against. When it stops
   // matching the current one the verdict is stale, which is said out loud
@@ -49,6 +52,10 @@ export interface GateResult {
 }
 
 export const DEFAULT_TIMEOUT_MS = 120_000;
+// How much of a run the dock can page through. Bounded because the result
+// crosses between two processes on every poll; a runaway build log is not
+// what anyone opens the dock to read.
+export const OUTPUT_LINES = 300;
 // A gate is something a person is waiting on between turns, not a CI job.
 const MAX_TIMEOUT_MS = 600_000;
 
@@ -104,7 +111,7 @@ export async function checkDerived(cwd: string, list: Derived[], paths: string[]
     try {
       built = (await stat(join(cwd, d.to))).mtimeMs;
     } catch {
-      out.push({ name, status: "fail", problems: [], tail: "never built", ms: 0, mark });
+      out.push({ name, status: "fail", problems: [], tail: "never built", output: "", ms: 0, mark });
       continue;
     }
     let newest = { path: "", at: 0 };
@@ -122,8 +129,8 @@ export async function checkDerived(cwd: string, list: Derived[], paths: string[]
       newest.at > built
         ? // Basename: the rail is a narrow column, and the whole path clips —
           // which loses more than the directory does.
-          { name, status: "fail", problems: [], tail: `older than ${newest.path.split("/").pop() ?? newest.path}`, ms: 0, mark }
-        : { name, status: "pass", problems: [], tail: "", ms: 0, mark },
+          { name, status: "fail", problems: [], tail: `older than ${newest.path.split("/").pop() ?? newest.path}`, output: "", ms: 0, mark }
+        : { name, status: "pass", problems: [], tail: "", output: "", ms: 0, mark },
     );
   }
   return out;
@@ -226,44 +233,72 @@ async function detected(repo: string): Promise<Gate[]> {
   ];
 }
 
-export async function loadGates(repo: string): Promise<{ gates: Gate[]; derived: Derived[]; error?: string }> {
+export interface Config {
+  gates: Gate[];
+  derived: Derived[];
+  // Ring the terminal's bell when the agent stops, needs you, or a gate goes
+  // red. On unless the project says `"notify": false`.
+  notify: boolean;
+  error?: string;
+}
+
+export async function loadGates(repo: string): Promise<Config> {
   let text: string;
   try {
     text = await readFile(join(repo, ".srcy", "config.json"), "utf8");
   } catch {
-    return { gates: await detected(repo), derived: [] };
+    return { gates: await detected(repo), derived: [], notify: true };
   }
   let raw: unknown;
   try {
     raw = JSON.parse(text);
   } catch {
-    return { gates: await detected(repo), derived: [], error: ".srcy/config.json is not valid JSON" };
+    return { gates: await detected(repo), derived: [], notify: true, error: ".srcy/config.json is not valid JSON" };
   }
+  const notify = (raw as { notify?: unknown } | null)?.notify !== false;
   const parsed = parseConfig(raw);
   const built = parseDerived(raw);
   const error = parsed.error ?? built.error;
-  if (error !== undefined) return { gates: await detected(repo), derived: [], error };
+  if (error !== undefined) return { gates: await detected(repo), derived: [], notify, error };
   const gates = parsed.gates.length > 0 ? parsed.gates : await detected(repo);
-  return { gates, derived: built.derived };
+  return { gates, derived: built.derived, notify };
+}
+
+
+export interface GateRun {
+  done: Promise<GateResult>;
+  kill: () => void;
+}
+
+// A gate, started. Separate from awaiting it because the tree can move while
+// it runs, and a verdict about a tree that is gone is worth less than the
+// seconds it would take to finish measuring it.
+export function startGate(repo: string, gate: Gate, mark: string): GateRun {
+  const started = Date.now();
+  const run = startCommand(gate.command, repo, gate.timeoutMs);
+  const done = run.done.then((out): GateResult => {
+    // Exit status is the verdict, not whatever the tool chose to print: a
+    // linter that prints "error:" in its help text still passed.
+    const status: Status = out.killed ? "killed" : out.timedOut ? "timeout" : out.code === 0 ? "pass" : "fail";
+    return {
+      name: gate.name,
+      status,
+      // Stamped with the gate name: the dock and the CLI both list problems
+      // from several gates at once, and "what is broken" is a poorer answer
+      // than "what is broken, and which check noticed".
+      problems: status === "pass" || status === "killed" ? [] : parseProblems(out.text, repo, gate.name),
+      tail: tailOf(out.text),
+      output: out.text.replace(/\s+$/, "").split("\n").slice(-OUTPUT_LINES).join("\n"),
+
+      ms: Date.now() - started,
+      mark,
+    };
+  });
+  return { done, kill: run.kill };
 }
 
 export async function runGate(repo: string, gate: Gate, mark: string): Promise<GateResult> {
-  const started = Date.now();
-  const out = await runCommand(gate.command, repo, gate.timeoutMs);
-  // Exit status is the verdict, not whatever the tool chose to print: a
-  // linter that prints "error:" in its help text still passed.
-  const status: Status = out.timedOut ? "timeout" : out.code === 0 ? "pass" : "fail";
-  return {
-    name: gate.name,
-    status,
-    // Stamped with the gate name: the dock and the CLI both list problems
-    // from several gates at once, and "what is broken" is a poorer answer
-    // than "what is broken, and which check noticed".
-    problems: status === "pass" ? [] : parseProblems(out.text, repo, gate.name),
-    tail: tailOf(out.text),
-    ms: Date.now() - started,
-    mark,
-  };
+  return startGate(repo, gate, mark).done;
 }
 
 // ---------------------------------------------------------------------------

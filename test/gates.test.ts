@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { DEFAULT_TIMEOUT_MS, attention, loadGates, markFor, marksFor, parseConfig, problemsOf, runGate, summarise, verified, watched, type Gate, type GateResult, checkDerived, derivedGates, parseDerived } from "../src/gates.js";
+import { DEFAULT_TIMEOUT_MS, OUTPUT_LINES, attention, loadGates, markFor, marksFor, parseConfig, problemsOf, runGate, startGate, summarise, verified, watched, type Gate, type GateResult, checkDerived, derivedGates, parseDerived } from "../src/gates.js";
+import { killAll } from "../src/checks.js";
 import { newRepo } from "./helpers.js";
 
 async function config(repo: string, body: unknown): Promise<void> {
@@ -133,7 +134,7 @@ const result = (name: string, status: GateResult["status"], mark: string): GateR
   name,
   status,
   problems: [],
-  tail: "",
+  tail: "", output: "",
   ms: 1,
   mark,
 });
@@ -309,4 +310,39 @@ test("required and watch are read, and a bad watch list is refused", () => {
   // Dropped silently, a bad watch list is a gate that looks scoped and is not.
   assert.match(parseConfig({ gates: [{ name: "a", command: ["x"], watch: "src" }] }).error ?? "", /list of paths/);
   assert.match(parseConfig({ gates: [{ name: "a", command: ["x"], watch: [""] }] }).error ?? "", /list of paths/);
+test("a gate keeps enough of its output for the dock to show what happened", async (t) => {
+  // The rail has room for `session.ts:3` and the dock for four messages. A
+  // failing test's assertion diff fits in neither, and nowhere else in srcy
+  // could show it. So the run keeps its output — bounded, because a runaway
+  // build log is not something to pass between two processes every second.
+  const repo = await newRepo(t);
+  const path = await script(repo, '#!/bin/sh\nfor i in $(seq 1 500); do echo "line $i"; done\nexit 1\n');
+  const r = await runGate(repo, { name: "check", command: [path], auto: true, timeoutMs: DEFAULT_TIMEOUT_MS, required: true, watch: [] }, "m");
+  const lines = r.output.split("\n");
+  assert.ok(lines.length <= OUTPUT_LINES, `${lines.length} lines kept`);
+  // The end is what is kept: a runner prints its summary last.
+  assert.match(r.output, /line 500$/);
+  assert.doesNotMatch(r.output, /^line 1$/m);
+});
+
+test("a running gate can be cut short, and everything still running dies with the panel", async (t) => {
+  // The tree moved two seconds into a three-minute test run: the verdict on
+  // its way was stale before it arrived, and the next run queues behind it.
+  const repo = await newRepo(t);
+  const path = await script(repo, "#!/bin/sh\nsleep 30\n");
+  const gate = { name: "slow", command: [path], auto: true, timeoutMs: DEFAULT_TIMEOUT_MS, required: true, watch: [] };
+  const started = Date.now();
+  const run = startGate(repo, gate, "m");
+  setTimeout(() => run.kill(), 50);
+  const r = await run.done;
+  assert.equal(r.status, "killed");
+  assert.ok(Date.now() - started < 5_000, "kill did not stop the run");
+
+  // And on the way out: a gate's child is in its own process group, so the
+  // session ending would otherwise leave a compiler running for the rest of
+  // the day.
+  const orphan = startGate(repo, gate, "m");
+  await new Promise((r) => setTimeout(r, 50));
+  killAll();
+  assert.equal((await orphan.done).status, "killed");
 });
