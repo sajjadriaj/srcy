@@ -44,9 +44,10 @@ export interface RepoState {
 // broken by it.
 const RUNTIME = new Set([".srcy/state.json", ".srcy/events.jsonl", ".srcy/checkpoints.jsonl"]);
 
-function runtimeFile(path: string): boolean {
+export function runtimeFile(path: string): boolean {
   return RUNTIME.has(path);
 }
+
 
 // One file's content fingerprint, from the diff git already produced for it.
 // Header included: a rename with no content change is a change.

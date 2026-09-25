@@ -72,3 +72,23 @@ test("a directory that is not a repository yields no baseline rather than a wron
   await stat(repo); // sanity: the fixture exists
   assert.equal(await captureTree(outside), null);
 });
+
+test("srcy's own runtime files are not part of the turn", async (t) => {
+  // The HEAD diff already skips them; the scoped diff is tree against tree
+  // and did not, so the review pane opened the turn on .srcy/events.jsonl —
+  // a file srcy itself had just written — and counted it in the summary.
+  const repo = await newRepo(t);
+  const base = (await captureTree(repo))!;
+  await write(repo, "a.txt", "edited\n");
+  const { mkdir } = await import("node:fs/promises");
+
+  await mkdir(join(repo, ".srcy"), { recursive: true });
+  await write(repo, ".srcy/events.jsonl", '{"at":1,"type":"gate.pass"}\n');
+  await write(repo, ".srcy/state.json", "{}");
+  await write(repo, ".srcy/config.json", "{}");
+  assert.deepEqual(
+    (await scopedDiff(repo, base)).map((f) => f.path).sort(),
+    // config.json is the project's, and stays.
+    [".srcy/config.json", "a.txt"],
+  );
+});

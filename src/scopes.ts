@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { splitDiff, type FileDiff } from "./diff.js";
 import { git, gitRaw, gitWith } from "./git.js";
+import { runtimeFile } from "./repo.js";
 
 // Three baselines, because "what changed" is three different questions.
 //
@@ -58,5 +59,10 @@ export async function scopedDiff(repo: string, base: string): Promise<FileDiff[]
   const now = await captureTree(repo);
   if (now === null) return [];
   const raw = await gitRaw(repo, "diff", base, now).catch(() => "");
-  return splitDiff(raw);
+  // Minus srcy's own verdict and event files, for the reason the HEAD diff
+  // skips them: a turn is what the agent did, and srcy writing down what it
+  // measured is not that. Left in, the review pane opened every turn on
+  // .srcy/events.jsonl — the file srcy had written last.
+  return splitDiff(raw).filter((f) => !runtimeFile(f.path));
+
 }
