@@ -33,6 +33,8 @@ the code in front of you.
 | does it build | whatever it said last | run against the tree that exists |
 | is that still true | — | `VERIFIED`, or `code moved since` |
 | how long has this call been running | — | `⟳ 13s Bash npm test` |
+| is it stuck on a permission prompt | buried in scrollback | `needs you 40s · Bash npm test` on the border, and a bell |
+| it said the tests pass | taken on faith | `✖ agent says passing` beside the gate that disagrees |
 
 ---
 
@@ -93,12 +95,17 @@ transcript.
 
 | panel | reads | shows |
 |---|---|---|
-| **REPO** | `git` | the whole project, directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count |
 | **GOAL** | `.srcy/task.md`, else the session log | what you asked for, after forty tool calls buried it |
-| **PLAN** | session log | still there 40 tool calls later |
-| **GATES** | `.srcy/config.json` | one row per gate, plus `VERIFIED` when the word is earned |
+| **PLAN** | session log | `PLAN 2/3` — still there 40 tool calls later |
+| **REPO** | `git` | the whole project, directories closed except the ones holding a change. Failing files turn red and spend the churn column on the failure count. `/` searches it |
+| **GATES** | `.srcy/config.json` | one row per gate, plus `VERIFIED` when the word is earned. `tab` picks one and its output opens in REVIEW |
 | **gauge** | session log | `34% 343k/1.0M opus-5 cache 99%` |
-| **REVIEW** | `git` + GATES | every hunk of every changed file, unified or side by side, headed by what the gates actually said |
+| **REVIEW** | `git` + GATES | every hunk of every changed file, unified or side by side, headed by what the gates actually said and one line about the whole change |
+
+The rail reads top to bottom in the order you'd ask: what you asked for, what
+the agent means to do about it, what it has done to the tree, whether any of
+it holds, and how much room it has left. The tree is the section that
+stretches, so it sits in the middle.
 
 A handful of choices worth knowing:
 
@@ -116,9 +123,42 @@ A handful of choices worth knowing:
 - **`n`/`p` read worst first**: a file with a failing gate, then deletions,
   then new files, then churn. git's alphabetical order has nothing to do with
   what deserves a reader first.
-- **The border says working or waiting.** `⟳ 52s Bash npm test` while a call
-  is in flight — a still picture of `npm test` cannot say it has been running
-  twelve minutes — and `your turn · waiting 5m00s` once it stops.
+- **The border says what the agent is doing, in one of four words.**
+  `⟳ 52s Bash npm test` while a call is in flight — a still picture of
+  `npm test` cannot say it has been running twelve minutes. `thinking 12s`
+  between two calls, which is not your turn however quiet it looks.
+  `needs you 40s · Bash npm test` when the call is open because the agent is
+  waiting for permission to make it — read off the agent's own screen, since
+  its transcript records the call and nothing about the wait. And `your turn
+  · waiting 5m00s` once the turn has actually ended, which the transcript
+  says outright.
+- **It rings.** Once, when the agent hands the turn back, when it needs you,
+  and when a gate goes red — the transitions worth leaving another window
+  for, and the whole point of `ctrl-b d`. tmux passes the bell through, so
+  the terminal does whatever it does with one (a badge, usually), and a line
+  at the bottom says which it was. `"notify": false` in `.srcy/config.json`
+  turns it off.
+- **The review pane opens with one line about the whole change.** `5 files
+  +84 -21  tests +1  deleted 1  lockfile` — how big, and the kinds of file
+  in it a reviewer wants pointed out first: tests touched (or `no tests
+  changed`), deletions, binaries, lockfiles, migrations, files named like
+  secrets, generated directories, config, and `large` past twenty files or
+  five hundred lines. Path-derived and deterministic; it says where to look,
+  never whether it is safe.
+- **A gate's whole output is one `tab` away.** The rail says `✖ 2 in 1` and
+  the review pane has room for four messages; a failing test's assertion
+  diff fits in neither. `tab` in the sidebar picks a gate and the review pane
+  pages through the last 300 lines it printed, newest at the bottom where a
+  runner puts its summary. `R` runs the picked gate alone.
+- **A gate that started itself is cut short when the tree moves.** Its
+  verdict would have arrived stale, with the next run queued behind it. One
+  you asked for with `r` runs to the end: you are waiting on it.
+- **`o` and `y` are the way out.** `o` opens the line under the cursor in
+  `$EDITOR` (`+line` for terminal editors, `-g path:line` for VS Code and its
+  forks) in a new tmux window of srcy's own session; closing the editor lands
+  back on the panes. `y` puts `path:line` in tmux's paste buffer and on the
+  clipboard, and `ctrl-b ]` in the agent's pane drops it on the prompt. srcy
+  still sends the agent nothing: the reader pastes, or doesn't.
 - **Where srcy hasn't run a gate, the agent's own run is the evidence.**
   `not run · agent 4m00s`, or `agent stale` when it went on editing
   afterwards. Both timestamps are the agent's own.
@@ -159,7 +199,7 @@ which tears a fixed-width column.
 | `watch` | default the whole tree — the paths this verdict depends on |
 | `timeoutMs` | default 120000, capped at ten minutes |
 
-Gates run one at a time. A malformed config is shown in GATES and falls back
+Beside `gates`, `"notify": false` silences the bell. Gates run one at a time. A malformed config is shown in GATES and falls back
 to the detected command — one bad gate invalidates the list rather than being
 silently skipped. With no config at all, srcy runs an executable `.srcy/check`
 (any language, non-zero means failing) or your `typecheck`/`build` npm script.
@@ -366,17 +406,21 @@ unreadable ones.
 
 | in the sidebar | | in the review pane | |
 |---|---|---|---|
-| `j` `k` | move the cursor | `n` `p` | next / previous changed file |
+| `j` `k` | move the cursor — `g` `G` for the ends | `n` `p` | next / previous changed file |
 | `⏎` `space` | open a directory, or pin a file | `]` `[` | next / previous hunk |
-| `m` | only what changed, and back | `j` `k` `PgDn` `PgUp` | scroll |
-| `e` | jump to the next failing line | `g` `G` | top / bottom |
-| `f` | back to following the agent | `s` | side by side |
-| `r` | run every gate now | `f` | back to following |
-| `c` | checkpoint: everything after this is *this* turn | `1` `2` `3` | turn / session / everything uncommitted |
-| | | `,` `.` | back and forward through the last 8 turns |
+| `/` | search paths — `⏎` keeps, `esc` clears | `j` `k` `PgDn` `PgUp` | scroll — a file preview and a gate's output scroll the same way |
+| `m` | only what changed, and back | `g` `G` | top / bottom |
+| `e` | jump to the next failing line | `s` | side by side |
+| `f` | back to following the agent | `f` | back to following |
+| `o` `y` | open in `$EDITOR` / copy the path | `1` `2` `3` | turn / session / everything uncommitted |
+| `r` | run every gate now | `,` `.` | back and forward through the last 8 turns |
+| `tab` `R` | pick a gate — its output opens in REVIEW — and run just that one | `o` `y` | open this line in `$EDITOR` / copy `path:line` for the agent |
+| `c` | checkpoint: everything after this is *this* turn | `?` | every key, on screen |
+| `?` | every key, on screen | | |
 
 The agent keeps every other keystroke. Both panels are inert until you move
-the keyboard to them.
+the keyboard to them. The review pane opens on `TURN` as soon as there is a
+turn to review, and on `HEAD` before that.
 
 ### Three answers to "what changed"
 
@@ -410,11 +454,24 @@ open. Your `~/.tmux.conf` still loads.
 agent, and for a person with an editor open. Only GOAL, PLAN, the gauge and
 the automatic `TURN` baseline are per-agent:
 
-| agent | GOAL | PLAN | gauge |
-|---|---|---|---|
-| `claude` | yes | yes | yes — window inferred (200k, or 1M once past it), per model |
-| `codex` | yes | when it calls `update_plan` | yes — against the window codex records itself |
-| anything else | blank | blank | blank |
+| agent | GOAL | PLAN | gauge | turn ended |
+|---|---|---|---|---|
+| `claude` | yes | `TodoWrite`, `ExitPlanMode`'s plan, or `TaskCreate`/`TaskUpdate` — whichever it wrote last | yes — window inferred (200k, or 1M once past it), per model | `stop_reason`, or its own `turn_duration` record |
+| `codex` | yes | when it calls `update_plan` | yes — against the window codex records itself | `task_complete` |
+| `pi` | yes | blank — pi has no plan tool | yes — window inferred, so `SRCY_CONTEXT_WINDOW=32000 srcy` for a local model | `stopReason` |
+| `gemini` | yes | blank | yes — 1M, which every gemini model ships with | a reply with no tool calls |
+| anything else | blank | blank | blank | — |
+
+Forty recent Claude Code sessions on one machine never called `TodoWrite`
+once, which is what PLAN read; they called `ExitPlanMode`, whose input is the
+plan as markdown. So that is read too — ticked boxes, numbered steps, or
+section headings, whichever the plan has — and so are the `TaskCreate` and
+`TaskUpdate` calls newer Claude Code versions make.
+
+gemini rewrites its chat file whole instead of appending, so it is re-read
+from the top when it changes; the reader is written from the format as
+gemini-cli records it and checked against nothing better than a session with
+no turns in it.
 
 Blank, never another agent's numbers. An agent srcy cannot name is still
 watched for: if a transcript it recognises appears, the panels pick it up, and
@@ -436,38 +493,38 @@ window with every token count — measured, where Claude Code's is inferred.
 `PREVIEW_AGENT=codex npm run preview` prints this.
 
 ```
-──  ⟳ 52s shell bash -lc npm run…──┬──  codex  ───────────────────────────────────────────────────────────────────────
-─ REPO  FOLLOW ────────────────────│user
-▸  .srcy/                          │  fix the token expiry off-by-one
+──  ⟳ 55s shell bash -lc npm run…──┬──  codex  ───────────────────────────────────────────────────────────────────────
+─ GOAL ────────────────────────────│user
+  fix the token expiry off-by-one  │  fix the token expiry off-by-one
+─ PLAN 2/3 ────────────────────────│
+  ✔ find the expiry comparison     │codex
+  ✔ fix the off-by-one             │  The expiry check is exclusive: a token that expires on this exact
+  ▸ add a regression test          │  millisecond is still accepted. Changing < to <= in verify().
+─ REPO  FOLLOW ────────────────────│
+▸  .srcy/                          │  exec  bash -lc "npm run typecheck"
 ▸  docs/                           │
-▾  src/                            │codex
-▾    auth/                         │  The expiry check is exclusive: a token that expires on this exact
-+►     expiry.test.ts      +1 -0   │  millisecond is still accepted. Changing < to <= in verify().
+▾  src/                            │
+▾    auth/                         │
++►     expiry.test.ts      +1 -0   │
         hash.ts                    │
-✖      session.ts          ✖1      │  exec  bash -lc "npm run typecheck"
+✖      session.ts          ✖1      │
 ▪      token.ts            +1 -1   │
 ▸    http/                         │
 ▸    util/                         │
       index.ts                     │
     README.md                      │
-─ GOAL ────────────────────────────│
-  fix the token expiry off-by-one  │
-─ PLAN ────────────────────────────│
-  ✔ find the expiry comparison     │
-  ✔ fix the off-by-one             │
-  ▸ add a regression test          │
 ─ GATES 0/1  1 to look at ─────────│
   check      ✖ 1 in 1              │
   session.ts:3                     │
 ▮▮▮▮▯▯ 62% 161k/258k gpt-5.3-codex │
 ──  REVIEW  HEAD  FOLLOW  1/2 files  1/1 hunks  src/auth/session.ts  ─────────────────────────────────────────────────
   ✖ src/auth/session.ts:3  error TS2532: Object is possibly 'undefined'.
-  @@ 1  (top level)
+  2 files  +3 -1  no tests changed
    1   export class Session {
    2 +   private renewals = 0
    3 +   renew() { this.renewals++ }
    4   }
- ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn
+ ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn · o open · y yank · ? keys
 ```
 </details>
 
@@ -487,6 +544,9 @@ npm run demo:gif   # cast -> gif (needs `agg`)
 no agent, no waiting on a turn. `PREVIEW_COLS` / `PREVIEW_ROWS` set the size.
 
 Dependencies: `ink`, `react`. That's the list.
+
+CI runs the tests and the typecheck on Node 20 and 22 for every push.
+
 
 ## Licence
 

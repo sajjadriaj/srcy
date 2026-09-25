@@ -24,6 +24,10 @@ import { projectDir } from "../src/transcript.js";
 // window with every token count, so that gauge is measured rather than
 // inferred, and this is the only way to see that on screen.
 const AGENT = process.env.PREVIEW_AGENT === "codex" ? "codex" : "claude";
+// tmux takes its default shell from $SHELL, and a login shell with an rc file
+// prints whatever that rc file prints into the first row of every pane. The
+// frame is of srcy, not of the recording machine's dotfiles.
+process.env.SHELL = "/bin/sh";
 const SESSION = "srcy-preview";
 const CAMERA = "srcy-preview-camera";
 // Overridable so a frame can be captured at the size it will be pasted at.
@@ -300,8 +304,10 @@ async function main(): Promise<void> {
     camQuiet(["resize-window", "-t", CAMERA, "-x", String(COLS), "-y", String(ROWS)]);
     srcyQuiet(["set-option", "-t", SESSION, "window-size", "manual"]);
     srcyQuiet(["resize-window", "-t", SESSION, "-x", String(COLS), "-y", String(ROWS)]);
-    // Long enough for a poll, a debounce and a check run to have happened.
-    await new Promise((r) => setTimeout(r, 6000));
+    // Long enough for a poll, a debounce, a check run and the poll that
+    // carries its verdict to the dock to have happened.
+    await new Promise((r) => setTimeout(r, 8500));
+
     // Plain text by default: the frame goes into the README as a code block.
 // `PREVIEW_ANSI=1` keeps the escapes instead, which is the only way to check
 // colour work — the panels draw colour only when their stdout is a terminal,

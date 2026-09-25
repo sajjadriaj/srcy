@@ -25,7 +25,10 @@ import { fileURLToPath } from "node:url";
 import { SOCKET, build, shq } from "../src/tmux.js";
 import { projectDir } from "../src/transcript.js";
 
+// See preview-shell.ts: the frame is of srcy, not of this machine's rc files.
+process.env.SHELL = "/bin/sh";
 const SESSION = "srcy-demo";
+
 const CAMERA = "srcy-demo-camera";
 const COLS = Number(process.env.DEMO_COLS ?? 104);
 const ROWS = Number(process.env.DEMO_ROWS ?? 30);
@@ -173,6 +176,16 @@ const asked = (text: string): string =>
 
 const result = (id: string): string =>
   JSON.stringify({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
+
+// The turn handed back. The border reads `your turn` off this record and
+// nothing else — between tool calls the agent is thinking, not waiting — and
+// the bell rings once for it.
+const done = (text: string): string =>
+  JSON.stringify({
+    type: "assistant",
+    timestamp: new Date().toISOString(),
+    message: { role: "assistant", stop_reason: "end_turn", content: [{ type: "text", text }] },
+  });
 
 const todos = (...rows: [string, string][]): unknown => ({
   todos: rows.map(([content, status]) => ({ content, status, activeForm: content })),
@@ -507,7 +520,9 @@ async function main(): Promise<void> {
     await jsonl(result("p2"));
     await wait(2200);
     await say(`Expiry is inclusive now, and renew() guards the optional.`, "", `${CY}❯${OFF}`);
-    await wait(2600);
+    await jsonl(done("Expiry is inclusive now, and renew() guards the optional."));
+    await wait(3400);
+
 
     // -----------------------------------------------------------------------
     // The same question, without the panes.
