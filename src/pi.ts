@@ -188,4 +188,4 @@ export function foldLine(f: Fold, line: string): void {
   }
 }
 
-export const PI: Source = { find: findSession, fold: foldLine };
+export const PI: Source = { name: "pi", find: findSession, fold: foldLine };

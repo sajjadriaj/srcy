@@ -6,11 +6,16 @@ import test from "node:test";
 import React from "react";
 import { render } from "ink-testing-library";
 import { splitDiff } from "../src/diff.js";
-import { NOTHING, ancestors, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
+import { NOTHING, ancestors, filterPaths, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow } from "../src/tree.js";
+import { captureTree } from "../src/scopes.js";
+
 import { git } from "../src/git.js";
 import { parseShell, sessionName } from "../src/index.js";
 import { projectDir, remember } from "../src/transcript.js";
-import { Dock, GateLine, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, baseline, checkStep, gateRows, gatesLabel, agentRan, cursorAt, following, elapsed, loadTask, planAge, PlanBody, touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+import { Dock, GateLine, GateRows, GoalLine, NarrowUsage, Rail, ReviewRow, gatesTone, TreeLine, activityTitle, alerts, baseline, checkStep, claimsPassing, gateRows, gatesLabel, agentRan, cursorAt, following, elapsed, lastTitle, loadTask, nextGate, phaseOf, planAge, planLabel, PlanBody, promptOnScreen, railLabel,
+
+ touchMark, fingerprint, mapBudget, newest, problemLines, publish, readShared, usageRows } from "../src/panels.js";
+
 import { eastAsianWidth } from "get-east-asian-width";
 import { repoState } from "../src/repo.js";
 import type { GateResult } from "../src/gates.js";
@@ -18,6 +23,9 @@ import type { Problem } from "../src/checks.js";
 import { TMUX, cmdline, compact, dockHeight, pick, plan, railWidth, shq } from "../src/tmux.js";
 import { CLAUDE, advance, emptyFold, foldLine as claudeFold, newReader, parseState, parseUsage, stateOf, usageOf, type Source } from "../src/transcript.js";
 import { CODEX, foldLine as codexFold, findSession } from "../src/codex.js";
+import { PI } from "../src/pi.js";
+import { GEMINI } from "../src/gemini.js";
+
 import { sourceFor } from "../src/panels.js";
 import { newRepo } from "./helpers.js";
 
@@ -329,7 +337,7 @@ test("GATES in the rail counts first and lists second", () => {
     { path: "src/transcript.ts", line: 5, message: "error TS2551: Property does not exist on type 'Usage'.", severity: "error" as const, check: "" },
   ];
   const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
-  const result: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1200, mark: "m", problems };
+  const result: GateResult = { name: "typecheck", status: "fail", tail: "", output: "", ms: 1200, mark: "m", problems };
   const frame = render(<GateRows gates={[gate]} results={[result]} mark="m" running="" width={30} />).lastFrame() ?? "";
   assert.match(frame, /✖ 5 in 4/);
   assert.match(frame, /…and 2 more/);
@@ -406,7 +414,7 @@ test("the budget counts what the fixed sections actually draw", () => {
     { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
     { name: "unit", command: ["npm", "test"], auto: false, timeoutMs: 1000 , required: true, watch: [] },
   ];
-  const broke: GateResult = { name: "typecheck", status: "fail", tail: "", ms: 1, mark: "m",
+  const broke: GateResult = { name: "typecheck", status: "fail", tail: "", output: "", ms: 1, mark: "m",
     problems: Array.from({ length: 9 }, (_, i) => ({ path: `f${i}.ts`, line: i, message: "m", severity: "error" as const, check: "typecheck" })) };
   const count = (el: React.JSX.Element): number => (render(el).lastFrame() ?? "").split("\n").length;
   const rows = (g: typeof gates, r: GateResult[], error?: string): React.JSX.Element => (
@@ -688,6 +696,8 @@ test("the panel reads the format the agent in the pane actually writes", () => {
   // all: REPO, CHECKS and DIFF still work, since those come from git.
   assert.equal(sourceFor("claude"), CLAUDE);
   assert.equal(sourceFor("/usr/local/bin/codex"), CODEX);
+  assert.equal(sourceFor("pi"), PI);
+  assert.equal(sourceFor("gemini"), GEMINI);
   assert.equal(sourceFor("aider"), null);
   assert.equal(sourceFor(""), null);
 });
@@ -787,7 +797,7 @@ test("every glyph the rail draws is one cell wide in every terminal", () => {
     render(
       <GateRows
         gates={[{ name: "check", command: ["c"], auto: true, timeoutMs: 1000 , required: true, watch: [] }]}
-        results={[{ name: "check", status: "fail", tail: "", ms: 1, mark: "m", problems: [{ path: "a.ts", line: 4, message: "boom", severity: "error" as const, check: "" }] }]}
+        results={[{ name: "check", status: "fail", tail: "", output: "", ms: 1, mark: "m", problems: [{ path: "a.ts", line: 4, message: "boom", severity: "error" as const, check: "" }] }]}
         mark="m"
         running=""
         width={30}
@@ -918,7 +928,7 @@ test("a verdict whose code has already moved says so instead of reading as curre
   // Acting on a stale pass is the expensive mistake: a green line from
   // thirty seconds ago looks exactly like a green line from now.
   const gate = { name: "typecheck", command: ["npm", "run", "typecheck"], auto: true, timeoutMs: 1000 , required: true, watch: [] };
-  const broke: GateResult = { name: "typecheck", status: "fail", ms: 1200, mark: "then", tail: "",
+  const broke: GateResult = { name: "typecheck", status: "fail", ms: 1200, mark: "then", tail: "", output: "",
     problems: [{ path: "src/a.ts", line: 1, message: "boom", severity: "error" as const, check: "" }] };
   const row = (result: GateResult | undefined, mark: string): string =>
     render(<GateRows gates={[gate]} results={result === undefined ? [] : [result]} mark={mark} running="" width={40} />).lastFrame() ?? "";
@@ -952,7 +962,7 @@ test("a project with nothing configured is told, not left blank", () => {
 // What the checker actually said
 
 const failing = (problems: Problem[], tail = ""): GateResult[] => [
-  { name: "typecheck", status: "fail", problems, tail, ms: 1200, mark: "mark" },
+  { name: "typecheck", status: "fail", problems, tail, output: tail, ms: 1200, mark: "mark" },
 ];
 
 test("the dock prints the message the rail has no room for", () => {
@@ -1203,7 +1213,7 @@ test("a header takes a verdict's colour only when there is a verdict", () => {
     { name: "types", command: ["tsc"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
     { name: "tests", command: ["t"], auto: true, timeoutMs: 1000 , required: true, watch: [] },
   ];
-  const at = (name: string, status: "pass" | "fail" | "timeout", mark: string) => ({ name, status, tail: "", ms: 1, mark, problems: [] });
+  const at = (name: string, status: "pass" | "fail" | "timeout", mark: string) => ({ name, status, tail: "", output: "", ms: 1, mark, problems: [] });
 
   // Nothing measured yet is not a pass and not a failure.
   assert.equal(gatesTone(gates, [], "m"), undefined);
@@ -1371,7 +1381,7 @@ test("when srcy has not run a gate, the agent's own run is the evidence", () => 
     const late = render(<GateLine gate={gate} result={undefined} mark="m" running={false} width={width} ran={ran} wrote={now} now={now} />).lastFrame() ?? "";
     assert.doesNotMatch(late, /…/, `${width}: ${late}`);
   }
-  const mine = { name: "tests", status: "pass" as const, problems: [], tail: "", ms: 12, mark: "m" };
+  const mine = { name: "tests", status: "pass" as const, problems: [], tail: "", output: "", ms: 12, mark: "m" };
   const own = render(<GateLine gate={gate} result={mine} mark="m" running={false} width={44} ran={ran} now={now} />).lastFrame() ?? "";
   assert.doesNotMatch(own, /agent /, own);
 });
@@ -1388,4 +1398,172 @@ test("the commands remembered are a window, not a history", () => {
   assert.equal(ran.size, 64);
   assert.equal(ran.get("cmd 10"), 100);
   assert.equal([...ran.keys()].pop(), "cmd 10");
+});
+
+// ---------------------------------------------------------------------------
+// What the border says between tool calls, and when the agent is stuck on you
+
+test("between two tool calls the agent is thinking, not waiting on you", () => {
+  const now = Date.parse("2026-08-26T10:05:00.000Z");
+  const asked = Date.parse("2026-08-26T10:04:00.000Z");
+  const last = Date.parse("2026-08-26T10:04:48.000Z");
+  // A request newer than the last turn end, nothing in flight: the model is
+  // deciding what to call next. Twelve seconds of that read as "your turn".
+  const thinking = phaseOf({ activity: null, turn: { at: asked, text: "go" }, ended: undefined, at: last });
+  assert.deepEqual(thinking, { kind: "thinking", since: last });
+  assert.match(activityTitle(null, now, 40, last, thinking), /thinking 12s/);
+  // Once the turn has ended, the ball is with you — and the age counts from
+  // the end, which is when you could first have acted.
+  const yours = phaseOf({ activity: null, turn: { at: asked, text: "go" }, ended: last, at: last });
+  assert.deepEqual(yours, { kind: "yours", since: last });
+  assert.match(activityTitle(null, now, 40, last, yours), /your turn · waiting 12s/);
+  // A tool in flight is working, whatever the turn says.
+  const busy = phaseOf({ activity: { tool: "Bash", target: "npm test", since: asked }, turn: { at: asked, text: "go" }, ended: undefined, at: last });
+  assert.equal(busy.kind, "working");
+  // No request at all is idle, as it always was.
+  assert.equal(phaseOf({ activity: null, turn: null, ended: undefined, at: undefined }).kind, "idle");
+});
+
+test("a permission prompt on the agent's screen is the agent waiting on you", () => {
+  // The transcript records nothing for a prompt: the tool call is open and
+  // stays open, which is what a running tool looks like too. The pane itself
+  // is the only place the question is written down.
+  const claude = [
+    "● Bash(npm test)",
+    "  Do you want to proceed?",
+    "  ❯ 1. Yes",
+    "    2. Yes, and don't ask again for npm test commands",
+    "    3. No, and tell Claude what to do differently (esc)",
+  ].join("\n");
+  assert.equal(promptOnScreen(claude), true);
+  assert.equal(promptOnScreen("Would you like me to continue with the refactor?\n\n❯ "), false);
+  assert.equal(promptOnScreen("● Bash(npm test)\n  Running…"), false);
+  assert.equal(promptOnScreen("  Allow command? [y/n]"), true);
+  assert.equal(promptOnScreen(""), false);
+
+  const now = Date.parse("2026-08-26T10:05:00.000Z");
+  const since = Date.parse("2026-08-26T10:04:20.000Z");
+  const stuck = phaseOf({ activity: { tool: "Bash", target: "npm test", since }, turn: null, ended: undefined, at: since, prompt: true });
+  assert.deepEqual(stuck, { kind: "needs-you", since });
+  const title = activityTitle({ tool: "Bash", target: "npm test", since }, now, 40, since, stuck);
+  assert.match(title, /needs you 40s/);
+  assert.match(title, /npm test/);
+  // Only a tool that is open can be waiting for permission to run.
+  assert.equal(phaseOf({ activity: null, turn: null, ended: undefined, at: since, prompt: true }).kind, "idle");
+});
+
+test("a bell rings on the transitions worth leaving another window for, once each", () => {
+  // The README sells `ctrl-b d`: detach, the agent keeps working. Nothing
+  // said when it stopped. These are the moments, and none of them repeats on
+  // the next poll.
+  const gates = { fresh: 0 };
+  assert.deepEqual(alerts({ kind: "working", failing: 0 }, { kind: "yours", failing: 0 }), ["your turn"]);
+  assert.deepEqual(alerts({ kind: "working", failing: 0 }, { kind: "needs-you", failing: 0 }), ["needs you"]);
+  assert.deepEqual(alerts({ kind: "thinking", failing: 0 }, { kind: "working", failing: 0 }), []);
+  assert.deepEqual(alerts({ kind: "yours", failing: 0 }, { kind: "yours", failing: 0 }), []);
+  assert.deepEqual(alerts({ kind: "working", failing: 0 }, { kind: "working", failing: 2 }), ["2 gates failing"]);
+  assert.deepEqual(alerts({ kind: "working", failing: 2 }, { kind: "working", failing: 1 }), []);
+  assert.deepEqual(alerts({ kind: "working", failing: 1 }, { kind: "yours", failing: 2 }), ["your turn", "2 gates failing"]);
+  // A fresh process has no "before": nothing rings on the first frame.
+  assert.deepEqual(alerts(undefined, { kind: "yours", failing: 1 }), []);
+  void gates;
+});
+
+test("the layout asks tmux to pass a panel's bell through to the terminal", () => {
+  const steps = plan(LAYOUT);
+  const opt = (name: string): string[] | undefined => steps.find((s) => s[0] === "set-option" && s[3] === name);
+  assert.deepEqual(opt("bell-action")?.at(-1), "any");
+  assert.deepEqual(opt("monitor-bell")?.at(-1), "on");
+  assert.deepEqual(opt("visual-bell")?.at(-1), "off");
+});
+
+test("the agent saying the tests pass is a claim the gates get to check", () => {
+  for (const said of [
+    "All tests pass.",
+    "Done — 149 tests passing, typecheck clean.",
+    "The build succeeds and the suite is green.",
+    "tests: pass",
+    "Everything passes now.",
+  ]) {
+    assert.equal(claimsPassing(said), true, said);
+  }
+  for (const said of [
+    "I'll run the tests next.",
+    "Two tests still fail; looking into it.",
+    "Let me pass the token through.",
+    "",
+  ]) {
+    assert.equal(claimsPassing(said), false, said);
+  }
+  // On the rail: the row appears only when the claim and the verdict disagree.
+  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000, required: true, watch: [] };
+  const broke: GateResult = { name: "tests", status: "fail", ms: 1, mark: "m", tail: "", output: "", problems: [{ path: "a.ts", line: 1, message: "boom", severity: "error" as const, check: "tests" }] };
+  const row = (reply: string | undefined, results: GateResult[]): string =>
+    render(<GateRows gates={[gate]} results={results} mark="m" running="" width={40} reply={reply} />).lastFrame() ?? "";
+  assert.match(row("All tests pass.", [broke]), /agent says passing/);
+  assert.doesNotMatch(row("Two still fail.", [broke]), /agent says/);
+  assert.doesNotMatch(row("All tests pass.", [{ ...broke, status: "pass", problems: [] }]), /agent says/);
+  assert.doesNotMatch(row(undefined, [broke]), /agent says/);
+  // And the budget knows the row is there.
+  assert.equal(gateRows([gate], [broke], undefined, "All tests pass."), gateRows([gate], [broke]) + 1);
+});
+
+test("Tab walks the gates and steps off the end", () => {
+  assert.equal(nextGate(["types", "tests"], null), "types");
+  assert.equal(nextGate(["types", "tests"], "types"), "tests");
+  assert.equal(nextGate(["types", "tests"], "tests"), null);
+  // A gate that vanished from the config lands the cursor back off.
+  assert.equal(nextGate(["types"], "gone"), null);
+  assert.equal(nextGate([], null), null);
+  // The picked gate wears the caret, so the keys' target is visible.
+  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000, required: true, watch: [] };
+  const frame = render(<GateRows gates={[gate]} results={[]} mark="m" running="" width={40} cursor="tests" />).lastFrame() ?? "";
+  assert.match(frame, /► tests/);
+});
+
+test("search narrows the tree to paths containing the text, case aside", () => {
+  const paths = ["README.md", "src/auth/token.ts", "src/auth/session.ts", "src/main.ts", "docs/Auth.md"];
+  assert.deepEqual(filterPaths(paths, "auth"), ["src/auth/token.ts", "src/auth/session.ts", "docs/Auth.md"]);
+  assert.deepEqual(filterPaths(paths, "TOKEN"), ["src/auth/token.ts"]);
+  // Nothing typed is everything, and a directory a match sits in still
+  // appears, because the tree is built from the paths that survive.
+  assert.deepEqual(filterPaths(paths, ""), paths);
+  const rows = treeRows(filterPaths(paths, "session"), new Set(["src", "src/auth"]));
+  assert.deepEqual(rows.map((r) => r.path), ["src", "src/auth", "src/auth/session.ts"]);
+  // The header says what the tree is showing.
+  assert.equal(railLabel(false, null, ""), "REPO  FOLLOW");
+  assert.equal(railLabel(true, "x", ""), "CHANGED  PINNED");
+  assert.equal(railLabel(false, "x", "tok"), "REPO  /tok  PINNED");
+});
+
+test("the dock opens on the turn once there is one to review", async (t) => {
+  const repo = await newRepo(t);
+  const session = `srcy-test-scope-${process.pid}`;
+  t.after(() => rm(join(tmpdir(), `${session}.json`), { force: true }));
+  const tree = await captureTree(repo);
+  await writeFile(join(repo, "a.txt"), "one\ntwo\n");
+  publish(session, { turn: tree ?? undefined, session: tree ?? undefined });
+
+  const { lastFrame, unmount } = render(<Dock cwd={repo} rows={12} width={70} session={session} />);
+  t.after(() => unmount());
+  await new Promise((r) => setTimeout(r, 900));
+  const frame = lastFrame() ?? "";
+  // The title is on the border, which a component render cannot show; the
+  // scope it chose is what the pane says instead.
+  assert.match(frame, /2 \+ two/, frame);
+  assert.match(lastTitle(), /REVIEW  TURN  /, lastTitle());
+
+});
+
+test("the plan's heading says how far along it is", () => {
+  assert.equal(planLabel([]), "PLAN");
+  assert.equal(
+    planLabel([
+      { content: "a", status: "completed" },
+      { content: "b", status: "in_progress" },
+      { content: "c", status: "pending" },
+    ]),
+    "PLAN 1/3",
+  );
+  assert.equal(planLabel([{ content: "a", status: "completed" }]), "PLAN 1/1");
 });

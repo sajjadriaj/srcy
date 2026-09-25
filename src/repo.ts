@@ -66,6 +66,10 @@ function fileStamp(f: FileDiff): string {
 // reading the rail for.
 const MAX_COUNT_BYTES = 2_000_000;
 
+// What git calls a tree with nothing in it: the same hash in every repo.
+const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+
 interface Churn {
   added: number;
   removed: number;
@@ -97,8 +101,11 @@ export async function repoState(repo: string, problems: Problem[] = []): Promise
   for (const p of problems) count.set(p.path, (count.get(p.path) ?? 0) + 1);
 
   // Against HEAD, not the index: an agent that staged its work is still an
-  // agent whose work you have not read yet.
-  const raw = await git(repo, "diff", "HEAD").catch(() => "");
+  // agent whose work you have not read yet. A repo with no commit yet has
+  // no HEAD, and is diffed against the empty tree instead — the rail went
+  // blank on exactly the repo a reader had just created for the agent.
+  const base = await git(repo, "rev-parse", "--verify", "-q", "HEAD").then(() => "HEAD").catch(() => EMPTY_TREE);
+  const raw = await git(repo, "diff", base).catch(() => "");
   const diffs = splitDiff(raw).filter((f) => !runtimeFile(f.path));
 
   const files: MapEntry[] = diffs.map((f) => {

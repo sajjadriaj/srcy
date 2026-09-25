@@ -21,7 +21,7 @@ const result = (name: string, status: GateResult["status"], mark: string): GateR
   name,
   status,
   problems: [],
-  tail: "",
+  tail: "", output: "",
   ms: 1200,
   mark,
 });

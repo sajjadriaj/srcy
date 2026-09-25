@@ -82,7 +82,17 @@ export function rows(paths: string[], open: Set<string>, changed = new Map<strin
   return out;
 }
 
+// What `/` narrows the tree to: paths containing the text, case aside. The
+// tree is built from what survives, so a directory holding a match is still
+// drawn and one holding none is not.
+export function filterPaths(paths: string[], query: string): string[] {
+  const q = query.toLowerCase();
+  if (q === "") return paths;
+  return paths.filter((p) => p.toLowerCase().includes(q));
+}
+
 // A cursor that stays on screen without the caller tracking scroll: given the
+
 // cursor and how many rows fit, this is the slice to draw. Kept centred once
 // the list is longer than the pane, so moving never puts the cursor on the
 // edge with nothing visible past it.

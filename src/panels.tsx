@@ -1,22 +1,27 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { renameSync, writeFileSync } from "node:fs";
+import { renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
 import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } from "./cockpit.js";
-import { KEYS, START, actionFor, byRisk, fileLines, move, scopeFor, view, type Position, type Side, type ReviewLine, type Scope } from "./review.js";
+import { HELP_DOCK, HELP_RAIL, KEYS, START, actionFor, byRisk, fileLines, gateText, locationOf, move, riskLine, scopeFor, scrollText, view, type Position, type Side, type ReviewLine, type Scope, type TextView } from "./review.js";
+import { editorArgv, openEditor, yank } from "./editor.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
-import { checkDerived, derivedGates, isFresh, loadGates, markFor, marksFor, problemsOf, runGate, summarise, verified, type Derived, type Gate, type GateResult, type Marks } from "./gates.js";
+import { checkDerived, derivedGates, isFresh, loadGates, markFor, marksFor, problemsOf, startGate, summarise, verified, type Derived, type Gate, type GateResult, type GateRun, type Marks } from "./gates.js";
+import { killAll } from "./checks.js";
+import { identify, paneTail, tmuxRun } from "./tmux.js";
 import { appendEvent, appendRecord, readResults, writeResults, type SrcyEvent } from "./state.js";
 import { listen, type ExternalEvent, type Receiver } from "./events.js";
 import { listPaths, loadTask, repoState, type RepoState } from "./repo.js";
-import { NOTHING, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
+import { NOTHING, filterPaths, openForChanges, openSet, rows as treeRows, toggle, window as treeWindow, type Manual, type Row } from "./tree.js";
 import { CLAUDE, readSession, type Activity, type Source, type Turn } from "./transcript.js";
 import { detectSource } from "./agent.js";
 import { captureTree, scopedDiff } from "./scopes.js";
 import { CODEX } from "./codex.js";
+import { PI } from "./pi.js";
+import { GEMINI } from "./gemini.js";
 
 // The panels around the agent's pane.
 //
@@ -40,11 +45,20 @@ const CHECK_QUIET_MS = 2500;
 // program uses to name its window. tmux reads it into #{pane_title}, which
 // the border format prints. So the border can say which file the dock is
 // showing without srcy drawing a single border character itself.
+let titled = "";
+
 function setPaneTitle(title: string): void {
+  titled = title;
   // Only to a real terminal. Anywhere else — a pipe, a test — this is an
   // escape sequence printed into somebody's output as literal text.
   if (process.stdout.isTTY !== true) return;
   process.stdout.write(`\u001b]2;${title}\u0007`);
+}
+
+// The last title a pane set, for a test: the border is tmux's, and a
+// component render cannot show it.
+export function lastTitle(): string {
+  return titled;
 }
 
 // A pane's size is not fixed: tmux resizes it whenever the terminal changes,
@@ -122,6 +136,8 @@ interface Shared {
   // Every gate's verdict, so the dock can print the messages the rail has no
   // width for without running anything itself.
   gates?: GateResult[];
+  // The gate the reader picked with Tab, whose output the dock shows.
+  gate?: string;
 }
 
 function statePath(session: string): string {
@@ -150,6 +166,18 @@ export function publish(session: string, patch: Shared): void {
 export function reset(session: string): void {
   shared = {};
   publish(session, {});
+}
+
+// The rail's last act: the file is named after the session, which comes
+// back identical tomorrow, and reset() only covers the case where the rail
+// starts again. A session that simply ended leaves nothing behind.
+export function forget(session: string): void {
+  if (session === "") return;
+  try {
+    unlinkSync(statePath(session));
+  } catch {
+    // never written, or already gone
+  }
 }
 
 export async function readShared(session: string): Promise<Shared> {
@@ -226,6 +254,13 @@ interface Watched {
   running: string;
   // What other tools have said this session, oldest first.
   outside: SrcyEvent[];
+  // When the agent last handed the turn back, and what it said as it did.
+  ended?: number;
+  reply?: string;
+  // A permission prompt is on the agent's screen right now.
+  prompt: boolean;
+  // Whether the project wants a bell.
+  notify: boolean;
 }
 
 // How many external events the rail keeps. It is a tail, not a history: the
@@ -244,7 +279,15 @@ const EMPTY: Watched = {
   results: [],
   running: "",
   outside: [],
+  prompt: false,
+  notify: true,
 };
+
+// How often to re-find the agent's pane. Pane ids are stable for the life
+// of a session, so once is nearly enough; a few times a minute covers the
+// reader having rearranged the window.
+const PANE_TICKS = 25;
+
 
 // "Has the working tree changed" — by content, not by churn counts.
 //
@@ -318,7 +361,13 @@ function useWatch(
   const config = useRef<Gate[]>([]);
   const configError = useRef<string | undefined>(undefined);
   const configFor = useRef<string | null>(null);
+  const notify = useRef(true);
   const task = useRef("");
+  // The run in flight, so the tree moving under it can cut it short.
+  const run = useRef<GateRun | null>(null);
+  // The agent's pane, for reading a prompt off its screen.
+  const agentPane = useRef<string | undefined>(undefined);
+  const paneAge = useRef(PANE_TICKS);
 
   // Files the project builds from other files. Shown as gates because they
   // are the same claim, never queued because there is no command to run.
@@ -372,6 +421,16 @@ function useWatch(
         const t = rail && source !== null ? await readSession(cwd, source) : null;
         if (!live) return;
         const fp = fingerprint(repo);
+        // Only while a call is open: that is the only time a prompt can be
+        // the reason nothing is happening, and capture-pane is a process.
+        let prompt = false;
+        if (rail && session !== "" && t?.activity != null) {
+          if (agentPane.current === undefined || ++paneAge.current >= PANE_TICKS) {
+            agentPane.current = identify(session).agent;
+            paneAge.current = 0;
+          }
+          if (agentPane.current !== undefined) prompt = promptOnScreen(paneTail(agentPane.current));
+        }
         setState({
           repo,
           plan: t?.plan ?? [],
@@ -388,6 +447,10 @@ function useWatch(
           task: task.current,
           running: running.current,
           outside: outside.current,
+          ended: t?.ended,
+          reply: t?.reply,
+          prompt,
+          notify: notify.current,
         });
 
         if (rail) {
@@ -450,6 +513,7 @@ function useWatch(
             const loaded = await loadGates(cwd);
             config.current = loaded.gates;
             configError.current = loaded.error;
+            notify.current = loaded.notify;
             builtFrom.current = loaded.derived;
             built.current = derivedGates(loaded.derived);
             // Same gate as the config: editing either is a change to the
@@ -464,6 +528,12 @@ function useWatch(
             builtResults.current = [];
           }
 
+          // The tree moved under a run that started itself: its verdict
+          // would arrive stale, with the next run queued behind it. A run
+          // the reader asked for is left to finish — they are waiting on it.
+          if (fp !== mark.current && run.current !== null && config.current.find((g) => g.name === running.current)?.auto === true) {
+            run.current.kill();
+          }
           const step = checkStep(fp, mark.current, quietSince.current, Date.now(), running.current !== "");
           mark.current = step.mark;
           quietSince.current = step.quietSince;
@@ -490,8 +560,13 @@ function useWatch(
               // Deliberately not awaited inside the tick: a typecheck can
               // take ten seconds, and the rail must keep updating while it
               // runs. The next one starts on the tick after this finishes.
-              void runGate(cwd, gate, markFor(fp, repo.stamps, gate.watch))
+              const started = startGate(cwd, gate, markFor(fp, repo.stamps, gate.watch));
+              run.current = started;
+              void started.done
                 .then(async (r) => {
+                  // Cut short says nothing about the tree; the verdict it
+                  // had stays, marked stale by the mark it carries.
+                  if (r.status === "killed") return;
                   results.current = [...results.current.filter((x) => x.name !== r.name), r];
                   // The rail has room for `session.ts:3`. The message goes
                   // to the pane with the width to print it.
@@ -506,9 +581,11 @@ function useWatch(
                 .catch(() => {})
                 .finally(() => {
                   running.current = "";
+                  run.current = null;
                 });
             }
           }
+
         }
       } catch {
         // Panels are display-only. A failed poll leaves the last good frame
@@ -638,6 +715,8 @@ export function GateRows({
   ran,
   wrote,
   now,
+  reply,
+  cursor,
 }: {
   gates: Gate[];
   results: GateResult[];
@@ -656,6 +735,10 @@ export function GateRows({
   ran?: Map<string, number>;
   wrote?: number;
   now?: number;
+  // What the agent said when it handed the turn back, for the claim check.
+  reply?: string;
+  // The gate the reader has picked with Tab, if any.
+  cursor?: string;
 }): React.JSX.Element {
   if (gates.length === 0) {
     // Deliberately not silent: a project with nothing configured should
@@ -685,8 +768,10 @@ export function GateRows({
           ran={ran}
           wrote={wrote}
           now={now}
+          picked={cursor === g.name}
         />
       ))}
+      {disputed(results, reply) ? <Text color="red" bold>{clipTo("  ✖ agent says passing", width)}</Text> : null}
       {shown.map((p, i) => (
         // Truncated rather than wrapped: a TypeScript message is longer than
         // this column and wrapping one costs four rows that the next failure
@@ -744,6 +829,7 @@ export function GateLine({
   ran = EMPTY_RAN,
   wrote,
   now = 0,
+  picked = false,
 }: {
   gate: Gate;
   result: GateResult | undefined;
@@ -754,23 +840,27 @@ export function GateLine({
   ran?: Map<string, number>;
   wrote?: number;
   now?: number;
+  picked?: boolean;
 }): React.JSX.Element {
   const name = gate.name.slice(0, GATE_NAME).padEnd(GATE_NAME);
-  if (running) return <Text color="cyan">{clipTo(`  ${name} running…`, width)}</Text>;
+  // The picked gate's caret sits where the tree's does, so one glyph means
+  // "the keys act here" down the whole rail.
+  const lead = picked ? "► " : "  ";
+  if (running) return <Text color="cyan" inverse={picked}>{clipTo(`${lead}${name} running…`, width)}</Text>;
   // Undefined is "we have not run this yet" — never the same as a pass. An
   // automatic gate is waiting for the tree to settle; a manual one is
   // waiting for you, and says which.
-  if (result === undefined) {
+  if (result === undefined || result.status === "killed") {
     const said = agentRan(ran, gate, wrote, now);
     const waiting = gate.auto ? "not run yet" : "not run — press r";
-    return <Text dimColor>{clipTo(`  ${name} ${said === "" ? waiting : `not run · ${said}`}`, width)}</Text>;
+    return <Text dimColor inverse={picked}>{clipTo(`${lead}${name} ${said === "" ? waiting : `not run · ${said}`}`, width)}</Text>;
   }
   const stale = !isFresh(gate, result, mark, marks);
   const age = stale ? " · code moved since" : "";
   const took = `${elapsed(result.ms)}`;
   if (result.status === "pass") {
-    const text = `  ${name} ✔ ${took}${age}`;
-    return stale ? <Text dimColor>{clipTo(text, width)}</Text> : <Text color="green">{clipTo(text, width)}</Text>;
+    const text = `${lead}${name} ✔ ${took}${age}`;
+    return stale ? <Text dimColor inverse={picked}>{clipTo(text, width)}</Text> : <Text color="green" inverse={picked}>{clipTo(text, width)}</Text>;
   }
   // A gate that ran out of time proved nothing either way, so it is neither
   // a pass nor a failure — it is a thing to look at, with its own word.
@@ -783,13 +873,14 @@ export function GateLine({
           // is a better answer than "failing", and it is the whole answer for
           // a derived file, which prints nothing and fails for one reason.
           (result.tail.split("\n").find((l) => l.trim() !== "") ?? "failing");
-  const text = `  ${name} ${verdict}${age}`;
+  const text = `${lead}${name} ${verdict}${age}`;
   return (
-    <Text color={stale ? undefined : "red"} dimColor={stale}>
+    <Text color={stale ? undefined : "red"} dimColor={stale} inverse={picked}>
       {clipTo(text, width)}
     </Text>
   );
 }
+
 
 // The heading. Fresh passes over configured gates, and how many want
 // looking at — the two numbers that decide whether the turn is done.
@@ -801,6 +892,24 @@ export function gatesLabel(gates: Gate[], results: GateResult[], mark: string, m
   // beside it already say which gates the "not yet" is about.
   if (verified(gates, results, mark, marks)) return `GATES ${passing}/${total} VERIFIED`;
   return `GATES ${passing}/${total}${attention > 0 ? `  ${attention} to look at` : ""}`;
+}
+
+// The tree's heading: what it is showing, what narrowed it, and whether the
+// cursor is the reader's or the agent's.
+export function railLabel(onlyChanged: boolean, picked: string | null, query: string, typing = false): string {
+  const what = onlyChanged ? "CHANGED" : "REPO";
+  const search = query === "" && !typing ? "" : `  /${query}${typing ? "_" : ""}`;
+  return `${what}${search}  ${picked === null ? "FOLLOW" : "PINNED"}`;
+}
+
+// Tab walks the gates and steps off the end: null is "none picked", which is
+
+// where the rail starts and where the tree's cursor is.
+export function nextGate(names: string[], current: string | null): string | null {
+  if (names.length === 0) return null;
+  if (current === null) return names[0]!;
+  const i = names.indexOf(current);
+  return i < 0 || i + 1 >= names.length ? null : names[i + 1]!;
 }
 
 // One line, and no heading above it.
@@ -853,7 +962,16 @@ export function planAge(since: number | undefined, now: number): string {
   return elapsed(now - since);
 }
 
+// The heading counts: done over total is the one number a reader takes from
+// a plan without reading it.
+export function planLabel(entries: PlanEntry[]): string {
+  if (entries.length === 0) return "PLAN";
+  const done = entries.filter((e) => e.status === "completed").length;
+  return `PLAN ${done}/${entries.length}`;
+}
+
 export function PlanBody({ entries, since, now = 0 }: { entries: PlanEntry[]; since?: number; now?: number }): React.JSX.Element {
+
   if (entries.length === 0) return <Text dimColor>{"  (no plan)"}</Text>;
   const bar = PlanBar({ entries, age: planAge(since, now) });
   if (bar === null) return <Text dimColor>{"  (no plan)"}</Text>;
@@ -864,6 +982,91 @@ export function PlanBody({ entries, since, now = 0 }: { entries: PlanEntry[]; si
 // The pane border says what the agent is doing right now — the one fact that
 // belongs where the eye already is rather than in a row it has to find.
 export const TITLE_MAX = 28;
+
+// What the agent is doing, as one of five things.
+//
+// `idle` covered everything that was not a tool call, and two of those were
+// worth telling apart from the rest: a model between two calls is thinking,
+// not waiting on you — the transcript says which, because a reply stopped
+// for `tool_use` is not a reply that handed the turn back — and a tool call
+// that is open because the agent is waiting for permission to make it is
+// the agent waiting on you, which is the opposite of working.
+export type Phase =
+  | { kind: "working"; since: number | undefined }
+  | { kind: "needs-you"; since: number | undefined }
+  | { kind: "thinking"; since: number | undefined }
+  | { kind: "yours"; since: number }
+  | { kind: "idle"; since: undefined };
+
+export function phaseOf(s: {
+  activity: Activity | null;
+  turn: Turn | null | undefined;
+  ended: number | undefined;
+  at: number | undefined;
+  // A permission prompt is on the agent's screen.
+  prompt?: boolean;
+}): Phase {
+  if (s.activity !== null) {
+    return { kind: s.prompt === true ? "needs-you" : "working", since: s.activity.since };
+  }
+  const asked = s.turn?.at;
+  // Ended after the newest request: the ball is with you, and has been since
+  // the end — which is when you could first have acted on it.
+  if (s.ended !== undefined && (asked === undefined || s.ended >= asked)) return { kind: "yours", since: s.ended };
+  // A request with no end yet, and nothing in flight: the model is deciding
+  // what to call next.
+  if (asked !== undefined) return { kind: "thinking", since: s.at };
+  return { kind: "idle", since: undefined };
+}
+
+// Is the agent asking the reader something on its own screen? Each agent
+// words it differently, and the lines are short enough to match plainly.
+// Used only while a tool call is open — that is the only time a prompt can
+// be the reason nothing is happening — so a reply that happens to ask "would
+// you like me to continue" is never mistaken for one.
+const PROMPTS = [
+  /do you want to (proceed|make this edit|create|allow|run|continue)/i,
+  /would you like to (run|approve|allow|proceed|apply)/i,
+  /allow (this )?(command|edit|tool|once|always)/i,
+  /\bapprove\b.*\?/i,
+  /don'?t ask again/i,
+  /\[y\/n\]|\(y\/n\)/i,
+  /press enter to (confirm|approve|continue)/i,
+];
+
+export function promptOnScreen(text: string): boolean {
+  return PROMPTS.some((re) => re.test(text));
+}
+
+// What is worth a bell. Compared frame to frame, so each rings once, on the
+// change — never on the poll after it.
+export interface Ringable {
+  kind: Phase["kind"];
+  // Gates failing or timed out right now.
+  failing: number;
+}
+
+export function alerts(prev: Ringable | undefined, next: Ringable): string[] {
+  if (prev === undefined) return [];
+  const out: string[] = [];
+  if (next.kind !== prev.kind && next.kind === "yours") out.push("your turn");
+  if (next.kind !== prev.kind && next.kind === "needs-you") out.push("needs you");
+  if (next.failing > prev.failing) out.push(`${next.failing} gate${next.failing === 1 ? "" : "s"} failing`);
+  return out;
+}
+
+// Did the agent say the code is good? "I ran the tests" is the claim taken
+// on faith more than any other, and the reply is where it gets written.
+// Deliberately loose: a false positive costs a row that says the gates
+// disagree, which is a row worth reading either way.
+const CLAIMS = [
+  /\b(tests?|suite|build|typecheck|type-check|lint|checks?|ci|everything|all)\b[^.\n]{0,40}\b(pass|passes|passing|passed|green|clean|succeed|succeeds|succeeded)\b/i,
+  /\b(pass|passes|passing|passed|green|clean)\b[^.\n]{0,20}\b(tests?|suite|build|typecheck|lint|checks?)\b/i,
+];
+
+export function claimsPassing(reply: string): boolean {
+  return CLAIMS.some((re) => re.test(reply));
+}
 
 // Coarse on purpose. Under ten seconds the decimal is the whole signal —
 // 0.2s is a cache hit, 4.1s is a real call — and past a minute nobody reads
@@ -887,24 +1090,32 @@ function fit(body: string, width: number): string {
 // still picture of `npm test` cannot tell you it has been running twelve
 // minutes. Nothing in flight means the agent has stopped and the ball is with
 // you, and how long says which kind of stopped that is.
-export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX, at?: number): string {
+export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX, at?: number, phase?: Phase): string {
+  const ago = (since: number | undefined): string => (since === undefined || now === 0 ? "" : `${elapsed(Math.max(0, now - since))} `);
   if (a === null) {
+    if (phase?.kind === "thinking" && now !== 0 && phase.since !== undefined) {
+      return fit(`thinking ${elapsed(Math.max(0, now - phase.since))}`, width);
+    }
+    const since = phase?.kind === "yours" ? phase.since : at;
     // No timestamp means no honest number: a transcript srcy cannot date
     // gets the word it has always had rather than an invented duration.
-    if (at === undefined || now === 0) return " idle ";
-    return fit(`your turn · waiting ${elapsed(Math.max(0, now - at))}`, width);
+    if (since === undefined || now === 0 || phase?.kind === "idle") return " idle ";
+    return fit(`your turn · waiting ${elapsed(Math.max(0, now - since))}`, width);
   }
   // A path gets its basename — the directory is already on screen in the
   // rail. A command keeps its head: `npm run build` identifies itself in
   // its first words, where a pipeline's tail identifies nothing.
   const looksLikePath = a.target.includes("/") && !a.target.includes(" ");
   const short = looksLikePath ? (a.target.split("/").pop() ?? "") : a.target;
+  const what = `${a.tool}${short === "" ? "" : ` ${short}`}`;
+  // Waiting for permission is the opposite of working, and the word has to
+  // come before the tool: the tool is what it is waiting to do.
+  if (phase?.kind === "needs-you") return fit(`needs you ${ago(a.since)}· ${what}`, width);
   // The age leads. tmux truncates a pane border to the pane's width and the
   // rail is narrow, so anything at the end is the first thing cut — and how
   // long this has been running is the one part you cannot get by looking at
   // the agent's own pane.
-  const age = a.since === undefined || now === 0 ? "" : `${elapsed(now - a.since)} `;
-  return fit(`⟳ ${age}${a.tool}${short === "" ? "" : ` ${short}`}`, width);
+  return fit(`⟳ ${ago(a.since)}${what}`, width);
 }
 
 // How many lines each fixed section will occupy. Exported and used by the
@@ -913,12 +1124,19 @@ export function activityTitle(a: Activity | null, now = 0, width = TITLE_MAX, at
 // Ink overdraws rather than scrolling — rows land on top of each other.
 //
 // GATES is now as tall as the project has gates, plus what failed.
-export function gateRows(gates: Gate[], results: GateResult[], error?: string): number {
+export function gateRows(gates: Gate[], results: GateResult[], error?: string, reply?: string): number {
   const head = error === undefined ? 0 : 1;
   if (gates.length === 0) return head + 1;
   const problems = problemsOf(results).length;
   const shown = Math.min(RAIL_PROBLEMS, problems);
-  return head + gates.length + shown + (problems > shown ? 1 : 0);
+  const claim = disputed(results, reply) ? 1 : 0;
+  return head + gates.length + claim + shown + (problems > shown ? 1 : 0);
+}
+
+// The agent said it passes and a gate says it does not. Both are on screen
+// already; this is the one row that puts them next to each other.
+export function disputed(results: GateResult[], reply: string | undefined): boolean {
+  return reply !== undefined && claimsPassing(reply) && problemsOf(results).length > 0;
 }
 
 // One line whatever it holds. Still measured through this function rather
@@ -1065,7 +1283,15 @@ export function Rail({
   // rows is what keeps the directories right: a directory exists here
   // because something under it changed.
   const [onlyChanged, setOnlyChanged] = useState(false);
-  const shown = useMemo(() => (onlyChanged ? paths.filter((p) => changed.has(p)) : paths), [paths, changed, onlyChanged]);
+  // What `/` narrowed the tree to, and whether the keys are still typing
+  // into it. Ten thousand files and `j` was the only way down.
+  const [query, setQuery] = useState("");
+  const [typing, setTyping] = useState(false);
+  const [help, setHelp] = useState(false);
+  const shown = useMemo(
+    () => filterPaths(onlyChanged ? paths.filter((p) => changed.has(p)) : paths, query),
+    [paths, changed, onlyChanged, query],
+  );
   const visible = useMemo(() => treeRows(shown, open, changed), [shown, open, changed]);
 
   const [picked, setPicked] = useState<string | null>(null);
@@ -1075,16 +1301,68 @@ export function Rail({
   // Ticking whenever the agent has done anything, not only while it is
   // working: "waiting 4m" is a number that has to keep counting.
   const now = useNow(s.activity !== null || s.at !== undefined);
+  const phase = phaseOf({ activity: s.activity, turn: s.turn, ended: s.ended, at: s.at, prompt: s.prompt });
   useEffect(() => {
     // Sized to the pane, minus the corners and padding tmux draws around it.
-    setPaneTitle(activityTitle(s.activity, now, Math.max(8, width - 6), s.at));
-  }, [s.activity?.tool, s.activity?.target, now, width, s.at]);
+    setPaneTitle(activityTitle(s.activity, now, Math.max(8, width - 6), s.at, phase));
+  }, [s.activity?.tool, s.activity?.target, now, width, s.at, phase.kind, phase.since]);
+
+  // One bell per transition. The terminal turns it into a badge on a window
+  // the reader has detached from, which is the whole point of `ctrl-b d`.
+  const failing = s.results.filter((r) => r.status === "fail" || r.status === "timeout").length;
+  const rang = useRef<Ringable | undefined>(undefined);
+  useEffect(() => {
+    const next = { kind: phase.kind, failing };
+    // The first frame with anything in it is the baseline, not a change: a
+    // rail opened on an agent already waiting would otherwise ring at once.
+    if (rang.current === undefined) {
+      if (s !== EMPTY) rang.current = next;
+      return;
+    }
+    const said = alerts(rang.current, next);
+    rang.current = next;
+
+    if (said.length === 0 || !s.notify || !interactive || process.stdout.isTTY !== true) return;
+    process.stdout.write("\u0007");
+    if (session !== "") tmuxRun(["display-message", "-t", session, "-d", "3000", ` srcy: ${said.join(" · ")} `]);
+  }, [phase.kind, failing]);
+
+  // The gate the reader picked with Tab. Its output goes to the dock, and
+  // R runs it alone — the slow one is the one you ask for by name.
+  const [gateAt, setGateAt] = useState<string | null>(null);
 
   // tmux only delivers keystrokes to the focused pane, so this is inert
   // until the reader moves the keyboard here — the agent keeps every key
   // otherwise, which is the point.
   useInput(
     (input, key) => {
+      // Typing into the search: every printable key is part of it until
+      // enter keeps what it found or escape throws it away. The arrows
+      // still move, so a match can be picked without leaving.
+      if (typing) {
+        if (key.escape) {
+          setQuery("");
+          setTyping(false);
+        } else if (key.return) setTyping(false);
+        else if (key.backspace || key.delete) setQuery((q) => q.slice(0, -1));
+        else if (key.downArrow) setPicked(visible[Math.min(at + 1, visible.length - 1)]?.path ?? null);
+        else if (key.upArrow) setPicked(visible[Math.max(at - 1, 0)]?.path ?? null);
+        else if (input.length === 1 && !key.ctrl && !key.meta) setQuery((q) => q + input);
+        return;
+      }
+      if (input === "/") {
+        setTyping(true);
+        return;
+      }
+      if (input === "?") {
+        setHelp((on) => !on);
+        return;
+      }
+      if (key.escape) {
+        setQuery("");
+        setHelp(false);
+        return;
+      }
       // A checkpoint the reader sets by hand. The one way to get a TURN
       // scope for an agent srcy cannot read, and the way back when an
       // automatic baseline was refused because the agent was already
@@ -1097,6 +1375,18 @@ export function Rail({
         // but there is nothing to run: they are two timestamps, re-compared
         // whenever the tree moves.
         asked.current.push(...s.gates.filter((g) => g.command.length > 0).map((g) => g.name));
+        return;
+      }
+      if (key.tab) {
+        // Through the gates and back off the end: no gate picked is a state,
+        // and the one the tree cursor is in.
+        const next = nextGate(s.gates.map((g) => g.name), gateAt);
+        setGateAt(next);
+        publish(session, { gate: next ?? undefined, pickedAt: Date.now() });
+        return;
+      }
+      if (input === "R") {
+        if (gateAt !== null && s.gates.some((g) => g.name === gateAt && g.command.length > 0)) asked.current.push(gateAt);
         return;
       }
       if (input === "c") {
@@ -1137,8 +1427,17 @@ export function Rail({
       if (visible.length === 0) return;
       const row = visible[at];
       const go = (i: number): void => setPicked(visible[Math.max(0, Math.min(i, visible.length - 1))]?.path ?? null);
+      // Out to the editor on the cursor's file — at its first failing line,
+      // if a gate named one — or its path onto the clipboard.
+      if ((input === "o" || input === "y") && row !== undefined && !row.dir) {
+        if (input === "y") return yank(session, row.path);
+        const line = problemsOf(s.results).find((p) => p.path === row.path)?.line ?? 0;
+        return openEditor(session, cwd, editorArgv(process.env, row.path, line));
+      }
       if (input === "j" || key.downArrow) go(at + 1);
       else if (input === "k" || key.upArrow) go(at - 1);
+      else if (input === "g") go(0);
+      else if (input === "G") go(visible.length - 1);
       else if (row !== undefined && (key.return || input === " ")) {
         if (row.dir) setManual(toggle(manual, row.path, open.has(row.path)));
         // A file the reader picked outranks the file the agent wrote last:
@@ -1158,31 +1457,35 @@ export function Rail({
       : mapBudget(
           height,
           s.plan.length,
-          gateRows(s.gates, s.results, s.gateError),
+          gateRows(s.gates, s.results, s.gateError, s.reply),
           usageRows(s.usage),
           2,
           eventRows(s.outside),
         );
   const view = treeWindow(visible.length, at, Math.max(1, (budget ?? visible.length) - 1));
 
+  // Reading order, top to bottom: what you asked for, what the agent means
+  // to do about it, what it has done to the tree, whether any of it holds,
+  // and how much room it has left. The tree is the section that stretches,
+  // so it sits in the middle and the fixed ones frame it.
   return (
     <Box flexDirection="column" height={height}>
-      <Rule
-        label={`${onlyChanged ? "CHANGED" : "REPO"}  ${picked === null ? "FOLLOW" : "PINNED"}`}
-        width={width}
-        color={GIT}
-      />
-      {visible.length === 0 ? (
-        <Text dimColor>{onlyChanged ? "  (nothing changed yet)" : "  (reading the project…)"}</Text>
+      <Rule label={s.task === "" ? "GOAL" : "GOAL  task.md"} width={width} color={AGENT} />
+      <GoalLine turn={s.turn} task={s.task} width={width} />
+      <Rule label={planLabel(s.plan)} width={width} color={AGENT} />
+      <PlanBody entries={s.plan} since={s.doingAt} now={now} />
+      <Rule label={help ? "KEYS" : railLabel(onlyChanged, picked, query, typing)} width={width} color={GIT} />
+      {help ? (
+        HELP_RAIL.slice(0, Math.max(1, (budget ?? HELP_RAIL.length) - 1)).map((line, i) => (
+          <Text key={i} dimColor={!line.startsWith("  ")} bold={!line.startsWith("  ")}>{clipTo(line, width)}</Text>
+        ))
+      ) : visible.length === 0 ? (
+        <Text dimColor>{query !== "" ? `  (nothing matches ${query})` : onlyChanged ? "  (nothing changed yet)" : "  (reading the project…)"}</Text>
       ) : (
         visible.slice(view.start, view.end).map((row, i) => (
           <TreeLine key={row.path} row={row} width={width} cursor={view.start + i === at} />
         ))
       )}
-      <Rule label={s.task === "" ? "GOAL" : "GOAL  task.md"} width={width} color={AGENT} />
-      <GoalLine turn={s.turn} task={s.task} width={width} />
-      <Rule label="PLAN" width={width} color={AGENT} />
-      <PlanBody entries={s.plan} since={s.doingAt} now={now} />
       <Rule
         label={gatesLabel(s.gates, s.results, s.repo.mark, marks)}
         width={width}
@@ -1199,6 +1502,8 @@ export function Rail({
         ran={s.ran}
         wrote={s.wrote}
         now={now}
+        reply={s.reply}
+        cursor={gateAt ?? undefined}
       />
       {s.outside.length === 0 ? null : (
         <>
@@ -1352,7 +1657,10 @@ export function Dock({
 }): React.JSX.Element {
   const s = useWatch(cwd, false, null);
   const [pos, setPos] = useState<Position>(START);
-  const [preview, setPreview] = useState<{ path: string; text: string; from: number } | null>(null);
+  // Text in place of the diff: a file nothing changed, a gate's output, the
+  // key list. One state, because the pane shows one thing at a time and the
+  // same keys scroll all three.
+  const [text, setText] = useState<TextView | null>(null);
   const [gates, setGates] = useState<GateResult[]>([]);
   // The file the agent wrote last, by mtime. Recomputed on the poll rather
   // than during render because it is a stat per changed file.
@@ -1360,6 +1668,10 @@ export function Dock({
   // Which change is under review, and the baselines the rail captured for
   // the two scopes that are not simply "everything uncommitted".
   const [scope, setScope] = useState<Scope>("head");
+  // Whether the reader has picked a scope. Until they do, the pane moves to
+  // TURN by itself the moment there is a turn to review: it opens on HEAD
+  // only because that is the one scope that exists before the first request.
+  const chose = useRef(false);
   // Side by side, old on the left. Off by default: the dock is a short pane
   // spanning the window, so unified gets the full width for the line and
   // split halves it — worth it when reading a rewrite, not when watching one
@@ -1402,6 +1714,7 @@ export function Dock({
       if (!live) return;
       setGates(state.gates ?? []);
       setBase(state);
+      if (!chose.current && scope === "head" && state.turn !== undefined) setScope("turn");
 
       // The scoped diff is tree-against-tree, so it costs a capture; the
       // HEAD scope stays the cheap `git diff HEAD` the rail already ran.
@@ -1413,48 +1726,63 @@ export function Dock({
       if (!live) return;
       setNewestPath(n?.path ?? "");
 
-      const picked = state.file ?? "";
       const at = state.pickedAt ?? 0;
-      if (picked !== "" && at > seenPick.current) {
+      if (at > seenPick.current) {
         seenPick.current = at;
+        // A gate the rail picked with Tab: its output, with the end on
+        // screen, because a runner prints its summary last.
+        if (state.gate !== undefined) {
+          const v = gateText(state.gate, (state.gates ?? []).find((r) => r.name === state.gate));
+          setText({ ...v, from: Math.max(0, v.lines.length - Math.max(1, rows - 3)) });
+          return;
+        }
+        const picked = state.file ?? "";
+        if (picked === "") return;
         // A file the reader picked in the rail outranks the file the agent
         // wrote last: they are looking at something on purpose.
         const hit = list.find((f) => f.path === picked);
         if (hit !== undefined) {
-          setPreview(null);
+          setText(null);
           setPos({ path: picked, top: state.line === undefined ? 0 : rowFor(fileLines(hit, split), state.line), pinned: true });
           return;
         }
         // Picked, but unchanged. Showing "no diff" would make every
         // unmodified file a dead end, so the dock reads it instead.
-        const text = await readFile(join(cwd, picked), "utf8").catch(() => null);
-        if (live && text !== null) {
+        const body = await readFile(join(cwd, picked), "utf8").catch(() => null);
+        if (live && body !== null) {
           setPos(START);
           // A gate can fail on a line of a file nothing has touched, so the
-          // preview starts where the failure is rather than at line one.
-          setPreview({ path: picked, text, from: Math.max(0, (state.line ?? 1) - 1) });
+          // view starts where the failure is rather than at line one.
+          setText({ title: `FILE  ${picked}`, lines: body.split("\n"), from: Math.max(0, (state.line ?? 1) - 1), path: picked });
         }
         return;
       }
       // A previewed file the agent has since edited becomes a diff: the
       // reader picked that path, and the change to it is the newer answer.
-      if (preview !== null && list.some((f) => f.path === preview.path)) {
-        setPreview(null);
-        setPos({ path: preview.path, top: 0, pinned: true });
+      if (text?.path !== undefined && list.some((f) => f.path === text.path)) {
+        setText(null);
+        setPos({ path: text.path, top: 0, pinned: true });
       }
     })();
     return () => {
       live = false;
     };
-  }, [cwd, session, head, preview, scope]);
+  }, [cwd, session, head, text, scope]);
 
-  const failures = problemLines(gates, preview?.path ?? pos.path, width);
+  const failures = problemLines(gates, text?.path ?? pos.path, width);
+  // What the whole change amounts to, above the file being read from it.
+  // One row, and only when there is a diff under it to describe.
+  const summary = text === null ? riskLine(files) : "";
   // Two for the border and title tmux draws, one for the key line below.
-  const room = Math.max(3, rows - 3 - failures.length);
+  const room = Math.max(3, rows - 3 - failures.length - (summary === "" ? 0 : 1));
   const v = view({ pos, files, rows: room, newest: newestPath, scope, note, split, era });
 
   useInput(
     (input, key) => {
+      if (input === "?") {
+        setText(text?.title === "KEYS" ? null : { title: "KEYS", lines: HELP_DOCK, from: 0 });
+        return;
+      }
       // A view, not a movement: the row the pane is on stays where it is,
       // and the pairing changes under it. Handled here rather than as an
       // Action for the same reason the scope keys are — `move` returns a
@@ -1469,6 +1797,7 @@ export function Dock({
         const step = input === "," ? 1 : -1;
         setBack((n) => Math.max(0, Math.min(n + step, PAST_MAX - 1)));
         if (input === ",") setScope("turn");
+        chose.current = true;
         return;
       }
       const picked = scopeFor(input);
@@ -1477,13 +1806,29 @@ export function Dock({
         // next scope too, and `view` hands the pane back to follow when it
         // is not.
         setScope(picked);
+        chose.current = true;
         // A scope is a fresh question: it starts at the turn you are in.
         setBack(0);
         return;
       }
+      // Out to the editor, on this line; or the line onto the clipboard,
+      // for the agent's prompt. The one thing srcy still never does is type
+      // into that prompt itself.
+      if (input === "o" || input === "y") {
+        const where = text?.path !== undefined ? `${text.path}:${text.from + 1}` : locationOf(v);
+        if (where === "") return;
+        if (input === "y") return yank(session, where);
+        const [path, line] = where.split(":");
+        return openEditor(session, cwd, editorArgv(process.env, path ?? where, Number(line ?? 0)));
+      }
       const action = actionFor(input, key);
       if (action === undefined) return;
-      setPreview(null);
+      if (text !== null) {
+        // The scrolling keys scroll the text; the ones that pick a file or a
+        // hunk leave it for the diff.
+        if (SCROLLS.has(action)) return setText({ ...text, from: scrollText(text.from, action, text.lines.length, room) });
+        setText(null);
+      }
       setPos(move({ pos, files, rows: room, newest: newestPath, scope, note, split, era }, action));
     },
     // tmux only delivers keys to the focused pane, so this is inert until
@@ -1492,20 +1837,24 @@ export function Dock({
     { isActive: process.stdin.isTTY === true },
   );
 
-  const title = preview !== null ? `FILE  ${preview.path}` : v.title;
+  const title = text !== null ? text.title : v.title;
   useEffect(() => {
     setPaneTitle(` ${title} `);
   }, [title]);
 
   const body =
-    preview !== null ? (
+    text !== null ? (
       <Box flexDirection="column">
-        {preview.text
-          .split("\n")
-          .slice(preview.from, preview.from + Math.min(PREVIEW_LINES, room))
-          .map((line, i) => (
-            <Text key={i} dimColor>{`${String(preview.from + i + 1).padStart(4)}  ${line}`}</Text>
-          ))}
+        {text.lines.slice(text.from, text.from + Math.min(PREVIEW_LINES, room)).map((line, i) =>
+          text.path !== undefined ? (
+            <Box key={i}>
+              <Text dimColor>{`${String(text.from + i + 1).padStart(4)} `}</Text>
+              <Text>{clipTo(` ${line}`, Math.max(1, width - 5))}</Text>
+            </Box>
+          ) : (
+            <Text key={i}>{clipTo(`  ${line}`, width)}</Text>
+          ),
+        )}
       </Box>
     ) : v.file === undefined ? (
       <Text dimColor>{"  working tree clean — nothing to review"}</Text>
@@ -1524,6 +1873,7 @@ export function Dock({
           {line}
         </Text>
       ))}
+      {summary === "" ? null : <Text dimColor>{clipTo(`  ${summary}`, width)}</Text>}
       {body}
       <Box flexGrow={1} />
       <Text dimColor>{clipTo(KEYS, width)}</Text>
@@ -1531,14 +1881,25 @@ export function Dock({
   );
 }
 
+const SCROLLS = new Set(["down", "up", "page-down", "page-up", "top", "bottom"]);
+
 // One row of the review. A hunk heading is not a line of the file, so it
 // gets no number and is dimmed: what it says is where the next rows are,
 // which is context for them rather than content of its own.
 export function ReviewRow({ line, width }: { line: ReviewLine; width: number }): React.JSX.Element {
   if (line.sign === "@") {
     // The heading spans both columns in either view: it says where the rows
-    // under it are, which is as true of the left one as the right.
-    return <Text dimColor>{clipTo(`  @@ ${line.text}`, width)}</Text>;
+    // under it are, which is as true of the left one as the right. The
+    // function name is the part worth reading; the rest is punctuation.
+    const [num, ...rest] = line.text.split("  ");
+    const func = rest.join("  ");
+    const head = `  @@ ${num ?? ""}  `;
+    return (
+      <Text dimColor>
+        {head}
+        <Text bold>{clipTo(func, Math.max(0, width - head.length))}</Text>
+      </Text>
+    );
   }
   if (line.right === undefined) {
     return <Marked side={line} width={width} />;
@@ -1572,10 +1933,24 @@ function Marked({ side, width, pad = 0 }: { side: Side; width: number; pad?: num
   const head = 7;
   const from = m === undefined ? 0 : Math.min(head + m.from, full.length);
   const to = m === undefined ? 0 : Math.min(head + m.to, full.length);
-  if (to <= from) return <Text color={color}>{full}</Text>;
+  // The number is a gutter, not content: dimmed so the eye lands on the
+  // sign and the line. A blank half-row has no gutter to dim.
+  const gutter = full === "" ? "" : full.slice(0, 5);
+  const rest = full === "" ? "" : full.slice(5);
+  if (to <= from) {
+    return (
+      <Text color={color}>
+        <Text dimColor>{gutter}</Text>
+        <Text bold={side.sign !== " "}>{rest.slice(0, 1)}</Text>
+        {rest.slice(1)}
+      </Text>
+    );
+  }
   return (
     <Text color={color}>
-      {full.slice(0, from)}
+      <Text dimColor>{gutter}</Text>
+      <Text bold>{rest.slice(0, 1)}</Text>
+      {full.slice(6, from)}
       <Text inverse>{full.slice(from, to)}</Text>
       {full.slice(to)}
     </Text>
@@ -1620,7 +1995,10 @@ export function sourceFor(agent: string): Source | null {
   const name = agent.split("/").pop() ?? agent;
   if (name === "claude") return CLAUDE;
   if (name === "codex") return CODEX;
+  if (name === "pi") return PI;
+  if (name === "gemini") return GEMINI;
   return null;
+
 }
 
 // How often to look for a transcript when the binary's name did not name an
@@ -1654,5 +2032,17 @@ function Detected({ which, agent, session }: { which: string; agent: string; ses
 }
 
 export function renderPanel(which: string, agent = "", session = ""): void {
+  // On the way out — the agent quit and tmux is tearing the session down, or
+  // the reader closed the pane — a gate still running dies too, and the rail
+  // takes the file the panels shared with it. Both are things nobody would
+  // find until they looked.
+  const leave = (): void => {
+    killAll();
+    if (which === "rail") forget(session);
+    process.exit(0);
+  };
+  for (const sig of ["SIGHUP", "SIGTERM", "SIGINT"] as const) process.on(sig, leave);
+  process.on("exit", () => killAll());
   render(<Detected which={which} agent={agent} session={session} />);
 }
+

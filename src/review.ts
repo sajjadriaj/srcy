@@ -1,6 +1,7 @@
 import { TOP_LEVEL, hunkLines } from "./cockpit.js";
 import type { FileDiff } from "./diff.js";
 import type { Problem } from "./checks.js";
+import type { GateResult } from "./gates.js";
 
 // The dock, as a reviewer rather than a preview.
 //
@@ -407,9 +408,150 @@ export function actionFor(input: string, key: Chord = {}): Action | undefined {
 
 // The key line under the diff. Not hidden behind a `?`: the pane is one row
 // taller for it, and a binding nobody can see is a binding nobody presses.
-export const KEYS = " ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn";
+export const KEYS = " ]/[ hunk · n/p file · j/k scroll · s split · f follow · 1/2/3 scope · ,/. turn · o open · y yank · ? keys";
+
+// Everything the two panes answer to, for `?`. On screen rather than in the
+// README because the README is not where anyone is when they need it.
+export const HELP_DOCK = [
+  "REVIEW",
+  "  n p        next / previous changed file",
+  "  ] [        next / previous hunk",
+  "  j k ↓ ↑    scroll        PgDn PgUp   page",
+  "  g G        top / bottom of the file",
+  "  s          side by side, and back",
+  "  f          follow the agent's newest write",
+  "  1 2 3      review this turn / this session / everything uncommitted",
+  "  , .        back and forward through the last 8 turns",
+  "  o          open this line in $EDITOR, in a new tmux window",
+  "  y          copy path:line — ctrl-b ] pastes it into the agent",
+  "  ?          this list",
+  "",
+  "tmux",
+  "  ctrl-b o   next pane      ctrl-b z   zoom      ctrl-b d   detach",
+];
+
+export const HELP_RAIL = [
+  "REPO",
+  "  j k ↓ ↑    move          g G   top / bottom",
+  "  ⏎ space    open a directory · pin a file",
+  "  /          search paths   esc clears, ⏎ keeps",
+  "  m          only what changed, and back",
+  "  f          follow the file the agent has open",
+  "  e          next failing line",
+  "  o          open in $EDITOR   y   copy the path",
+  "GATES",
+  "  r          run every gate now",
+  "  tab        pick a gate — its output opens in REVIEW",
+  "  R          run the picked gate",
+  "  c          checkpoint: TURN starts here",
+  "  ?          this list",
+];
+
+
+// Text that is not a diff: a file nothing changed, a gate's output, the key
+// list. The same keys move it, and the ones that pick a file or a hunk mean
+// nothing here and change nothing.
+export function scrollText(from: number, action: Action, total: number, rows: number): number {
+  const max = Math.max(0, total - Math.max(1, rows));
+  const at = (n: number): number => Math.max(0, Math.min(n, max));
+  switch (action) {
+    case "down":
+      return at(from + 1);
+    case "up":
+      return at(from - 1);
+    case "page-down":
+      return at(from + rows);
+    case "page-up":
+      return at(from - rows);
+    case "top":
+      return 0;
+    case "bottom":
+      return max;
+    default:
+      return from;
+  }
+}
+
+export interface TextView {
+  title: string;
+  lines: string[];
+  from: number;
+  // Set for a file, so `o` knows what to open and a later edit turns the
+  // view into that file's diff.
+  path?: string;
+}
+
+// A gate's output, titled with its verdict, for the pane with the height to
+// page through it. The rail says `✖ 2 in 1`; this is the assertion diff.
+export function gateText(gate: string, result: GateResult | undefined): TextView {
+  const name = `GATE  ${gate}`;
+  if (result === undefined || result.status === "killed") {
+    return { title: `${name}  not run`, lines: ["not run yet — press R in the rail to run it"], from: 0 };
+  }
+  const took = `${(result.ms / 1000).toFixed(1)}s`;
+  const verdict = result.status === "pass" ? `✔ ${took}` : result.status === "timeout" ? `timed out ${took}` : `✖ ${took}`;
+  const body = result.output !== "" ? result.output : result.tail;
+  const lines = body === "" ? ["(no output)"] : body.split("\n");
+  return { title: `${name}  ${verdict}`, lines, from: 0 };
+}
+
+// Where the reader is, as `path:line` — the form an editor opens and the
+// agent understands. The first numbered row on screen: a heading has none,
+// and a removed line carries the new-side number it was replaced at.
+export function locationOf(v: View): string {
+  if (v.file === undefined) return "";
+  for (let i = v.top; i < v.lines.length; i++) {
+    const row = v.lines[i]!;
+    const num = row.right?.num ?? row.num;
+    if (num !== "") return `${v.file.path}:${num}`;
+  }
+  return v.file.path;
+}
+
+// The change in one line: how big it is, and the kinds of file in it that a
+// reviewer wants pointed out before reading. Path-derived and deterministic
+// — this describes where to look, never whether it is safe.
+const LOCKFILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Cargo.lock", "poetry.lock", "go.sum", "Gemfile.lock", "composer.lock"]);
+const LARGE_FILES = 20;
+const LARGE_LINES = 500;
+
+export function riskLine(files: FileDiff[]): string {
+  if (files.length === 0) return "";
+  let added = 0;
+  let removed = 0;
+  let tests = 0;
+  let deleted = 0;
+  let binary = 0;
+  const kinds = new Set<string>();
+  for (const f of files) {
+    for (const h of f.hunks) {
+      for (const line of h.body.split("\n")) {
+        if (line.startsWith("+")) added++;
+        else if (line.startsWith("-")) removed++;
+      }
+    }
+    const base = f.path.split("/").pop() ?? f.path;
+    const segments = f.path.toLowerCase().split("/");
+    if (/\.(test|spec)\.|_test\./.test(base) || segments.includes("test") || segments.includes("tests") || segments.includes("__tests__")) tests++;
+    if (f.header.includes("deleted file mode ")) deleted++;
+    if (f.binary) binary++;
+    if (LOCKFILES.has(base)) kinds.add("lockfile");
+    if (segments.includes("migration") || segments.includes("migrations")) kinds.add("migration");
+    if (base.startsWith(".env") || /secret|credential/i.test(base) || /\.(pem|key)$/.test(base)) kinds.add("secret-like");
+    if (segments.some((s) => ["generated", "gen", "dist", "build", "vendor"].includes(s))) kinds.add("generated");
+    if (segments[0] === ".github" || /^(package\.json|tsconfig.*\.json|dockerfile|.*\.config\.[a-z]+)$/i.test(base)) kinds.add("config");
+  }
+  const out = [`${files.length} file${files.length === 1 ? "" : "s"}  +${added} -${removed}`];
+  out.push(tests > 0 ? `tests +${tests}` : "no tests changed");
+  if (deleted > 0) out.push(`deleted ${deleted}`);
+  if (binary > 0) out.push(`binary ${binary}`);
+  for (const k of ["lockfile", "migration", "secret-like", "generated", "config"]) if (kinds.has(k)) out.push(k);
+  if (files.length > LARGE_FILES || added + removed > LARGE_LINES) out.push("large");
+  return out.join("  ");
+}
 
 // The scope keys. Separate from `actionFor` because choosing what to review
+
 // is not moving around inside it: the position survives the change, and a
 // scope with no baseline is a state the pane has to say out loud.
 export function scopeFor(input: string): Scope | undefined {

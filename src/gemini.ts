@@ -142,4 +142,4 @@ export function parse(text: string): Fold {
   return f;
 }
 
-export const GEMINI: Source = { find: findSession, fold: () => {}, parse };
+export const GEMINI: Source = { name: "gemini", find: findSession, fold: () => {}, parse };

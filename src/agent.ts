@@ -1,5 +1,7 @@
 import { stat } from "node:fs/promises";
 import { CODEX } from "./codex.js";
+import { GEMINI } from "./gemini.js";
+import { PI } from "./pi.js";
 import { CLAUDE, readSession, type Source } from "./transcript.js";
 
 // Which agent, if any, is working here.
@@ -10,16 +12,17 @@ import { CLAUDE, readSession, type Source } from "./transcript.js";
 // it" is answered by looking at the repo rather than by being told, which is
 // what a `srcy status` over ssh has to do.
 
-export const ADAPTERS: Source[] = [CLAUDE, CODEX];
+export const ADAPTERS: Source[] = [CLAUDE, CODEX, PI, GEMINI];
 
 // The normalised shape, deliberately thin. Anything richer would be a
 // promise srcy cannot keep for the next agent that comes along.
 export interface AgentState {
   agent: string;
-  // `working` is a tool call in flight. `waiting` is the agent having
-  // stopped, which is a different thing to know and the one that means the
+  // `working` is a tool call in flight. `thinking` is nothing in flight and
+  // the turn not over — the model deciding what to call next. `waiting` is
+  // the agent having handed the turn back, which is the one that means the
   // ball is with you.
-  status: "working" | "waiting";
+  status: "working" | "thinking" | "waiting";
   activity?: string;
   since?: number;
 }
@@ -44,9 +47,11 @@ export async function agentState(cwd: string): Promise<AgentState | null> {
   const session = await readSession(cwd, source).catch(() => null);
   if (session === null) return null;
   const a = session.activity;
+  const asked = session.turn?.at;
+  const over = session.ended !== undefined && (asked === undefined || session.ended >= asked);
   return {
     agent: source.name,
-    status: a === null ? "waiting" : "working",
+    status: a !== null ? "working" : over || asked === undefined ? "waiting" : "thinking",
     ...(a === null ? {} : { activity: `${a.tool}${a.target === "" ? "" : ` ${a.target}`}` }),
     ...(a?.since === undefined ? (session.at === undefined ? {} : { since: session.at }) : { since: a.since }),
   };

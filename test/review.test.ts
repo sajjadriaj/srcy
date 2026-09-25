@@ -2,7 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { splitDiff } from "../src/diff.js";
 import { PAST_MAX, pushPast, rowFor, type Past } from "../src/panels.js";
-import { START, actionFor, byRisk, fileLines, move, scopeFor, spans, view, type Review } from "../src/review.js";
+import { START, actionFor, byRisk, fileLines, gateText, locationOf, move, riskLine, scopeFor, scrollText, spans, view, type Review } from "../src/review.js";
+
 
 const raw = `diff --git a/a.txt b/a.txt
 --- a/a.txt
@@ -370,4 +371,110 @@ test("the review title says which turn back it is looking at", () => {
   const gone = view({ ...base, era: "-9", note: "nothing kept from 9 turns back — srcy holds the last 8" });
   assert.match(gone.title, /TURN-9  nothing kept from 9 turns back/);
   assert.equal(gone.file, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Text the dock shows that is not a diff: a file nothing changed, a gate's
+// output. Both scroll the way the diff does, with the same keys.
+
+test("a plain text view scrolls with the diff's keys and stops at both ends", () => {
+  // 100 lines, 10 rows.
+  assert.equal(scrollText(0, "down", 100, 10), 1);
+  assert.equal(scrollText(0, "up", 100, 10), 0);
+  assert.equal(scrollText(0, "page-down", 100, 10), 10);
+  assert.equal(scrollText(95, "page-down", 100, 10), 90);
+  assert.equal(scrollText(50, "top", 100, 10), 0);
+  assert.equal(scrollText(0, "bottom", 100, 10), 90);
+  assert.equal(scrollText(5, "page-up", 100, 10), 0);
+  // Shorter than the pane: nothing to scroll.
+  assert.equal(scrollText(0, "down", 5, 10), 0);
+  // Keys that change file or hunk mean nothing here and leave it be.
+  assert.equal(scrollText(7, "next-hunk", 100, 10), 7);
+});
+
+test("a gate's output is a text view titled with its verdict", () => {
+  const gate = { name: "tests", command: ["npm", "test"], auto: true, timeoutMs: 1000 };
+  const failed = { name: "tests", status: "fail" as const, problems: [], tail: "", output: "a\nb\nExpected 1\nActual 2", ms: 2300, mark: "m" };
+  const v = gateText(gate.name, failed);
+  assert.match(v.title, /GATE  tests  ✖ 2\.3s/);
+  assert.deepEqual(v.lines, ["a", "b", "Expected 1", "Actual 2"]);
+  // Not run yet has nothing to page through, and says so.
+  const none = gateText(gate.name, undefined);
+  assert.match(none.title, /GATE  tests  not run/);
+  assert.deepEqual(none.lines, ["not run yet — press R in the rail to run it"]);
+  // A pass keeps its output too: a warning in a passing build is still there.
+  const ok = gateText(gate.name, { ...failed, status: "pass", output: "ok" });
+  assert.match(ok.title, /✔ 2\.3s/);
+  // A derived file has no output; its one-line verdict is the text.
+  const derived = gateText("demo.gif", { ...failed, tail: "older than panels.tsx", output: "" });
+  assert.deepEqual(derived.lines, ["older than panels.tsx"]);
+
+});
+
+test("the location under the cursor is the file and the first numbered line on screen", () => {
+  const start: Review = r({ pos: { path: "a.txt", top: 0, pinned: true } });
+  // Top row is a hunk heading, which has no number: the line is the next row's.
+  assert.equal(locationOf(view(start)), "a.txt:1");
+  const down = view({ ...start, pos: { path: "a.txt", top: 2, pinned: true } });
+  assert.equal(locationOf(down), "a.txt:2");
+  // A removed line carries the new-side number it was replaced at, which is
+  // where an editor should open.
+  const side = view({ ...start, split: true, pos: { path: "a.txt", top: 1, pinned: true } });
+  assert.equal(locationOf(side), "a.txt:1");
+  // Nothing on screen is nothing to yank.
+  assert.equal(locationOf(view(r({ files: [] }))), "");
+});
+
+test("the change is summarised in one line: how big, and what kind", () => {
+  const raw = splitDiff(`diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,2 +1,3 @@ f()
+ one
++two
+ three
+diff --git a/src/a.test.ts b/src/a.test.ts
+new file mode 100644
+--- /dev/null
++++ b/src/a.test.ts
+@@ -0,0 +1 @@
++fresh
+diff --git a/package-lock.json b/package-lock.json
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1 +1 @@
+-x
++y
+diff --git a/old.ts b/old.ts
+deleted file mode 100644
+--- a/old.ts
++++ /dev/null
+@@ -1,2 +0,0 @@
+-one
+-two
+diff --git a/db/migrations/0002_users.sql b/db/migrations/0002_users.sql
+new file mode 100644
+--- /dev/null
++++ b/db/migrations/0002_users.sql
+@@ -0,0 +1 @@
++alter table users add column x
+diff --git a/i.png b/i.png
+Binary files a/i.png and b/i.png differ
+`);
+  const line = riskLine(raw);
+  // Size first, then the things a reviewer wants flagged: a test changed
+  // (good), a file gone, a lockfile, a migration, a binary nobody can read.
+  assert.match(line, /^6 files  \+4 -3/);
+
+  assert.match(line, /tests \+1/);
+  assert.match(line, /deleted 1/);
+  assert.match(line, /lockfile/);
+  assert.match(line, /migration/);
+  assert.match(line, /binary/);
+  // A one-file change without any of that is only its size.
+  assert.equal(riskLine(raw.slice(0, 1)), "1 file  +1 -0  no tests changed");
+  assert.equal(riskLine([]), "");
+  // Big is said, because twenty files is not a change anyone reads whole.
+  const many = Array.from({ length: 21 }, (_, i) => ({ ...raw[0]!, path: `src/f${i}.ts` }));
+  assert.match(riskLine(many), /large/);
 });

@@ -310,6 +310,8 @@ test("required and watch are read, and a bad watch list is refused", () => {
   // Dropped silently, a bad watch list is a gate that looks scoped and is not.
   assert.match(parseConfig({ gates: [{ name: "a", command: ["x"], watch: "src" }] }).error ?? "", /list of paths/);
   assert.match(parseConfig({ gates: [{ name: "a", command: ["x"], watch: [""] }] }).error ?? "", /list of paths/);
+});
+
 test("a gate keeps enough of its output for the dock to show what happened", async (t) => {
   // The rail has room for `session.ts:3` and the dock for four messages. A
   // failing test's assertion diff fits in neither, and nowhere else in srcy

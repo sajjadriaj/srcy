@@ -138,6 +138,13 @@ export function plan(l: Layout): string[][] {
     ["set-option", "-t", S, "extended-keys", "on"],
     // And on the session, so a shell opened later in it sees them too.
     ...Object.entries(l.env ?? {}).map(([k, v]) => ["set-environment", "-t", S, k, v]),
+    // The rail rings once when the agent stops, needs you, or a gate goes
+    // red. tmux swallows a bell from an unfocused pane unless told otherwise,
+    // and the terminal is what turns the bell into a badge on the window the
+    // reader detached from.
+    ["set-option", "-t", S, "bell-action", "any"],
+    ["set-option", "-t", S, "monitor-bell", "on"],
+    ["set-option", "-t", S, "visual-bell", "off"],
     // The agent pane keeps the keyboard: it is the thing you type into.
     // Panels are read-only, and taking focus from the prompt to render a
     // file list would be the tail wagging the dog.
@@ -221,6 +228,21 @@ export function pick(listing: string): Panes {
 export function identify(session: string): Panes {
   return pick(tmux(["list-panes", "-t", session, "-F", "#{pane_id} #{pane_left} #{pane_top}"]).out);
 }
+
+// The last few rows of a pane, as text. The agent's own screen is the only
+// place a permission prompt is written down — the transcript records the
+// call it is waiting to make and nothing about the wait.
+export function paneTail(pane: string, rows = 12): string {
+  return tmux(["capture-pane", "-p", "-t", pane, "-S", `-${rows}`]).out;
+}
+
+// One tmux command from a panel, for the few things a panel does to the
+// session it lives in: a paste buffer, a new window for the editor, a line in
+// the status area. Never to the agent's pane.
+export function tmuxRun(args: string[]): { status: number; out: string } {
+  return tmux(args);
+}
+
 
 // tmux resizes panes proportionally when the window changes size, so a rail
 // laid out at 30% of an 80-column terminal becomes 76 columns in a maximised
