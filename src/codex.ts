@@ -157,7 +157,9 @@ export function foldLine(f: Fold, line: string): void {
     !line.includes('"token_count"') &&
     !line.includes('"call_id"') &&
     !line.includes('"role":"user"') &&
-    !line.includes('"turn_context"')
+    !line.includes('"turn_context"') &&
+    !line.includes('"task_complete"') &&
+    !line.includes('"turn_aborted"')
   ) {
     return;
   }
@@ -182,6 +184,17 @@ export function foldLine(f: Fold, line: string): void {
     if (typeof p.model === "string" && p.model !== "") f.model = p.model;
     return;
   }
+
+  // Codex says when a turn is over, and repeats what it said last as it
+  // does — which is where "all green" gets written, and what the gates get
+  // to check. An aborted turn is over too, with nothing said.
+  if (kind === "event_msg" && (p.type === "task_complete" || p.type === "turn_aborted")) {
+    if (at !== undefined) f.ended = at;
+    const last = (p as { last_agent_message?: unknown }).last_agent_message;
+    if (p.type === "task_complete" && typeof last === "string" && last.trim() !== "") f.reply = last.trim();
+    return;
+  }
+
 
   if (p.type === "token_count" && p.info) {
     // `total_token_usage` is cumulative — it reaches twenty million against a

@@ -255,3 +255,150 @@ test("an agent running below the repo root is still this repo's agent", async (t
   // And a repo with nothing anywhere still gets nothing.
   assert.equal(await newestTranscript("/work/nothing", projectDir("/work/nothing", home)), null);
 });
+
+// ---------------------------------------------------------------------------
+// When a turn is over, and what the agent said at the end of it
+
+const stopped = (reason: string, text: string, at: string): string =>
+  JSON.stringify({
+    type: "assistant",
+    timestamp: at,
+    message: { role: "assistant", stop_reason: reason, content: [{ type: "text", text }] },
+  });
+
+test("a turn ends when the model stops for the reader, not between two tool calls", () => {
+  // Between a tool result and the next tool call nothing is in flight, and
+  // the border read that as "your turn". The transcript says otherwise: an
+  // assistant record stopped for `tool_use` is a model mid-thought, and only
+  // `end_turn` — or Claude Code's own turn_duration record — hands the ball
+  // back.
+  const mid = parseState(
+    [
+      said("fix it", "2026-08-25T10:00:00.000Z"),
+      stopped("tool_use", "let me look", "2026-08-25T10:00:01.000Z"),
+      called("Read", "2026-08-25T10:00:01.000Z"),
+      said([{ type: "tool_result", tool_use_id: "t-Read", content: "..." }], "2026-08-25T10:00:02.000Z"),
+    ].join("\n"),
+  );
+  assert.equal(mid.activity, null, "nothing is in flight");
+  assert.equal(mid.ended, undefined, "the turn is not over");
+  assert.equal(mid.reply, undefined);
+
+  const done = parseState(
+    [
+      said("fix it", "2026-08-25T10:00:00.000Z"),
+      stopped("tool_use", "let me look", "2026-08-25T10:00:01.000Z"),
+      stopped("end_turn", "Done. The tests pass.", "2026-08-25T10:00:09.000Z"),
+    ].join("\n"),
+  );
+  assert.equal(done.ended, Date.parse("2026-08-25T10:00:09.000Z"));
+  // What it said last is kept: it is the claim the gates get to check.
+  assert.equal(done.reply, "Done. The tests pass.");
+
+  // Claude Code also writes a system record when a turn finishes, which is
+  // the only signal for a turn that ended without a final text.
+  const system = parseState(
+    [
+      said("fix it", "2026-08-25T10:00:00.000Z"),
+      JSON.stringify({ type: "system", subtype: "turn_duration", timestamp: "2026-08-25T10:00:20.000Z", durationMs: 20_000 }),
+    ].join("\n"),
+  );
+  assert.equal(system.ended, Date.parse("2026-08-25T10:00:20.000Z"));
+
+  // A new request reopens the turn — the old end is older than it.
+  const again = parseState(
+    [
+      said("fix it", "2026-08-25T10:00:00.000Z"),
+      stopped("end_turn", "Done.", "2026-08-25T10:00:09.000Z"),
+      said("now the other thing", "2026-08-25T10:01:00.000Z"),
+    ].join("\n"),
+  );
+  assert.ok((again.ended ?? 0) < (again.turn?.at ?? 0));
+});
+
+test("codex ends a turn with task_complete, and the last message is what it said", () => {
+  const f = emptyFold();
+  codexFold(f, JSON.stringify({ timestamp: "2026-08-25T10:00:09.000Z", type: "event_msg", payload: { type: "task_complete", turn_id: "x", last_agent_message: "All green." } }));
+  assert.equal(f.ended, Date.parse("2026-08-25T10:00:09.000Z"));
+  assert.equal(f.reply, "All green.");
+  // An aborted turn is over too, with nothing said.
+  const g = emptyFold();
+  codexFold(g, JSON.stringify({ timestamp: "2026-08-25T10:00:10.000Z", type: "event_msg", payload: { type: "turn_aborted", reason: "interrupted" } }));
+  assert.equal(g.ended, Date.parse("2026-08-25T10:00:10.000Z"));
+});
+
+// ---------------------------------------------------------------------------
+// The plan, from wherever the agent wrote one
+
+const used = (name: string, input: unknown, at = "2026-08-25T10:00:01.000Z"): string =>
+  JSON.stringify({
+    type: "assistant",
+    timestamp: at,
+    message: { role: "assistant", content: [{ type: "tool_use", id: `t-${name}-${at}`, name, input }] },
+  });
+
+test("a plan written on the way out of plan mode is the plan", () => {
+  // TodoWrite is the one source PLAN read, and forty recent sessions on one
+  // machine never called it once. What they did call was ExitPlanMode, whose
+  // input is the plan as markdown.
+  const md = [
+    "# Fix the expiry check",
+    "",
+    "## Context",
+    "The comparison is exclusive.",
+    "",
+    "## Steps",
+    "- [x] find the comparison",
+    "- [ ] change < to <=",
+    "- [ ] add a regression test",
+  ].join("\n");
+  const s = parseState(used("ExitPlanMode", { plan: md }));
+  assert.deepEqual(
+    s.plan.map((e) => [e.content, e.status]),
+    [
+      ["find the comparison", "completed"],
+      ["change < to <=", "pending"],
+      ["add a regression test", "pending"],
+    ],
+  );
+
+  // Numbered steps, when there are no boxes to tick.
+  const numbered = parseState(used("ExitPlanMode", { plan: "# Plan\n\n1. read the code\n2. fix it\n3. test it\n" }));
+  assert.deepEqual(numbered.plan.map((e) => e.content), ["read the code", "fix it", "test it"]);
+
+  // Headings, when there is neither: a plan with sections is a plan with steps.
+  const headed = parseState(used("ExitPlanMode", { plan: "# Plan\n\n## Read the code\nblah\n## Fix it\nblah\n" }));
+  assert.deepEqual(headed.plan.map((e) => e.content), ["Read the code", "Fix it"]);
+
+  // Nothing shaped like a step is no plan, not a plan of prose.
+  assert.deepEqual(parseState(used("ExitPlanMode", { plan: "just do it" })).plan, []);
+});
+
+test("tasks created one at a time build the same plan a TodoWrite would", () => {
+  const s = parseState(
+    [
+      used("TaskCreate", { subject: "find the comparison", description: "..." }, "2026-08-25T10:00:01.000Z"),
+      used("TaskCreate", { subject: "fix it", description: "..." }, "2026-08-25T10:00:02.000Z"),
+      used("TaskUpdate", { taskId: "1", status: "completed" }, "2026-08-25T10:00:03.000Z"),
+      used("TaskUpdate", { taskId: "2", status: "in_progress" }, "2026-08-25T10:00:04.000Z"),
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    s.plan.map((e) => [e.content, e.status]),
+    [
+      ["find the comparison", "completed"],
+      ["fix it", "in_progress"],
+    ],
+  );
+  // The in-flight clock starts when an item becomes the one in progress.
+  assert.equal(s.doingAt, Date.parse("2026-08-25T10:00:04.000Z"));
+
+  // A later TodoWrite is a newer plan, and replaces the whole thing.
+  const replaced = parseState(
+    [
+      used("TaskCreate", { subject: "old" }, "2026-08-25T10:00:01.000Z"),
+      used("TodoWrite", { todos: [{ content: "new", status: "pending" }] }, "2026-08-25T10:00:05.000Z"),
+    ].join("\n"),
+  );
+  assert.deepEqual(replaced.plan.map((e) => e.content), ["new"]);
+});

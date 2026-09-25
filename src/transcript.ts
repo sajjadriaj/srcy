@@ -70,7 +70,7 @@ const STALE_SLACK_MS = 5_000;
 
 interface Line {
   isSidechain?: boolean;
-  message?: { usage?: Record<string, unknown>; model?: unknown };
+  message?: { usage?: Record<string, unknown>; model?: unknown; stop_reason?: unknown };
 }
 
 // Record timestamps are ISO strings. Undefined rather than a guess when one
@@ -122,6 +122,7 @@ interface Block {
 interface Entry {
   isSidechain?: boolean;
   type?: unknown;
+  subtype?: unknown;
   timestamp?: unknown;
   message?: { content?: unknown };
 }
@@ -139,7 +140,12 @@ const READS = new Set([
   "WebFetch",
   "WebSearch",
   "TodoWrite",
+  "TaskCreate",
+  "TaskUpdate",
+  "TaskList",
+  "TaskGet",
   "NotebookRead",
+  "EnterPlanMode",
   "ExitPlanMode",
   "AskUserQuestion",
 ]);
@@ -210,6 +216,14 @@ export interface State {
   doingAt?: number;
   // Shell commands the agent has run, and when it last ran each.
   ran: Map<string, number>;
+  // When the agent last handed the turn back. Between two tool calls nothing
+  // is in flight either, and reading that as "your turn" was wrong for every
+  // second the model spent deciding what to call next. Older than `turn.at`
+  // once a new request has landed.
+  ended?: number;
+  // The last thing the agent said when it handed a turn back. Kept because it
+  // is where "the tests pass" gets written, and the gates can check that.
+  reply?: string;
 }
 
 // The subset of an Edit/Write/Read/Bash input worth putting in a one-line
@@ -281,6 +295,13 @@ export interface Fold {
   // every token count; Claude Code writes none, so there it stays undefined
   // and windowFor infers one.
   window?: number;
+  // See State.
+  ended?: number;
+  reply?: string;
+  // Which tool the plan on screen came from. Tasks are created one at a
+  // time, so a TaskCreate appends — unless the list it would append to was
+  // written by something else, in which case it starts a new one.
+  planFrom?: "todo" | "exit" | "task";
 }
 
 // What one agent's on-disk session looks like. Two implementations — the
@@ -294,6 +315,10 @@ export interface Source {
   // not written one. Newest wins: it is the session being typed into.
   find: (cwd: string) => Promise<string | null>;
   fold: (f: Fold, line: string) => void;
+  // For an agent that rewrites its session file whole instead of appending
+  // to it — gemini — the file is re-read from the top whenever it changes,
+  // and this is what reads it. `fold` is never called for such a source.
+  parse?: (text: string) => Fold;
 }
 
 // How many distinct commands to keep. A session runs the same handful over
@@ -316,13 +341,71 @@ export function emptyFold(): Fold {
   return { plan: [], open: new Map(), output: 0, last: null, ran: new Map() };
 }
 
+// A plan written as markdown — the way ExitPlanMode hands one over — read as
+// steps. Ticked boxes are done, numbered lines are steps, and a document with
+// neither is read by its section headings. Prose with none of the three is no
+// plan, not a plan of one long step.
+const PLAN_MAX = 12;
+
+export function planFromMarkdown(md: string): PlanEntry[] {
+  const lines = md.split("\n");
+  const boxes: PlanEntry[] = [];
+  const numbered: PlanEntry[] = [];
+  const headings: PlanEntry[] = [];
+  for (const raw of lines) {
+    const box = /^\s*[-*+]\s+\[([ xX])\]\s+(.+?)\s*$/.exec(raw);
+    if (box !== null) {
+      boxes.push({ content: box[2]!, status: box[1] === " " ? "pending" : "completed" });
+      continue;
+    }
+    const num = /^\s*\d+[.)]\s+(.+?)\s*$/.exec(raw);
+    if (num !== null) {
+      numbered.push({ content: num[1]!, status: "pending" });
+      continue;
+    }
+    const head = /^#{2,}\s+(.+?)\s*$/.exec(raw);
+    if (head !== null) headings.push({ content: head[1]!, status: "pending" });
+  }
+  const steps = boxes.length > 0 ? boxes : numbered.length > 0 ? numbered : headings;
+  return steps.slice(0, PLAN_MAX);
+}
+
+// The plan is rewritten whole on every update, so most updates change
+// nothing about which item is in flight — the clock is reset by the item
+// changing, not by the list being written again. Twenty minutes on one line
+// is a signal; twenty seconds is not, and they look identical without this.
+function setPlan(f: Fold, plan: PlanEntry[], from: Fold["planFrom"], at: number | undefined): void {
+  f.plan = plan;
+  f.planFrom = from;
+  const doing = plan
+    .filter((e) => e.status === "in_progress")
+    .map((e) => e.content)
+    .join("\u0000");
+  if (doing !== f.doing) {
+    f.doing = doing;
+    f.doingAt = at;
+  }
+}
+
+// What the agent wrote as text in one record: the reply, once the turn ends.
+function textOf(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((b) => (b as Block).type === "text")
+    .map((b) => String((b as { text?: unknown }).text ?? ""))
+    .join("\n")
+    .trim();
+}
+
 export function foldLine(f: Fold, line: string): void {
   // Most lines are neither, and JSON.parse across a transcript this size is
   // the only part of this path anyone could feel.
   const usage = line.includes('"usage"');
   const tools = line.includes('"tool_use"') || line.includes('"tool_result"');
   const spoke = line.includes('"type":"user"');
-  if (!usage && !tools && !spoke) return;
+  const ended = line.includes('"stop_reason"') || line.includes('"turn_duration"');
+  if (!usage && !tools && !spoke && !ended) return;
 
   let rec: Line & Entry;
   try {
@@ -371,7 +454,21 @@ export function foldLine(f: Fold, line: string): void {
   // what the session is doing — showing them makes the rail flicker between
   // two unrelated pieces of work.
   if (rec.isSidechain === true) return;
+  // Claude Code closes every turn with this record, text or no text.
+  if (rec.type === "system" && rec.subtype === "turn_duration") {
+    if (at !== undefined) f.ended = at;
+    return;
+  }
   const content = rec.message?.content;
+  // `tool_use` is a model that has decided what to call next and is about to
+  // call it; anything else is a model that has stopped and handed the turn
+  // back. Interrupts and rate-limit notices carry no stop reason at all.
+  const reason = rec.message?.stop_reason;
+  if (rec.type === "assistant" && typeof reason === "string" && reason !== "tool_use") {
+    if (at !== undefined) f.ended = at;
+    const text = textOf(content);
+    if (text !== "") f.reply = text;
+  }
   if (rec.type === "user") {
     const text = userText(content);
     if (text !== "" && at !== undefined) f.turn = { at, text };
@@ -383,24 +480,35 @@ export function foldLine(f: Fold, line: string): void {
       if (b.name === "TodoWrite") {
         const todos = (b.input as { todos?: unknown } | undefined)?.todos;
         if (Array.isArray(todos)) {
-          f.plan = todos
+          const plan = todos
             .map((t) => t as Todo)
             .filter((t): t is Todo & { content: string } => typeof t.content === "string" && t.content !== "")
             .map((t) => ({ content: t.content, status: typeof t.status === "string" ? t.status : "pending" }));
-          // When the agent started on what it is on now. The plan is
-          // rewritten whole on every update, so most updates change nothing
-          // about which item is in flight — the clock is reset by the item
-          // changing, not by the list being written again. Twenty minutes on
-          // one line is a signal; twenty seconds is not, and they look
-          // identical without this.
-          const doing = f.plan
-            .filter((e) => e.status === "in_progress")
-            .map((e) => e.content)
-            .join("\u0000");
-          if (doing !== f.doing) {
-            f.doing = doing;
-            f.doingAt = at;
-          }
+          setPlan(f, plan, "todo", at);
+        }
+      } else if (b.name === "ExitPlanMode") {
+        // The plan as markdown. Forty recent sessions on one machine never
+        // called TodoWrite once; this is the tool they did call.
+        const md = (b.input as { plan?: unknown } | undefined)?.plan;
+        if (typeof md === "string") {
+          const plan = planFromMarkdown(md);
+          if (plan.length > 0) setPlan(f, plan, "exit", at);
+        }
+      } else if (b.name === "TaskCreate") {
+        const subject = (b.input as { subject?: unknown } | undefined)?.subject;
+        if (typeof subject === "string" && subject !== "") {
+          const base = f.planFrom === "task" ? f.plan : [];
+          setPlan(f, [...base, { content: subject, status: "pending" }], "task", at);
+        }
+      } else if (b.name === "TaskUpdate") {
+        // Tasks are numbered from one in the order they were created, which
+        // is the order the list holds them in.
+        const o = b.input as { taskId?: unknown; status?: unknown } | undefined;
+        const i = Number(o?.taskId) - 1;
+        const status = o?.status;
+        if (f.planFrom === "task" && Number.isInteger(i) && i >= 0 && i < f.plan.length && typeof status === "string") {
+          const plan = f.plan.map((e, k) => (k === i ? { ...e, status } : e));
+          setPlan(f, plan, "task", at);
         }
       }
       const name = typeof b.name === "string" ? b.name : "?";
@@ -434,7 +542,10 @@ export function stateOf(f: Fold): State {
   if (f.wrote !== undefined) s.wrote = f.wrote;
   if (f.at !== undefined) s.at = f.at;
   if (f.doingAt !== undefined) s.doingAt = f.doingAt;
+  if (f.ended !== undefined) s.ended = f.ended;
+  if (f.reply !== undefined) s.reply = f.reply;
   return s;
+
 }
 
 export function usageOf(f: Fold, override = envWindow()): Usage | null {
@@ -613,6 +724,31 @@ export async function advance(r: Reader, path: string, fold = foldLine): Promise
 // what the agent has written since the last one.
 const readers = new Map<string, Reader>();
 
+// For sources that rewrite the file: the last parse, and the size and mtime
+// it was made from. Re-parsed only when either moves.
+const wholes = new Map<string, { path: string; stamp: string; fold: Fold }>();
+
+async function readWhole(key: string, path: string, parse: (text: string) => Fold): Promise<Fold | null> {
+  let stamp: string;
+  try {
+    const st = await stat(path);
+    stamp = `${st.size}:${st.mtimeMs}`;
+  } catch {
+    return wholes.get(key)?.fold ?? null;
+  }
+  const had = wholes.get(key);
+  if (had !== undefined && had.path === path && had.stamp === stamp) return had.fold;
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch {
+    return had?.fold ?? null;
+  }
+  const fold = parse(text);
+  wholes.set(key, { path, stamp, fold });
+  return fold;
+}
+
 export const CLAUDE: Source = { name: "claude", find: newestTranscript, fold: foldLine };
 
 export async function readSession(
@@ -622,7 +758,12 @@ export async function readSession(
   const path = await source.find(cwd);
   if (path === null) return null;
   const key = `${cwd}\u0000${source.find.name}`;
+  if (source.parse !== undefined) {
+    const fold = await readWhole(key, path, source.parse);
+    return fold === null ? null : { ...stateOf(fold), usage: usageOf(fold) };
+  }
   let r = readers.get(key);
+
   if (r === undefined) {
     r = newReader(path);
     readers.set(key, r);
