@@ -15,7 +15,7 @@
     "typecheck": "tsc --noEmit",
     "preview": "tsx scripts/preview-shell.ts",
     "demo": "tsx scripts/demo.ts",
-    "demo:gif": "agg --theme github-dark --font-size 14 --line-height 1.3 --fps-cap 12 --idle-time-limit 1.2 --font-family \"DejaVu Sans Mono\" docs/demo.cast docs/demo.gif",
+    "demo:gif": "agg --theme asciinema --font-size 15 --line-height 1.4 --fps-cap 12 --idle-time-limit 1.2 --text-font-family \"JetBrains Mono,Fira Mono,DejaVu Sans Mono\" docs/demo.cast docs/demo.gif",
     "prepublishOnly": "npm test && npm run typecheck && npm run build"
   },
   "devDependencies": {

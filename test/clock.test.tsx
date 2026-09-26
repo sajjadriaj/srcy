@@ -5,13 +5,13 @@ import { gauge, tokens } from "../src/cockpit.js";
 test("gauge never shows a used window as empty or an unfull one as full", () => {
   // Both ends are decisions the reader acts on: "nothing used yet" and
   // "no room left" must never appear when neither is true.
-  assert.equal(gauge(0, 200_000, 10), "▯".repeat(10));
-  assert.equal(gauge(1, 200_000, 10), "▮" + "▯".repeat(9));
-  assert.equal(gauge(199_999, 200_000, 10), "▮".repeat(9) + "▯");
-  assert.equal(gauge(200_000, 200_000, 10), "▮".repeat(10));
-  assert.equal(gauge(100_000, 200_000, 10), "▮".repeat(5) + "▯".repeat(5));
+  assert.equal(gauge(0, 200_000, 10), 0);
+  assert.equal(gauge(1, 200_000, 10), 1);
+  assert.equal(gauge(199_999, 200_000, 10), 9);
+  assert.equal(gauge(200_000, 200_000, 10), 10);
+  assert.equal(gauge(100_000, 200_000, 10), 5);
   // A size we were never told is not a full window and not an empty one.
-  assert.equal(gauge(10, 0, 10), "");
+  assert.equal(gauge(10, 0, 10), 0);
 });
 
 test("tokens abbreviates to the precision anyone reads", () => {

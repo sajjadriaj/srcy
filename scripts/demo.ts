@@ -31,7 +31,7 @@ const SESSION = "srcy-demo";
 
 const CAMERA = "srcy-demo-camera";
 const COLS = Number(process.env.DEMO_COLS ?? 104);
-const ROWS = Number(process.env.DEMO_ROWS ?? 30);
+const ROWS = Number(process.env.DEMO_ROWS ?? 40);
 const OUT = process.env.DEMO_OUT ?? fileURLToPath(new URL("../docs/demo.cast", import.meta.url));
 // Fast enough to catch a panel updating, slow enough that a forty-second
 // recording is a few dozen frames rather than a few hundred.

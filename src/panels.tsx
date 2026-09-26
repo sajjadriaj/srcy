@@ -4,7 +4,7 @@ import { readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Box, Text, render, useInput } from "ink";
-import { PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } from "./cockpit.js";
+import { BAR, PlanBar, gauge, tokens, type MapEntry, type PlanEntry, type Usage } from "./cockpit.js";
 import { HELP_DOCK, HELP_RAIL, KEYS, START, actionFor, byRisk, fileLines, gateText, locationOf, move, riskLine, scopeFor, scrollText, view, type Position, type Side, type ReviewLine, type Scope, type TextView } from "./review.js";
 import { editorArgv, openEditor, yank } from "./editor.js";
 import type { FileDiff } from "./diff.js";
@@ -614,14 +614,22 @@ function useWatch(
 // takes a colour naming where its section's information comes from. The rail
 // stacks four unrelated sources in one narrow column, and "which of these am
 // I looking at" was costing a read of the words every time.
-export function Rule({ label, width, color }: { label: string; width: number; color?: string }): React.JSX.Element {
-  const tail = "─".repeat(Math.max(0, width - label.length - 3));
+export function Rule({ label, width, color, gap = false }: { label: string; width: number; color?: string; gap?: boolean }): React.JSX.Element {
+  // The section's name is bold; whatever follows it (a count, a mode, a
+  // file) is the same colour without the weight, so the eye lands on the
+  // name first.
+  const cut = label.indexOf("  ");
+  const head = cut < 0 ? label : label.slice(0, cut);
+  const rest = cut < 0 ? "" : label.slice(cut);
+  const tail = "\u2500".repeat(Math.max(0, width - label.length - 1));
+  // `gap` is a blank row above: the rail stacks five sections in one narrow
+  // column, and without air between them they read as one long list.
   return (
-    <Box>
-      <Text dimColor>{"─ "}</Text>
+    <Box marginTop={gap ? 1 : 0}>
       <Text color={color} bold>
-        {label}
+        {head}
       </Text>
+      <Text color={color}>{rest}</Text>
       <Text dimColor>{` ${tail}`}</Text>
     </Box>
   );
@@ -940,11 +948,13 @@ export function NarrowUsage({ usage, width }: { usage: Usage | null; width: numb
   // fixed width pushes the counts off the right edge of a narrow rail, and
   // the counts are the half you read — the bar is only there to be glanced
   // at. One cell is held back so an exact fit cannot wrap.
-  const bar = gauge(usage.used, usage.size, Math.max(0, width - text.length - 2));
+  const cells = Math.max(0, width - text.length - 2);
+  const filled = gauge(usage.used, usage.size, cells);
   return (
     <Box>
-      <Text color={color}>{bar}</Text>
-      <Text dimColor>{clipTo(` ${text}`, width - bar.length)}</Text>
+      <Text color={color}>{BAR.repeat(filled)}</Text>
+      <Text dimColor>{BAR.repeat(cells - filled)}</Text>
+      <Text dimColor>{clipTo(` ${text}`, width - cells)}</Text>
     </Box>
   );
 }
@@ -1451,7 +1461,7 @@ export function Rail({
     { isActive: interactive && process.stdin.isTTY === true },
   );
 
-  const budget =
+  const tight =
     height === undefined
       ? undefined
       : mapBudget(
@@ -1462,6 +1472,12 @@ export function Rail({
           2,
           eventRows(s.outside),
         );
+  // A blank row above every section after GOAL, but only when the tree can
+  // spare them: air between sections is worth less than the files it would
+  // push off the rail, and a column taller than its pane overdraws.
+  const gaps = s.outside.length > 0 ? 4 : 3;
+  const airy = tight === undefined || tight - gaps > Math.min(visible.length, 5);
+  const budget = tight === undefined ? undefined : airy ? tight - gaps : tight;
   const view = treeWindow(visible.length, at, Math.max(1, (budget ?? visible.length) - 1));
 
   // Reading order, top to bottom: what you asked for, what the agent means
@@ -1472,9 +1488,9 @@ export function Rail({
     <Box flexDirection="column" height={height}>
       <Rule label={s.task === "" ? "GOAL" : "GOAL  task.md"} width={width} color={AGENT} />
       <GoalLine turn={s.turn} task={s.task} width={width} />
-      <Rule label={planLabel(s.plan)} width={width} color={AGENT} />
+      <Rule gap={airy} label={planLabel(s.plan)} width={width} color={AGENT} />
       <PlanBody entries={s.plan} since={s.doingAt} now={now} />
-      <Rule label={help ? "KEYS" : railLabel(onlyChanged, picked, query, typing)} width={width} color={GIT} />
+      <Rule gap={airy} label={help ? "KEYS" : railLabel(onlyChanged, picked, query, typing)} width={width} color={GIT} />
       {help ? (
         HELP_RAIL.slice(0, Math.max(1, (budget ?? HELP_RAIL.length) - 1)).map((line, i) => (
           <Text key={i} dimColor={!line.startsWith("  ")} bold={!line.startsWith("  ")}>{clipTo(line, width)}</Text>
@@ -1487,6 +1503,7 @@ export function Rail({
         ))
       )}
       <Rule
+        gap={airy}
         label={gatesLabel(s.gates, s.results, s.repo.mark, marks)}
         width={width}
         color={gatesTone(s.gates, s.results, s.repo.mark, marks)}
@@ -1507,7 +1524,7 @@ export function Rail({
       />
       {s.outside.length === 0 ? null : (
         <>
-          <Rule label={eventsLabel(s.outside)} width={width} color={OUTSIDE} />
+          <Rule gap={airy} label={eventsLabel(s.outside)} width={width} color={OUTSIDE} />
           <EventRows events={s.outside} width={width} />
         </>
       )}

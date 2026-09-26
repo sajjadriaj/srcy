@@ -916,7 +916,7 @@ test("the rail draws the project, the plan and the gauge from what is on disk", 
   // The plan and the gauge, read from the transcript.
   assert.match(frame, /fix the expiry/, frame);
   assert.match(frame, /94\.6k|95k/, frame);
-  assert.match(frame, /\u25ae/, frame); // the gauge itself, on the bottom edge
+  assert.match(frame, /\u25ac/, frame); // the gauge itself, on the bottom edge
   assert.doesNotMatch(frame, /CONTEXT/, frame);
   // And nothing wrapped past the pane it was given.
   for (const line of frame.split("\n")) {
@@ -1168,6 +1168,40 @@ test("a reopened session does not pin the dock to last time's file", async (t) =
   t.after(() => unmount());
   await new Promise((r) => setTimeout(r, 400));
   assert.equal((await readShared(session)).file, undefined);
+});
+
+test("the rail puts air between its sections only when the tree can spare it", async (t) => {
+  // A blank row above each section reads tidier, but on a short pane those
+  // rows come out of the tree — and a column taller than its pane overdraws
+  // GOAL off the top. Tall: gaps. Short: none, and GOAL still on screen.
+  const repo = await mkdtemp(join(tmpdir(), "srcy-air-"));
+  const session = `srcy-test-air-${process.pid}`;
+  t.after(async () => {
+    await rm(repo, { recursive: true, force: true });
+    await rm(join(tmpdir(), `${session}.json`), { force: true });
+  });
+  await writeFile(join(repo, "a.ts"), "const a = 1\n");
+  await git(repo, "init", "-q");
+  await git(repo, "config", "user.email", "t@t");
+  await git(repo, "config", "user.name", "t");
+  await git(repo, "add", "-A");
+  await git(repo, "commit", "-qm", "base");
+  await writeFile(join(repo, "a.ts"), "const a = 2\n");
+
+  const frameAt = async (height: number): Promise<string[]> => {
+    const r = render(<Rail cwd={repo} width={30} height={height} session={session} interactive={false} />);
+    await new Promise((res) => setTimeout(res, 400));
+    const lines = (r.lastFrame() ?? "").split("\n");
+    r.unmount();
+    return lines;
+  };
+  const tall = await frameAt(40);
+  const plan = tall.findIndex((l) => l.startsWith("PLAN"));
+  assert.ok(plan > 0 && tall[plan - 1]!.trim() === "", tall.join("\n"));
+  const short = await frameAt(9);
+  assert.ok(short[0]!.startsWith("GOAL"), short.join("\n"));
+  const planShort = short.findIndex((l) => l.startsWith("PLAN"));
+  assert.ok(planShort > 0 && short[planShort - 1]!.trim() !== "", short.join("\n"));
 });
 
 test("an in-place edit re-runs the checker, even though the churn is identical", async (t) => {

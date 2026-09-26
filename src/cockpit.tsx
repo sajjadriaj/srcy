@@ -176,15 +176,6 @@ export function planFrom(raw: unknown): PlanEntry[] {
 export const TOP_LEVEL = "(top level)";
 
 
-// Braille, not the eighth-blocks ramp: every braille pattern is Neutral
-// (see MARK) where ▁▂▃…█ are Ambiguous, and mixing a Neutral empty bucket
-// with Ambiguous filled ones tears the bar the same way it tore the gauge.
-// Four levels instead of eight — the bar answers "where are the edits",
-// which four buckets of height say as well as eight.
-const BLOCKS = " ⣀⣤⣶⣿";
-
-
-
 // Column the outline's counts line up in, as NAME_WIDTH does for the map.
 const OUTLINE_WIDTH = 34;
 
@@ -197,27 +188,23 @@ export const SLOW_MS = 10_000;
 
 const GAUGE_WIDTH = 16;
 
-// Filled and empty segment. Both Neutral, for the reason MARK explains —
-// mixing █ (Ambiguous) with ░ (Neutral) makes the bar change length as it
-// fills, which would slide the percentage beside it sideways.
-const FULL = "▮";
-const EMPTY = "▯";
+// One glyph for both halves of the bar, filled and empty told apart by colour
+// alone. ▬ is Neutral (see MARK), so the bar is the same width in every
+// terminal, and a single glyph drawn edge to edge reads as one solid bar
+// rather than a row of beads.
+export const BAR = "\u25ac";
 
-// gauge is a plain fill bar: how much of the context window is spoken for.
-// Deliberately not the BLOCKS ramp densityBar uses — that one encodes
-// "how much" per column, this one encodes "how far along", and reusing the
-// glyphs would make two different quantities look like the same thing.
-export function gauge(used: number, size: number, width = GAUGE_WIDTH): string {
-  // A caller with no room left asks for zero cells, and the fill below would
-  // round up to one and then repeat the remainder -1 times, which throws.
-  if (size <= 0 || width <= 0) return "";
+// gauge is how many of `width` cells of a plain fill bar are filled: how much
+// of the context window is spoken for.
+export function gauge(used: number, size: number, width = GAUGE_WIDTH): number {
+  if (size <= 0 || width <= 0) return 0;
   const frac = Math.min(1, Math.max(0, used / size));
   // A window with anything in it never reads as empty, and one with room
   // left never reads as full — the two states the reader acts on.
   let filled = Math.round(frac * width);
   if (used > 0 && filled === 0) filled = 1;
   if (frac < 1 && filled === width) filled = width - 1;
-  return FULL.repeat(filled) + EMPTY.repeat(width - filled);
+  return filled;
 }
 
 // tokens abbreviates a count to the precision anyone actually reads.
